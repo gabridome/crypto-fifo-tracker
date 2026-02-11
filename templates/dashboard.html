@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto FIFO Tracker - Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .stat-card h3 {
+            color: #667eea;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 15px;
+        }
+        
+        .stat-card .value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .stat-card .label {
+            color: #666;
+            font-size: 0.9em;
+        }
+        
+        .stat-card.positive .value {
+            color: #10b981;
+        }
+        
+        .stat-card.negative .value {
+            color: #ef4444;
+        }
+        
+        .stat-card.neutral .value {
+            color: #667eea;
+        }
+        
+        .info-section {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+        }
+        
+        .info-section h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        
+        .info-item {
+            padding: 15px;
+            background: #f9fafb;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .info-item .label {
+            font-size: 0.85em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        
+        .info-item .value {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .tax-status {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            margin-top: 20px;
+        }
+        
+        .tax-status h3 {
+            font-size: 1.5em;
+            margin-bottom: 10px;
+        }
+        
+        .tax-status p {
+            font-size: 1.1em;
+            opacity: 0.95;
+        }
+        
+        .footer {
+            text-align: center;
+            color: white;
+            margin-top: 40px;
+            opacity: 0.8;
+        }
+        
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 1.8em;
+            }
+            
+            .stat-card .value {
+                font-size: 2em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Crypto FIFO Tracker</h1>
+            <p>Portuguese Tax Dashboard - Year 2024</p>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card neutral">
+                <h3>Current Balance</h3>
+                <div class="value">{{ balance|round(4) }}</div>
+                <div class="label">BTC</div>
+            </div>
+            
+            <div class="stat-card negative">
+                <h3>BTC Sold (2024)</h3>
+                <div class="value">{{ btc_sold|round(2) }}</div>
+                <div class="label">Total Sold</div>
+            </div>
+            
+            <div class="stat-card">
+                <h3>Total Sales</h3>
+                <div class="value">{{ sales_2024|int }}</div>
+                <div class="label">Transactions</div>
+            </div>
+            
+            <div class="stat-card positive">
+                <h3>Total Proceeds</h3>
+                <div class="value">€{{ (proceeds/1000000)|round(1) }}M</div>
+                <div class="label">EUR</div>
+            </div>
+            
+            <div class="stat-card">
+                <h3>Cost Basis</h3>
+                <div class="value">€{{ (cost_basis/1000)|round(0)|int }}K</div>
+                <div class="label">EUR</div>
+            </div>
+            
+            <div class="stat-card positive">
+                <h3>Capital Gain</h3>
+                <div class="value">€{{ (gain_loss/1000000)|round(1) }}M</div>
+                <div class="label">Total Gain</div>
+            </div>
+        </div>
+        
+        <div class="info-section">
+            <h2>📊 Tax Classification</h2>
+            <div class="info-grid">
+                <div class="info-item">
+                    <div class="label">Long-term (≥1 year)</div>
+                    <div class="value">{{ long_term_count|int }}</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">Short-term (<1 year)</div>
+                    <div class="value">{{ short_term_count|int }}</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">Long-term %</div>
+                    <div class="value">{{ long_term_pct|round(1) }}%</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">Avg Holding Period</div>
+                    <div class="value">{{ avg_holding_days|int }} days</div>
+                </div>
+            </div>
+            
+            <div class="tax-status">
+                <h3>🇵🇹 Portugal Tax Status</h3>
+                {% if long_term_pct >= 100 %}
+                <p>✅ 100% TAX EXEMPT - All gains held ≥1 year!</p>
+                {% elif long_term_pct >= 90 %}
+                <p>⚠️ Mostly tax exempt ({{ long_term_pct|round(1) }}% long-term)</p>
+                {% else %}
+                <p>⚠️ Mixed classification - {{ short_term_pct|round(1) }}% subject to tax</p>
+                {% endif %}
+            </div>
+        </div>
+        
+        <div class="info-section">
+            <h2>📈 Market Performance</h2>
+            <div class="info-grid">
+                <div class="info-item">
+                    <div class="label">Average Sale Price</div>
+                    <div class="value">€{{ (avg_sale_price/1000)|round(0)|int }}K</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">Average Purchase Price</div>
+                    <div class="value">€{{ avg_purchase_price|round(0)|int }}</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">ROI</div>
+                    <div class="value">{{ roi|round(0)|int }}%</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">Gain per BTC</div>
+                    <div class="value">€{{ (gain_per_btc/1000)|round(0)|int }}K</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>🔒 Data from: crypto_fifo.db | Last updated: {{ now.strftime('%Y-%m-%d %H:%M:%S') }} WET</p>
+            <p>⚠️ For tax filing purposes only. Not financial advice.</p>
+        </div>
+    </div>
+</body>
+</html>
