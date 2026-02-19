@@ -130,7 +130,7 @@ See `CONTRIBUTING.md` for details on adding a new country or exchange.
 | [Crypto-to-crypto](doc/en/crypto_to_crypto_guide.md) | Handling swaps (BTC→ETH, stablecoins) |
 | [Audit trail](doc/en/audit_trail_guide.md) | Compliance, backups, data retention |
 | [macOS setup](doc/en/macos_sqlite_setup_guide.md) | Setup from scratch on macOS |
-| [Exchange CSV downloads](doc/en/how_reports.md) | How to download data from each exchange |
+| [Exchange CSV downloads](doc/en/howto_obtain_logs.md) | How to download data from each exchange |
 | [Portuguese tax resources](doc/pt/recursos_fiscais.md) | Legislation, AT guides, deadlines |
 
 ## Requirements

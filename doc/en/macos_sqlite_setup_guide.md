@@ -182,7 +182,7 @@ For Mt.Gox, TRT and other closed exchanges: use archived CSV files.
 
 Also download the **ECB rates** and save as `data/eurusd.csv`.
 
-More information on how to download exchange logs can be found in `how_reports.md`.
+More information on how to download exchange logs can be found in `howto_obtain_logs.md`.
 
 ---
 

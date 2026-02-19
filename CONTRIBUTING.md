@@ -15,7 +15,7 @@ Each exchange has its own importer script in `importers/`. To add a new one:
    - `fee_amount` = fee stored separately
 4. **Implement** the DELETE + reimport pattern (ask user before deleting)
 5. **Add** a verification step at the end (transaction counts, totals)
-6. **Document** the CSV download instructions in `doc/how_reports.md`
+6. **Document** the CSV download instructions in `doc/howto_obtain_logs.md`
 7. **Test** with sample data
 
 Key rules for importers:

@@ -129,7 +129,7 @@ Consulte `CONTRIBUTING.md` para detalhes sobre como adicionar uma nova exchange 
 | [Cripto-para-cripto](crypto_to_crypto_guide.md) | Swaps (BTC→ETH, stablecoins) |
 | [Trilha de auditoria](audit_trail_guide.md) | Conformidade, cópias de segurança, retenção de dados |
 | [Configuração macOS](macos_sqlite_setup_guide.md) | Configuração de raiz no macOS |
-| [Download CSV exchanges](how_reports.md) | Como descarregar dados de cada exchange |
+| [Download CSV exchanges](howto_obtain_logs.md) | Como descarregar dados de cada exchange |
 | [Recursos fiscais PT](recursos_fiscais.md) | Legislação, guias da AT, prazos |
 
 ## Requisitos

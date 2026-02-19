@@ -609,7 +609,7 @@ def main():
     write_detail(wb.create_sheet(), year, sales)
 
     project_dir = os.path.dirname(os.path.abspath(db_path))
-    output_dir = os.path.join(project_dir, 'data', 'reports')
+    output_dir = os.path.join(project_dir, 'reports')
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, f'IRS_Crypto_FIFO_{year}.xlsx')
     wb.save(output_file)

@@ -140,7 +140,7 @@ Editar `config.py` se necessário:
 
 ## Passo 8 — Preparar os dados
 
-1. **Descarregar CSVs** das exchanges (ver [guia de download](how_reports.md))
+1. **Descarregar CSVs** das exchanges (ver [guia de download](howto_obtain_logs.md))
 2. **Colocar** os ficheiros na pasta `data/`
 3. **Descarregar** o ficheiro de taxas BCE (`eurusd.csv`) e colocá-lo em `data/`
 
