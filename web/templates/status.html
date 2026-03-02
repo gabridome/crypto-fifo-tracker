@@ -1,0 +1,585 @@
+{% extends "base.html" %}
+{% block title %}Status — FIFO Tracker{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>③ Import Status</h2>
+  <p class="desc">Mirror comparison: same metrics extracted from the CSV file and from the database, side by side. Focus on anomalies.</p>
+</div>
+
+<!-- ECB Rate File Check -->
+<div class="eurusd-panel eurusd-{{ 'ok' if eurusd.ok else ('warn' if eurusd.exists else 'error') }}">
+  <div class="eurusd-header">
+    <span class="eurusd-icon">
+      {% if eurusd.ok %}✓{% elif eurusd.exists %}⚠{% else %}✗{% endif %}
+    </span>
+    <span class="eurusd-title">ECB Exchange Rate File</span>
+    <span class="mono dim" style="font-size:0.72rem">eurusd.csv</span>
+  </div>
+  <div class="eurusd-body">
+    {% if not eurusd.exists %}
+      <div class="eurusd-alert eurusd-alert-error">
+        <strong>File missing:</strong> <code>data/eurusd.csv</code> not found.
+        This file is required to convert USD prices to EUR for exchanges like Bitfinex, Kraken, Coinbase Prime, Mt.Gox.
+        Download it from the ECB or run the rate fetcher script.
+      </div>
+    {% else %}
+      <div class="eurusd-stats">
+        <span><strong>Rows:</strong> <span class="mono">{{ eurusd.rows|fmt_num }}</span></span>
+        <span><strong>Coverage:</strong> <span class="mono">{{ eurusd.min_date }} → {{ eurusd.max_date }}</span></span>
+        <span><strong>Last rate:</strong>
+          {% if eurusd.age_days is not none %}
+            <span class="mono {% if eurusd.age_days > 30 %}yellow{% elif eurusd.age_days > 7 %}{% else %}green{% endif %}">
+              {{ eurusd.age_days }} days ago
+            </span>
+            {% if eurusd.needs_update %}
+              <span class="badge badge-yellow" style="margin-left:0.3rem">Update recommended</span>
+            {% endif %}
+          {% endif %}
+        </span>
+      </div>
+
+      {% if eurusd.gaps %}
+      <div class="eurusd-alert eurusd-alert-warning" style="margin-top:0.75rem">
+        <strong>Coverage gaps detected:</strong> These exchange CSV files have dates outside the eurusd.csv range.
+        Importing them will produce incorrect EUR values for the uncovered period.
+      </div>
+      <table class="eurusd-gap-table">
+        <thead>
+          <tr>
+            <th>Exchange</th>
+            <th>CSV file</th>
+            <th>CSV date range</th>
+            <th>Problem</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for g in eurusd.gaps %}
+          <tr>
+            <td style="font-weight:600">{{ g.exchange }}</td>
+            <td class="mono dim" style="font-size:0.72rem">{{ g.get('file', '—') }}</td>
+            <td class="mono">{{ g.get('csv_range', '—') }}</td>
+            <td class="reason-warning" style="font-size:0.75rem">{{ g.problem }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+
+{% if comparisons %}
+
+{% for c in comparisons %}
+<div class="exchange-block">
+  <!-- Exchange header -->
+  <div class="ex-header ex-{{ c.status }}">
+    <div class="ex-name">
+      <span class="ex-icon">
+        {% if c.status == 'ok' %}✓
+        {% elif c.status == 'close' %}≈
+        {% elif c.status == 'mismatch' %}✗
+        {% elif c.status == 'not-imported' %}📄
+        {% elif c.status == 'db-only' %}🗄
+        {% endif %}
+      </span>
+      {{ c.exchange }}
+    </div>
+    <div class="ex-meta">
+      {% if c.csv_files %}
+        <span class="mono" style="font-size:0.7rem; color:var(--text-dim)">{{ c.csv_files }}</span>
+      {% endif %}
+      {% if c.status == 'ok' %}
+        <span class="badge badge-green">Match</span>
+      {% elif c.status == 'close' %}
+        <span class="badge badge-yellow">Close</span>
+      {% elif c.status == 'mismatch' %}
+        <span class="badge badge-red">Mismatch</span>
+      {% elif c.status == 'not-imported' %}
+        <span class="badge badge-yellow">Not imported</span>
+      {% elif c.status == 'db-only' %}
+        <span class="badge badge-dim">DB only — no CSV</span>
+      {% endif %}
+      {% if c.parse_errors > 0 %}
+        <span class="badge badge-yellow">{{ c.parse_errors }} parse errors</span>
+      {% endif %}
+    </div>
+    <div class="ex-actions">
+      {% if c.has_importer and c.csv_files %}
+        <form action="{{ url_for('run_import', exchange_name=c.exchange) }}" method="post" style="display:inline"
+              onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Running...';">
+          {% if c.status == 'not-imported' %}
+            <button type="submit" class="btn btn-primary btn-sm">▶ Import</button>
+          {% else %}
+            <button type="submit" class="btn btn-sm btn-success">↻ Re-import</button>
+          {% endif %}
+        </form>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Metrics table — symmetric -->
+  <div class="ex-table">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:25%">Metric</th>
+          <th style="width:28%; text-align:right">
+            <span class="source-label csv-label">CSV file</span>
+          </th>
+          <th style="width:28%; text-align:right">
+            <span class="source-label db-label">Database</span>
+          </th>
+          <th style="width:19%; text-align:center">Delta</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in c.metrics %}
+        <tr class="metric-{{ m.cls }}">
+          <td class="metric-label">{{ m.label }}</td>
+          <td class="mono right">
+            {% if m.csv is none %}
+              <span class="dim">—</span>
+            {% elif m.fmt == 'eur' %}
+              €{{ "%.2f"|format(m.csv) }}
+            {% elif m.fmt == 'int' %}
+              {{ m.csv|fmt_num }}
+            {% else %}
+              {{ m.csv }}
+            {% endif %}
+          </td>
+          <td class="mono right">
+            {% if m.db is none %}
+              <span class="dim">—</span>
+            {% elif m.fmt == 'eur' %}
+              €{{ "%.2f"|format(m.db) }}
+            {% elif m.fmt == 'int' %}
+              {{ m.db|fmt_num }}
+            {% else %}
+              {{ m.db }}
+            {% endif %}
+          </td>
+          <td class="mono" style="text-align:center">
+            {% if m.csv is not none and m.db is not none %}
+              {% if m.fmt == 'int' %}
+                {% set diff = m.csv - m.db %}
+                {% if diff == 0 %}
+                  <span class="delta-ok">✓</span>
+                {% elif diff > 0 %}
+                  <span class="delta-pos">+{{ diff|fmt_num }}</span>
+                {% else %}
+                  <span class="delta-neg">{{ diff|fmt_num }}</span>
+                {% endif %}
+              {% elif m.fmt == 'eur' %}
+                {% set diff = m.csv - m.db %}
+                {% if diff|abs < 0.01 %}
+                  <span class="delta-ok">✓</span>
+                {% elif diff > 0 %}
+                  <span class="delta-pos">+€{{ "%.2f"|format(diff) }}</span>
+                {% else %}
+                  <span class="delta-neg">-€{{ "%.2f"|format(diff|abs) }}</span>
+                {% endif %}
+              {% elif m.fmt == 'str' %}
+                {% if m.csv == m.db %}
+                  <span class="delta-ok">✓</span>
+                {% else %}
+                  <span class="delta-neg">≠</span>
+                {% endif %}
+              {% endif %}
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  <!-- Unmatched records -->
+  {% if c.unmatched_errors or c.unmatched_warnings %}
+  <div class="unmatched-section">
+    <div class="unmatched-header">
+      <span class="unmatched-title">
+        {% set err_count = c.unmatched_errors|length %}
+        {% set warn_count = c.unmatched_warnings|length %}
+        {% if err_count > 0 %}
+          <span class="badge badge-red">{{ err_count }} unmatched</span>
+        {% endif %}
+        {% if warn_count > 0 %}
+          <span class="badge badge-yellow">{{ warn_count }} new/changed</span>
+        {% endif %}
+        {% if c.matched_count > 0 %}
+          <span class="badge badge-green">{{ c.matched_count }} matched</span>
+        {% endif %}
+        {% if c.unmatched_infos|length > 0 %}
+          <span class="badge badge-dim">{{ c.unmatched_infos|length }} filtered (expected)</span>
+        {% endif %}
+      </span>
+    </div>
+
+    <table class="unmatched-table">
+      <thead>
+        <tr>
+          <th>Line</th>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Pair</th>
+          <th>Amount</th>
+          <th>Value</th>
+          <th>Diagnosis</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in c.unmatched_errors %}
+        <tr class="sev-error">
+          <td class="mono dim">{{ r.line }}</td>
+          <td class="mono">{{ r.date or r.date_str or '—' }}</td>
+          <td>
+            {% if r.type == 'BUY' %}<span class="badge badge-green">BUY</span>
+            {% elif r.type == 'SELL' %}<span class="badge badge-red">SELL</span>
+            {% else %}<span class="badge badge-dim">{{ r.type_raw }}</span>{% endif %}
+          </td>
+          <td class="mono dim">{{ r.pair or '—' }}</td>
+          <td class="mono right">{{ "%.8f"|format(r.amount) }}</td>
+          <td class="mono right">{% if r.value > 0 %}€{{ "%.2f"|format(r.value) }}{% else %}—{% endif %}</td>
+          <td class="diagnosis diagnosis-error">{{ r.reason }}</td>
+        </tr>
+        {% endfor %}
+        {% for r in c.unmatched_warnings %}
+        <tr class="sev-warning">
+          <td class="mono dim">{{ r.line }}</td>
+          <td class="mono">{{ r.date or r.date_str or '—' }}</td>
+          <td>
+            {% if r.type == 'BUY' %}<span class="badge badge-green">BUY</span>
+            {% elif r.type == 'SELL' %}<span class="badge badge-red">SELL</span>
+            {% else %}<span class="badge badge-dim">{{ r.type_raw }}</span>{% endif %}
+          </td>
+          <td class="mono dim">{{ r.pair or '—' }}</td>
+          <td class="mono right">{{ "%.8f"|format(r.amount) }}</td>
+          <td class="mono right">{% if r.value > 0 %}€{{ "%.2f"|format(r.value) }}{% else %}—{% endif %}</td>
+          <td class="diagnosis diagnosis-warning">{{ r.reason }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% if c.unmatched_infos|length > 0 %}
+    <details class="info-toggle">
+      <summary class="mono dim" style="padding:0.5rem 1rem; font-size:0.72rem; cursor:pointer">
+        Show {{ c.unmatched_infos|length }} filtered rows (deposits, non-EUR pairs, etc.)
+      </summary>
+      <table class="unmatched-table">
+        <tbody>
+          {% for r in c.unmatched_infos %}
+          <tr class="sev-info">
+            <td class="mono dim" style="width:5%">{{ r.line }}</td>
+            <td class="mono" style="width:14%">{{ r.date or '—' }}</td>
+            <td style="width:7%"><span class="badge badge-dim">{{ r.type_raw }}</span></td>
+            <td class="mono dim" style="width:10%">{{ r.pair or '—' }}</td>
+            <td class="mono right" style="width:14%">{{ "%.8f"|format(r.amount) }}</td>
+            <td class="mono right" style="width:12%">{% if r.value > 0 %}€{{ "%.2f"|format(r.value) }}{% else %}—{% endif %}</td>
+            <td class="diagnosis diagnosis-info" style="width:38%">{{ r.reason }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% endif %}
+  </div>
+  {% elif c.matched_count > 0 %}
+  <div class="unmatched-section" style="padding:0.6rem 1rem;">
+    <span class="badge badge-green">{{ c.matched_count }} matched</span>
+    <span class="dim" style="font-size:0.75rem; margin-left:0.5rem">All trade rows in CSV found in database</span>
+    {% if c.unmatched_infos|length > 0 %}
+    <span class="badge badge-dim" style="margin-left:0.5rem">{{ c.unmatched_infos|length }} non-trade rows filtered (expected)</span>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+
+<div class="status-notes">
+  <strong>How to read:</strong> Each exchange shows the same metrics extracted from the CSV and from the database.
+  <strong>Delta &gt; 0</strong> means the CSV has more data than the DB — likely new records to import.
+  <strong>Delta &lt; 0</strong> is unusual — check if the CSV was replaced with a shorter file.
+  Value differences (EUR) can be normal if the importer applies USD→EUR conversion, filters specific pairs, or recalculates fees.
+  Focus on <strong>counts</strong> and <strong>dates</strong> as primary anomaly indicators.
+</div>
+
+{% else %}
+<div class="empty-state">
+  <div class="icon">📊</div>
+  <p>No data to compare yet<br>Go to <a href="{{ url_for('collect') }}" style="color:var(--accent)">Collect</a> and <a href="{{ url_for('import_page') }}" style="color:var(--accent)">Import</a> first</p>
+</div>
+{% endif %}
+
+<div style="margin-top:2rem; padding-top:1.5rem; border-top:1px solid var(--border); display:flex; justify-content:space-between;">
+  <a href="{{ url_for('import_page') }}" class="btn">← Import</a>
+  <a href="{{ url_for('fifo') }}" class="btn btn-primary">Next: Calculate FIFO →</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+  .exchange-block {
+    margin-bottom: 1.5rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+
+  .ex-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.85rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+
+  .ex-header.ex-ok           { border-left: 4px solid var(--green); }
+  .ex-header.ex-close         { border-left: 4px solid var(--yellow); }
+  .ex-header.ex-mismatch      { border-left: 4px solid var(--red); }
+  .ex-header.ex-not-imported  { border-left: 4px solid var(--yellow); }
+  .ex-header.ex-db-only       { border-left: 4px solid var(--text-muted); }
+
+  .ex-name {
+    font-weight: 700;
+    font-size: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 140px;
+  }
+
+  .ex-icon { font-size: 1.1rem; }
+
+  .ex-meta {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .ex-actions { flex-shrink: 0; }
+
+  .ex-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+
+  .ex-table thead th {
+    background: var(--surface2);
+    padding: 0.5rem 1rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .ex-table tbody td {
+    padding: 0.45rem 1rem;
+    border-bottom: 1px solid rgba(42,46,66,0.5);
+  }
+
+  .ex-table tbody tr:last-child td { border-bottom: none; }
+
+  .metric-label {
+    font-weight: 500;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
+
+  .metric-match td { }
+  .metric-close td { background: var(--yellow-bg); }
+  .metric-mismatch td { background: var(--red-bg); }
+
+  .source-label {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .csv-label {
+    background: rgba(91,127,255,0.12);
+    color: var(--accent);
+  }
+
+  .db-label {
+    background: rgba(52,211,153,0.1);
+    color: var(--green);
+  }
+
+  .delta-ok  { color: var(--green); }
+  .delta-pos { color: var(--yellow); font-weight: 600; }
+  .delta-neg { color: var(--red); font-weight: 600; }
+
+  .status-notes {
+    margin-top: 1.5rem;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    line-height: 1.7;
+    padding: 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  /* Unmatched records */
+  .unmatched-section {
+    border-top: 1px solid var(--border);
+  }
+
+  .unmatched-header {
+    padding: 0.6rem 1rem;
+    background: var(--surface2);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .unmatched-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .unmatched-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+  }
+
+  .unmatched-table thead th {
+    padding: 0.35rem 0.75rem;
+    text-align: left;
+    font-size: 0.6rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .unmatched-table tbody td {
+    padding: 0.3rem 0.75rem;
+    border-bottom: 1px solid rgba(42,46,66,0.4);
+    vertical-align: middle;
+  }
+
+  .unmatched-table tbody tr:last-child td { border-bottom: none; }
+
+  tr.sev-error   { background: var(--red-bg); }
+  tr.sev-warning { background: var(--yellow-bg); }
+  tr.sev-info    { background: transparent; }
+
+  .diagnosis {
+    font-size: 0.72rem;
+    line-height: 1.4;
+  }
+
+  .diagnosis-error   { color: var(--red); }
+  .diagnosis-warning { color: var(--yellow); }
+  .diagnosis-info    { color: var(--text-dim); font-style: italic; }
+
+  .info-toggle {
+    border-top: 1px solid rgba(42,46,66,0.4);
+  }
+
+  .info-toggle summary:hover {
+    color: var(--text);
+  }
+
+  /* ECB Rate File Panel */
+  .eurusd-panel {
+    margin-bottom: 2rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+
+  .eurusd-panel.eurusd-ok   { border-left: 4px solid var(--green); }
+  .eurusd-panel.eurusd-warn { border-left: 4px solid var(--yellow); }
+  .eurusd-panel.eurusd-error { border-left: 4px solid var(--red); }
+
+  .eurusd-header {
+    padding: 0.75rem 1.1rem;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .eurusd-icon { font-size: 1.1rem; }
+  .eurusd-title { font-weight: 700; font-size: 0.9rem; }
+
+  .eurusd-body { padding: 0.85rem 1.1rem; }
+
+  .eurusd-stats {
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+  }
+
+  .eurusd-alert {
+    font-size: 0.8rem;
+    padding: 0.6rem 0.85rem;
+    border-radius: 6px;
+    line-height: 1.5;
+  }
+
+  .eurusd-alert-error {
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
+    color: var(--red);
+  }
+
+  .eurusd-alert-warning {
+    background: var(--yellow-bg);
+    border: 1px solid var(--yellow-border);
+    color: var(--yellow);
+  }
+
+  .eurusd-gap-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+    margin-top: 0.5rem;
+  }
+
+  .eurusd-gap-table thead th {
+    padding: 0.35rem 0.75rem;
+    text-align: left;
+    font-size: 0.6rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .eurusd-gap-table tbody td {
+    padding: 0.35rem 0.75rem;
+    border-bottom: 1px solid rgba(42,46,66,0.4);
+  }
+
+  .eurusd-gap-table tbody tr:last-child td { border-bottom: none; }
+
+  .reason-warning { color: var(--yellow); }
+</style>
+{% endblock %}

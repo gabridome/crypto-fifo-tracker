@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Reports — FIFO Tracker{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>⑤ Reports & Statistics</h2>
+  <p class="desc">Database overview, per-exchange statistics, and IRS report generation.</p>
+</div>
+
+{% if not db_exists %}
+<div class="flash flash-error">✗ Database not found. Run setup.sh first.</div>
+{% else %}
+
+<!-- Summary cards -->
+{% if stats.tx_count %}
+<div class="cards">
+  <div class="card">
+    <div class="label">Total transactions</div>
+    <div class="value accent">{{ stats.tx_count|fmt_num }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Exchanges</div>
+    <div class="value accent">{{ stats.exchange_count }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Cryptocurrencies</div>
+    <div class="value accent">{{ stats.crypto_count }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Date range</div>
+    <div class="value" style="font-size:1rem">{{ stats.date_range[0][:10] if stats.date_range[0] else '—' }}</div>
+    <div class="detail">→ {{ stats.date_range[1][:10] if stats.date_range[1] else '—' }}</div>
+  </div>
+</div>
+
+<!-- Per-exchange table -->
+{% if stats.exchanges %}
+<div class="section">
+  <div class="section-title">📊 Per-exchange summary</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Exchange</th>
+          <th>Total</th>
+          <th>Buy</th>
+          <th>Sell</th>
+          <th>Buy value</th>
+          <th>Sell value</th>
+          <th>Total fees</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in stats.exchanges %}
+        <tr>
+          <td style="font-weight:600">{{ e.exchange_name }}</td>
+          <td class="mono right">{{ e.total|fmt_num }}</td>
+          <td class="mono right">{{ e.buys|fmt_num }}</td>
+          <td class="mono right">{{ e.sells|fmt_num }}</td>
+          <td class="mono right">{{ e.buy_val|fmt_eur }}</td>
+          <td class="mono right">{{ e.sell_val|fmt_eur }}</td>
+          <td class="mono right dim">{{ e.fees|fmt_eur }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+
+<!-- Generate IRS report -->
+<div class="section">
+  <div class="section-title">🇵🇹 Generate IRS Report</div>
+  {% if available_years %}
+  <p class="desc" style="margin-bottom:1rem">Generate the Excel report for the Portuguese tax filing (Anexo G1 + Anexo J).</p>
+  <div style="display:flex; gap:0.75rem; flex-wrap:wrap">
+    {% for year in available_years %}
+    <form action="{{ url_for('generate_report', year=year) }}" method="post" style="display:inline"
+          onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Generating...';">
+      <button type="submit" class="btn btn-primary">
+        📄 Generate {{ year }}
+      </button>
+    </form>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="dim" style="font-size:0.85rem">No FIFO sale data found. Run the FIFO calculation first.</p>
+  {% endif %}
+</div>
+
+<!-- Existing reports -->
+{% if existing_reports %}
+<div class="section">
+  <div class="section-title">📁 Generated reports</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Size</th>
+          <th>Generated</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in existing_reports %}
+        <tr>
+          <td class="mono">{{ r.filename }}</td>
+          <td class="mono dim">{{ r.size|fmt_size }}</td>
+          <td class="mono dim">{{ r.modified.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td>
+            <a href="{{ url_for('download_report', filename=r.filename) }}" class="btn btn-sm btn-success">
+              ⬇ Download
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% endif %}
+
+<div style="margin-top:2rem; padding-top:1.5rem; border-top:1px solid var(--border); display:flex; justify-content:space-between;">
+  <a href="{{ url_for('fifo') }}" class="btn">← FIFO</a>
+  <a href="{{ url_for('manual') }}" class="btn">Manual Entry →</a>
+</div>
+{% endblock %}

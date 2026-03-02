@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block title %}Manual Entry — FIFO Tracker{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>✎ Manual Transaction Entry</h2>
+  <p class="desc">Add transactions manually — for OTC purchases, family office acquisitions, gifts, airdrops, or any transaction not covered by exchange CSV exports.</p>
+</div>
+
+{% if not db_exists %}
+<div class="flash flash-error">✗ Database not found. Run setup.sh first.</div>
+{% else %}
+
+<!-- Entry form -->
+<div class="card" style="margin-bottom:2rem; max-width:800px">
+  <div class="label" style="margin-bottom:1rem; font-size:0.8rem">New transaction</div>
+  <form action="{{ url_for('manual_add') }}" method="post" id="manual-form">
+    <div class="form-row">
+      <div class="form-group">
+        <label>Date & time</label>
+        <input type="datetime-local" name="date" class="form-control" required
+               value="{{ now.strftime('%Y-%m-%dT%H:%M') if now is defined else '' }}">
+      </div>
+      <div class="form-group">
+        <label>Type</label>
+        <select name="type" class="form-control" required>
+          <option value="BUY">BUY</option>
+          <option value="SELL">SELL</option>
+          <option value="DEPOSIT">DEPOSIT</option>
+          <option value="WITHDRAWAL">WITHDRAWAL</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Exchange / source</label>
+        <input type="text" name="exchange" class="form-control" required
+               placeholder="e.g. OTC, Family Office, Gift"
+               list="exchange-list">
+        <datalist id="exchange-list">
+          <option value="OTC">
+          <option value="Family Office">
+          <option value="Gift">
+          <option value="Airdrop">
+          <option value="Fork">
+          <option value="Mining">
+          <option value="Binance">
+          <option value="Coinbase">
+          <option value="Bitstamp">
+          <option value="Kraken">
+          <option value="Revolut">
+        </datalist>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Cryptocurrency</label>
+        <input type="text" name="crypto" class="form-control" required
+               placeholder="BTC" value="BTC"
+               list="crypto-list" style="text-transform:uppercase">
+        <datalist id="crypto-list">
+          <option value="BTC">
+          <option value="ETH">
+          <option value="USDC">
+          <option value="USDT">
+        </datalist>
+      </div>
+      <div class="form-group">
+        <label>Amount</label>
+        <input type="number" name="amount" class="form-control" required
+               step="0.00000001" min="0" placeholder="0.00000000">
+      </div>
+      <div class="form-group">
+        <label>Price per unit (€)</label>
+        <input type="number" name="price" class="form-control" required
+               step="0.01" min="0" placeholder="0.00"
+               oninput="updateTotal()">
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Fee (€)</label>
+        <input type="number" name="fee" class="form-control"
+               step="0.01" min="0" value="0" placeholder="0.00">
+      </div>
+      <div class="form-group">
+        <label>Total value (auto)</label>
+        <input type="text" id="total-display" class="form-control" disabled
+               placeholder="amount × price" style="color:var(--text-dim)">
+      </div>
+      <div class="form-group">
+        <label>Notes</label>
+        <input type="text" name="notes" class="form-control"
+               placeholder="e.g. Family office purchase, OTC deal">
+      </div>
+    </div>
+
+    <div style="margin-top:1.25rem; display:flex; gap:0.75rem;">
+      <button type="submit" class="btn btn-primary">➕ Add transaction</button>
+      <button type="reset" class="btn" onclick="document.getElementById('total-display').value=''">Clear</button>
+    </div>
+  </form>
+</div>
+
+<!-- Recent transactions -->
+<div class="section">
+  <div class="section-title">📋 Recent transactions (last 20)</div>
+  {% if recent %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Exchange</th>
+          <th>Crypto</th>
+          <th>Amount</th>
+          <th>Price/unit</th>
+          <th>Total</th>
+          <th>Fee</th>
+          <th>Notes</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for tx in recent %}
+        <tr>
+          <td class="mono dim">{{ tx.id }}</td>
+          <td class="mono" style="font-size:0.75rem">{{ tx.transaction_date[:16] }}</td>
+          <td>
+            {% if tx.transaction_type == 'BUY' %}
+              <span class="badge badge-green">BUY</span>
+            {% elif tx.transaction_type == 'SELL' %}
+              <span class="badge badge-red">SELL</span>
+            {% else %}
+              <span class="badge badge-dim">{{ tx.transaction_type }}</span>
+            {% endif %}
+          </td>
+          <td>{{ tx.exchange_name }}</td>
+          <td class="mono">{{ tx.cryptocurrency }}</td>
+          <td class="mono right">{{ "%.8f"|format(tx.amount) }}</td>
+          <td class="mono right">€{{ "%.2f"|format(tx.price_per_unit or 0) }}</td>
+          <td class="mono right">€{{ "%.2f"|format(tx.total_value or 0) }}</td>
+          <td class="mono right dim">€{{ "%.2f"|format(tx.fee_amount or 0) }}</td>
+          <td class="dim" style="font-size:0.72rem; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap"
+              title="{{ tx.notes or '' }}">
+            {{ tx.notes or '' }}
+          </td>
+          <td>
+            <form action="{{ url_for('manual_delete', tx_id=tx.id) }}" method="post" style="display:inline"
+                  onsubmit="return confirm('Delete transaction #{{ tx.id }}?')">
+              <button type="submit" class="btn btn-danger btn-sm">✗</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="icon">📝</div>
+    <p>No transactions yet</p>
+  </div>
+  {% endif %}
+</div>
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function updateTotal() {
+    const amount = parseFloat(document.querySelector('[name="amount"]').value) || 0;
+    const price = parseFloat(document.querySelector('[name="price"]').value) || 0;
+    const total = amount * price;
+    document.getElementById('total-display').value = total > 0 ? '€' + total.toFixed(2) : '';
+  }
+  document.querySelector('[name="amount"]')?.addEventListener('input', updateTotal);
+  document.querySelector('[name="price"]')?.addEventListener('input', updateTotal);
+</script>
+{% endblock %}
