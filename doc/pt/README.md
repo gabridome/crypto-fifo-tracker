@@ -28,8 +28,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install flask pandas pytz openpyxl requests
 
-# Gerar 900 transações demo e criar a base de dados demo
-python3 generate_demo_data.py
+# Gerar dados demo, importar e calcular FIFO — tudo num único passo
 python3 setup_demo.py
 
 # Lançar a interface web com a base de dados demo

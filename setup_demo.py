@@ -36,13 +36,17 @@ def main():
         print(f"\n✗ Schema file not found: {SCHEMA_FILE}")
         sys.exit(1)
 
-    if not DEMO_CSVS:
+    # Step 0: Generate demo CSV files
+    print(f"\n[0/4] Generating demo CSV data...")
+    from generate_demo_data import main as generate_main
+    generate_main()
+
+    # Re-scan after generation
+    demo_csvs = sorted(glob.glob(os.path.join(PROJECT_ROOT, 'data', 'DEMO_*.csv')))
+
+    if not demo_csvs:
         print(f"\n✗ No DEMO_*.csv files found in data/")
         sys.exit(1)
-
-    print(f"\nDemo CSV files found:")
-    for f in DEMO_CSVS:
-        print(f"  {os.path.basename(f)}")
 
     # Remove old demo DB
     if os.path.exists(DEMO_DB):
@@ -50,7 +54,7 @@ def main():
         print(f"\n  Removed old demo database")
 
     # Create schema
-    print(f"\n[1/3] Creating database schema...")
+    print(f"\n[1/4] Creating database schema...")
     conn = sqlite3.connect(DEMO_DB)
     with open(SCHEMA_FILE, 'r') as f:
         conn.executescript(f.read())
@@ -62,11 +66,11 @@ def main():
     env['FIFO_DB'] = DEMO_DB
 
     # Import demo CSVs
-    print(f"\n[2/3] Importing demo data...")
+    print(f"\n[2/4] Importing demo data...")
     importer = os.path.join(PROJECT_ROOT, 'importers', 'import_standard_csv.py')
     total_imported = 0
 
-    for csv_file in DEMO_CSVS:
+    for csv_file in demo_csvs:
         basename = os.path.basename(csv_file)
         print(f"\n  Importing {basename}...")
         result = subprocess.run(
@@ -91,7 +95,7 @@ def main():
     print(f"\n  ✓ Imported {total_imported} files")
 
     # Run FIFO calculation
-    print(f"\n[3/3] Calculating FIFO lots...")
+    print(f"\n[3/4] Calculating FIFO lots...")
     fifo_script = os.path.join(PROJECT_ROOT, 'calculators', 'calculate_fifo.py')
     result = subprocess.run(
         [sys.executable, fifo_script],
@@ -113,6 +117,7 @@ def main():
             print(f"    {line.strip()}")
 
     # Verify
+    print(f"\n[4/4] Verifying...")
     conn = sqlite3.connect(DEMO_DB)
     tx_count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
     lot_count = conn.execute("SELECT COUNT(*) FROM fifo_lots").fetchone()[0]
