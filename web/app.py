@@ -42,7 +42,9 @@ except ImportError:
     EXEMPT_HOLDING_DAYS = 365
     SHORT_TERM_RATE = 0.28
 
-DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
+# DATA_DIR follows the database location: if FIFO_DB points to demo/,
+# we serve CSV files from demo/ instead of data/
+DATA_DIR = os.path.dirname(os.path.abspath(DATABASE_PATH))
 REPORTS_DIR = os.path.join(DATA_DIR, 'reports')
 BACKUPS_DIR = os.path.join(DATA_DIR, 'backups')
 
