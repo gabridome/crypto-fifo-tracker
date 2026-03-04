@@ -83,201 +83,203 @@ class CryptoFIFOTracker:
         self.conn.commit()
     
     def calculate_fifo_lots(self, cryptocurrency: str = 'BTC', year: Optional[int] = None):
-        """Calculate FIFO lots and matches for a cryptocurrency"""
-        
+        """Calculate FIFO lots and matches for a cryptocurrency.
+
+        Uses in-memory lot tracking for performance (60k+ sales would be
+        extremely slow with per-sale DB queries).
+        """
+
         print(f"\nCalculating FIFO for {cryptocurrency}...")
-        
+
         # Clear existing FIFO data for this crypto
         self.cursor.execute('DELETE FROM sale_lot_matches WHERE cryptocurrency = ?', (cryptocurrency,))
         self.cursor.execute('DELETE FROM fifo_lots WHERE cryptocurrency = ?', (cryptocurrency,))
         self.conn.commit()
-        
+
         # Get all transactions for this crypto, ordered by date
         query = '''
-            SELECT id, transaction_date, transaction_type, amount, 
+            SELECT id, transaction_date, transaction_type, amount,
                    price_per_unit, total_value, fee_amount, fee_currency, exchange_name
             FROM transactions
             WHERE cryptocurrency = ?
             AND transaction_type IN ('BUY', 'SELL', 'DEPOSIT', 'WITHDRAWAL')
             ORDER BY transaction_date ASC, id ASC
         '''
-        
+
         self.cursor.execute(query, (cryptocurrency,))
         transactions = self.cursor.fetchall()
-        
-        print(f"  Processing {len(transactions)} transactions...")
-        
+
+        print(f"  Processing {len(transactions):,} transactions...")
+
+        # In-memory FIFO lots: list of dicts, ordered by purchase_date
+        mem_lots = []
+        # Pointer to first lot with remaining > 0 (avoids re-scanning exhausted lots)
+        lot_ptr = 0
+
         buys = 0
         sells = 0
-        
+        matches_batch = []  # batch INSERT for sale_lot_matches
+        BATCH_SIZE = 5000
+
         for trans in transactions:
             trans_type = trans['transaction_type']
-            
-            # ONLY BUY creates new FIFO lots (not DEPOSIT - those are just transfers)
+
             if trans_type == 'BUY':
-                self._create_fifo_lot(trans, cryptocurrency)
+                amount = float(trans['amount'])
+                price_per_unit = float(trans['price_per_unit']) if trans['price_per_unit'] else 0
+
+                if price_per_unit > 0:
+                    base_cost = amount * price_per_unit
+                else:
+                    base_cost = float(trans['total_value'] or 0)
+
+                try:
+                    fee_amount = float(trans['fee_amount']) if trans['fee_amount'] else 0
+                except (KeyError, TypeError):
+                    fee_amount = 0
+                cost_basis = base_cost + fee_amount
+
+                mem_lots.append({
+                    'db_id': None,  # assigned after INSERT
+                    'purchase_transaction_id': trans['id'],
+                    'cryptocurrency': cryptocurrency,
+                    'purchase_date': trans['transaction_date'],
+                    'original_amount': amount,
+                    'remaining_amount': amount,
+                    'purchase_price_per_unit': price_per_unit,
+                    'cost_basis': cost_basis,
+                    'purchase_fee_total': fee_amount,
+                    'exchange_name': trans['exchange_name'],
+                })
                 buys += 1
-            # ONLY SELL consumes FIFO lots (not WITHDRAWAL - those are just transfers)
+
             elif trans_type == 'SELL':
-                self._process_sale(trans, cryptocurrency)
+                amount_to_sell = float(trans['amount'])
+                sale_date = trans['transaction_date']
+                sale_price = float(trans['price_per_unit']) if trans['price_per_unit'] else 0
+
+                if sale_price == 0 and trans['total_value']:
+                    sale_price = float(trans['total_value']) / amount_to_sell
+
+                try:
+                    sale_fee_total = float(trans['fee_amount']) if trans['fee_amount'] else 0
+                except (KeyError, TypeError):
+                    sale_fee_total = 0
+                sale_amount_total = float(trans['amount'])
+
+                sale_date_dt = datetime.fromisoformat(sale_date)
+
+                i = lot_ptr
+                while i < len(mem_lots) and amount_to_sell > 1e-10:
+                    lot = mem_lots[i]
+                    if lot['remaining_amount'] <= 0:
+                        i += 1
+                        continue
+
+                    amount_from_lot = min(amount_to_sell, lot['remaining_amount'])
+
+                    # Cost basis with proportional purchase fee
+                    purchase_price = lot['purchase_price_per_unit']
+                    cost_basis_base = amount_from_lot * purchase_price
+                    purchase_fee_total = lot['purchase_fee_total']
+                    purchase_amount_total = lot['original_amount']
+                    purchase_fee_prop = (purchase_fee_total / purchase_amount_total * amount_from_lot
+                                        if purchase_amount_total > 0 else 0)
+                    cost_basis = cost_basis_base + purchase_fee_prop
+
+                    # Proceeds with proportional sale fee
+                    proceeds_base = amount_from_lot * sale_price
+                    sale_fee_prop = (sale_fee_total / sale_amount_total * amount_from_lot
+                                    if sale_amount_total > 0 else 0)
+                    proceeds = proceeds_base - sale_fee_prop
+
+                    gain_loss = proceeds - cost_basis
+
+                    # Holding period
+                    purchase_date_dt = datetime.fromisoformat(lot['purchase_date'])
+                    if purchase_date_dt.tzinfo is None and sale_date_dt.tzinfo is not None:
+                        purchase_date_dt = purchase_date_dt.replace(tzinfo=sale_date_dt.tzinfo)
+                    elif purchase_date_dt.tzinfo is not None and sale_date_dt.tzinfo is None:
+                        sale_date_dt = sale_date_dt.replace(tzinfo=purchase_date_dt.tzinfo)
+                    holding_days = (sale_date_dt - purchase_date_dt).days
+
+                    matches_batch.append((
+                        trans['id'],       # sale_transaction_id
+                        i,                 # lot index (replaced with db_id later)
+                        sale_date,
+                        lot['purchase_date'],
+                        cryptocurrency,
+                        amount_from_lot,
+                        purchase_price,
+                        sale_price,
+                        cost_basis,
+                        proceeds,
+                        gain_loss,
+                        holding_days,
+                    ))
+
+                    # Update in-memory lot
+                    lot['remaining_amount'] -= amount_from_lot
+                    amount_to_sell -= amount_from_lot
+
+                    # Advance pointer past exhausted lots
+                    if lot['remaining_amount'] <= 0 and i == lot_ptr:
+                        lot_ptr = i + 1
+
+                    i += 1
+
+                if amount_to_sell > 1e-8:
+                    print(f"  ⚠️  Warning: Sale on {sale_date} has {amount_to_sell:.8f} "
+                          f"{cryptocurrency} unmatched (no purchase found)")
                 sells += 1
-        
-        self.conn.commit()
-        
-        print(f"  ✓ Processed {buys} purchases, {sells} sales")
-        
-        # Show summary
-        self.cursor.execute('''
-            SELECT COUNT(*) as lots, SUM(remaining_amount) as remaining
-            FROM fifo_lots
-            WHERE cryptocurrency = ? AND remaining_amount > 0
-        ''', (cryptocurrency,))
-        
-        result = self.cursor.fetchone()
-        if result and result['remaining'] is not None:
-            print(f"  Remaining: {result['remaining']:.8f} {cryptocurrency} in {result['lots']} lots")
-    
-    def _create_fifo_lot(self, trans, cryptocurrency):
-        """Create a new FIFO lot from a purchase"""
-        
-        amount = float(trans['amount'])
-        price_per_unit = float(trans['price_per_unit']) if trans['price_per_unit'] else 0
-        
-        # Calculate base cost
-        if price_per_unit > 0:
-            base_cost = amount * price_per_unit
-        else:
-            base_cost = float(trans['total_value'] or 0)
-        
-        # Add purchase fee to cost basis (OPZIONE A)
-        try:
-            fee_amount = float(trans['fee_amount']) if trans['fee_amount'] else 0
-        except (KeyError, TypeError):
-            fee_amount = 0
-        cost_basis = base_cost + fee_amount
-        
-        self.cursor.execute('''
-            INSERT INTO fifo_lots 
-            (purchase_transaction_id, cryptocurrency, purchase_date, 
-             original_amount, remaining_amount, purchase_price_per_unit, 
-             cost_basis, purchase_fee_total, exchange_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            trans['id'],
-            cryptocurrency,
-            trans['transaction_date'],
-            amount,
-            amount,  # Initially, remaining = original
-            price_per_unit,
-            cost_basis,
-            fee_amount,  # Store total fee for proportional allocation
-            trans['exchange_name']
-        ))
-    
-    def _process_sale(self, sale_trans, cryptocurrency):
-        """Process a sale using FIFO matching"""
-        
-        amount_to_sell = float(sale_trans['amount'])
-        sale_date = sale_trans['transaction_date']
-        sale_price = float(sale_trans['price_per_unit']) if sale_trans['price_per_unit'] else 0
-        
-        if sale_price == 0 and sale_trans['total_value']:
-            sale_price = float(sale_trans['total_value']) / amount_to_sell
-        
-        # Get oldest lots with remaining amount (FIFO)
-        self.cursor.execute('''
-            SELECT * FROM fifo_lots
-            WHERE cryptocurrency = ?
-            AND remaining_amount > 0
-            ORDER BY purchase_date ASC, id ASC
-        ''', (cryptocurrency,))
-        
-        lots = self.cursor.fetchall()
-        
-        for lot in lots:
-            if amount_to_sell <= 0:
-                break
-            
-            # How much to take from this lot
-            amount_from_lot = min(amount_to_sell, float(lot['remaining_amount']))
-            
-            # Calculate cost basis with proportional purchase fee
-            purchase_price = float(lot['purchase_price_per_unit'])
-            cost_basis_base = amount_from_lot * purchase_price
-            
-            # Proportional purchase fee allocation
-            try:
-                purchase_fee_total = float(lot['purchase_fee_total']) if lot['purchase_fee_total'] else 0
-            except (KeyError, TypeError):
-                purchase_fee_total = 0
-            purchase_amount_total = float(lot['original_amount'])
-            purchase_fee_proportional = (purchase_fee_total / purchase_amount_total) * amount_from_lot if purchase_amount_total > 0 else 0
-            
-            cost_basis = cost_basis_base + purchase_fee_proportional
-            
-            # Calculate proceeds with proportional sale fee
-            proceeds_base = amount_from_lot * sale_price
-            
-            # Proportional sale fee allocation
-            try:
-                sale_fee_total = float(sale_trans['fee_amount']) if sale_trans['fee_amount'] else 0
-            except (KeyError, TypeError):
-                sale_fee_total = 0
-            sale_amount_total = float(sale_trans['amount'])
-            sale_fee_proportional = (sale_fee_total / sale_amount_total) * amount_from_lot if sale_amount_total > 0 else 0
-            
-            proceeds = proceeds_base - sale_fee_proportional
-            
-            # Calculate gain/loss
-            gain_loss = proceeds - cost_basis
-            
-            # Calculate holding period
-            purchase_date = datetime.fromisoformat(lot['purchase_date'])
-            sale_date_dt = datetime.fromisoformat(sale_date)
-            
-            # Ensure both are timezone-aware or both naive
-            if purchase_date.tzinfo is None and sale_date_dt.tzinfo is not None:
-                purchase_date = purchase_date.replace(tzinfo=sale_date_dt.tzinfo)
-            elif purchase_date.tzinfo is not None and sale_date_dt.tzinfo is None:
-                sale_date_dt = sale_date_dt.replace(tzinfo=purchase_date.tzinfo)
-            
-            holding_days = (sale_date_dt - purchase_date).days
-            
-            # Record the match
+
+        # Bulk write to DB
+        print(f"  Writing {len(mem_lots):,} lots and {len(matches_batch):,} matches to DB...")
+
+        # INSERT all lots
+        lot_db_ids = []
+        for lot in mem_lots:
+            self.cursor.execute('''
+                INSERT INTO fifo_lots
+                (purchase_transaction_id, cryptocurrency, purchase_date,
+                 original_amount, remaining_amount, purchase_price_per_unit,
+                 cost_basis, purchase_fee_total, exchange_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                lot['purchase_transaction_id'], lot['cryptocurrency'],
+                lot['purchase_date'], lot['original_amount'],
+                lot['remaining_amount'], lot['purchase_price_per_unit'],
+                lot['cost_basis'], lot['purchase_fee_total'],
+                lot['exchange_name'],
+            ))
+            lot_db_ids.append(self.cursor.lastrowid)
+
+        # INSERT all matches (replace lot index with real DB id)
+        for match in matches_batch:
+            lot_idx = match[1]
             self.cursor.execute('''
                 INSERT INTO sale_lot_matches
                 (sale_transaction_id, fifo_lot_id, sale_date, purchase_date,
-                 cryptocurrency, amount_sold, purchase_price_per_unit, 
-                 sale_price_per_unit, cost_basis, proceeds, gain_loss, 
+                 cryptocurrency, amount_sold, purchase_price_per_unit,
+                 sale_price_per_unit, cost_basis, proceeds, gain_loss,
                  holding_period_days)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                sale_trans['id'],
-                lot['id'],
-                sale_date,
-                lot['purchase_date'],
-                cryptocurrency,
-                amount_from_lot,
-                purchase_price,
-                sale_price,
-                cost_basis,
-                proceeds,
-                gain_loss,
-                holding_days
+                match[0], lot_db_ids[lot_idx],
+                match[2], match[3], match[4], match[5],
+                match[6], match[7], match[8], match[9],
+                match[10], match[11],
             ))
-            
-            # Update lot remaining amount
-            new_remaining = float(lot['remaining_amount']) - amount_from_lot
-            self.cursor.execute('''
-                UPDATE fifo_lots
-                SET remaining_amount = ?
-                WHERE id = ?
-            ''', (new_remaining, lot['id']))
-            
-            amount_to_sell -= amount_from_lot
-        
-        if amount_to_sell > 0.00000001:
-            print(f"  ⚠️  Warning: Sale on {sale_date} has {amount_to_sell:.8f} {cryptocurrency} unmatched (no purchase found)")
+
+        self.conn.commit()
+
+        print(f"  ✓ Processed {buys:,} purchases, {sells:,} sales")
+
+        # Show summary
+        remaining_lots = [l for l in mem_lots if l['remaining_amount'] > 0]
+        remaining_total = sum(l['remaining_amount'] for l in remaining_lots)
+        if remaining_lots:
+            print(f"  Remaining: {remaining_total:.8f} {cryptocurrency} in {len(remaining_lots)} lots")
     
     def generate_holding_report(self, year: int, cryptocurrency: str = 'BTC',
                                min_holding_days: int = 0) -> pd.DataFrame:
