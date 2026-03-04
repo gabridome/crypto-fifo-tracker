@@ -2448,13 +2448,15 @@ if __name__ == '__main__':
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(REPORTS_DIR, exist_ok=True)
 
+    port = int(os.environ.get('FIFO_PORT', 5002))
+
     print("=" * 60)
     print("  Crypto FIFO Tracker — Web Interface")
     print("=" * 60)
     print(f"\n  Database:  {DATABASE_PATH}")
     print(f"  Data dir:  {DATA_DIR}")
-    print(f"\n  Open: http://127.0.0.1:5002")
+    print(f"\n  Open: http://127.0.0.1:{port}")
     print(f"\n  Press CTRL+C to stop")
     print("=" * 60)
 
-    app.run(debug=True, host='127.0.0.1', port=5002)
+    app.run(debug=True, host='127.0.0.1', port=port)

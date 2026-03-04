@@ -193,7 +193,8 @@ def main():
     print(f"  Exchanges:    {', '.join(r[0] for r in exchanges)}")
 
     print(f"\n  To run the web app with demo data:")
-    print(f"  FIFO_DB=data/DEMO_crypto_fifo.db python3 web/app.py")
+    print(f"  FIFO_DB=data/DEMO_crypto_fifo.db FIFO_PORT=5003 python3 web/app.py")
+    print(f"  Open http://127.0.0.1:5003")
     print(f"\n{'=' * 60}")
 
 

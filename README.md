@@ -26,10 +26,10 @@ cd crypto-fifo-tracker
 # Setup everything: venv, dependencies, demo data, FIFO calculation
 python3 setup_demo.py
 
-# Launch the web interface with the demo database
+# Launch the web interface with the demo database (port 5003)
 source venv/bin/activate
-FIFO_DB=data/DEMO_crypto_fifo.db python3 web/app.py
-# Open http://127.0.0.1:5002
+FIFO_DB=data/DEMO_crypto_fifo.db FIFO_PORT=5003 python3 web/app.py
+# Open http://127.0.0.1:5003
 ```
 
 The demo creates 3 fictional exchanges (DEMO Alpha, DEMO Beta, DEMO Gamma) with
