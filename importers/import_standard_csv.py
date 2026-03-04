@@ -231,9 +231,13 @@ def import_standard_csv(filepath, exchange_name_override=None):
         tx_type = str(row['transaction_type']).strip().upper()
         crypto = str(row['cryptocurrency']).strip()
 
+        # Per-row exchange_name: use CSV column if present, fallback to global
+        row_exch_val = str(row.get('exchange_name', '')).strip() if pd.notna(row.get('exchange_name')) else ''
+        row_exchange = row_exch_val if row_exch_val else exchange_name
+
         # ── Case 1: EUR — direct import ──
         if csv_currency == 'EUR':
-            _insert_tx(dt, tx_type, exchange_name, crypto,
+            _insert_tx(dt, tx_type, row_exchange, crypto,
                        amount_val, price_val, total_val, fee_val,
                        fee_cur, 'EUR', transaction_id, notes_str)
 
@@ -251,7 +255,7 @@ def import_standard_csv(filepath, exchange_name_override=None):
                 price_eur = price_val
                 print(f"    ⚠️  No ECB rates: storing USD value as-is for {crypto} {tx_type}")
 
-            _insert_tx(dt, tx_type, exchange_name, crypto,
+            _insert_tx(dt, tx_type, row_exchange, crypto,
                        amount_val, price_eur, total_eur, fee_eur,
                        'EUR', 'EUR', transaction_id,
                        f"{notes_str} [converted from USD]".strip())
@@ -299,7 +303,7 @@ def import_standard_csv(filepath, exchange_name_override=None):
                         side_b_price = side_b_eur / counter_amount if counter_amount > 0 else 0
 
             # Side A: original transaction
-            _insert_tx(dt, tx_type, exchange_name, crypto,
+            _insert_tx(dt, tx_type, row_exchange, crypto,
                        amount_val, side_a_price, side_a_eur, 0,
                        'EUR', 'EUR', transaction_id,
                        f"{notes_str} [crypto-to-crypto: {amount_val:.8f} {crypto} → {counter_amount:.8f} {counter_crypto}, {eur_source}]".strip(),
@@ -316,7 +320,7 @@ def import_standard_csv(filepath, exchange_name_override=None):
                         fee_eur_counter = f_eur
                 fee_note = f", fee: {fee_val:.8f} {counter_crypto}"
 
-            _insert_tx(dt, counter_type, exchange_name, counter_crypto,
+            _insert_tx(dt, counter_type, row_exchange, counter_crypto,
                        counter_amount, side_b_price, side_b_eur, fee_eur_counter,
                        'EUR', 'EUR', f"{transaction_id}_counter",
                        f"Counterpart of {tx_type} {amount_val:.8f} {crypto}{fee_note} [{eur_source}]",

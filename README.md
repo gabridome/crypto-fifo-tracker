@@ -6,36 +6,78 @@ Open-source FIFO tracking system for cryptocurrency capital gains, designed for 
 
 ## Features
 
+- **Web interface** — guided wizard (Collect → Import → Status → FIFO → Reports)
 - **SQLite database** — single file, no server, portable
 - **FIFO method** — mandatory under Portuguese tax law
-- **Multi-exchange** — dedicated importers for Binance, Coinbase, Coinbase Prime, Bitstamp, Bitfinex, Kraken, Mt.Gox, TRT, Wirex, Revolut, and a generic CSV importer
+- **Multi-exchange** — dedicated importers for Binance, Coinbase, Coinbase Prime, Bitstamp, Bitfinex, Kraken, Mt.Gox, TRT, Wirex, Revolut, Bybit, and a generic CSV importer
 - **EUR currency** — USD→EUR conversion via official ECB historical rates
 - **IRS reports** — Excel with Anexo G1 (exempt, ≥365 days) and Anexo J (taxable, <365 days)
 - **Daily aggregation** — as required by Autoridade Tributária
 - **Multi-country ready** — tax rules separated in `config.py`
 
-## Quick start
+## Try the demo
+
+Run the demo to explore the application with realistic sample data — no real exchange files needed.
 
 ```bash
-# 1. Clone and setup
+git clone https://github.com/YOUR_USERNAME/crypto-fifo-tracker.git
+cd crypto-fifo-tracker
+pip install flask pandas pytz openpyxl requests
+
+# Generate 900 demo transactions and build the demo database
+python3 generate_demo_data.py
+python3 setup_demo.py
+
+# Launch the web interface with the demo database
+FIFO_DB=data/DEMO_crypto_fifo.db python3 web/app.py
+# Open http://127.0.0.1:5002
+```
+
+The demo creates 3 fictional exchanges (DEMO Alpha, DEMO Beta, DEMO Gamma) with
+600 BUY and 300 SELL transactions spanning 2016–2025, using realistic BTC/EUR prices.
+FIFO produces a mix of long-term (exempt) and short-term (taxable) gains.
+
+> The demo database (`data/DEMO_crypto_fifo.db`) is completely separate from
+> your production database (`data/crypto_fifo.db`). You can run both.
+
+## Production setup
+
+```bash
+# 1. Clone and initial setup
 git clone https://github.com/YOUR_USERNAME/crypto-fifo-tracker.git
 cd crypto-fifo-tracker
 chmod +x setup.sh
-./setup.sh
+./setup.sh              # creates venv, installs packages, initializes DB
 
 # 2. Activate virtual environment
 source venv/bin/activate
 
-# 3. Place your exchange CSV files in data/
+# 3. Launch the web interface
+python3 web/app.py
+# Open http://127.0.0.1:5002
+```
 
-# 4. Import (one exchange at a time)
-python3 importers/import_binance_with_fees.py
+The web interface guides you through the full workflow:
+
+1. **Collect** — upload your exchange CSV files
+2. **Import** — import each file into the database
+3. **Status** — verify CSV ↔ DB consistency
+4. **FIFO** — calculate FIFO lots and gains/losses
+5. **Reports** — generate IRS Excel reports, run SQL queries
+
+### Command-line workflow (alternative)
+
+You can also run each step from the terminal:
+
+```bash
+# Import (one exchange at a time)
+python3 importers/import_binance_with_fees.py data/binance.csv
 python3 importers/verify_exchange_import.py "Binance"
 
-# 5. Calculate FIFO (~2 min for large datasets)
+# Calculate FIFO
 python3 calculators/calculate_fifo.py
 
-# 6. Generate IRS report
+# Generate IRS report
 python3 calculators/generate_irs_report.py 2025
 ```
 
@@ -44,31 +86,35 @@ python3 calculators/generate_irs_report.py 2025
 ```
 crypto-fifo-tracker/
 ├── config.py                   ← Country/tax configuration
-├── setup.sh                    ← Automated setup script
-├── crypto_fifo.db              ← SQLite database (created by setup.sh)
+├── setup.sh                    ← Automated setup for production
+├── generate_demo_data.py       ← Generate demo CSV files (900 transactions)
+├── setup_demo.py               ← Build demo database from demo CSVs
+├── web/
+│   ├── app.py                  ← Flask web application
+│   └── templates/              ← HTML templates (base, collect, import, status, fifo, reports, manual)
 ├── calculators/
 │   ├── crypto_fifo_tracker.py  ← Core FIFO library
 │   ├── calculate_fifo.py       ← FIFO calculation script
-│   └── generate_irs_report.py  ← IRS Excel report generator
+│   ├── generate_irs_report.py  ← IRS Excel report generator
+│   └── *.sql                   ← SQL queries (runnable from Reports page)
 ├── importers/
 │   ├── ecb_rates.py            ← USD→EUR conversion (ECB rates)
-│   ├── import_binance_with_fees.py
-│   ├── import_coinbase_prime.py
-│   ├── import_bitstamp_with_fees.py
-│   ├── import_kraken_with_fees.py
+│   ├── crypto_prices.py        ← Crypto price lookup (CryptoCompare)
 │   ├── import_standard_csv.py  ← Generic CSV importer
-│   ├── verify_exchange_import.py
+│   ├── import_binance_with_fees.py
 │   └── ...                     ← One script per exchange
 ├── data/
+│   ├── crypto_fifo.db          ← Production database (gitignored)
+│   ├── DEMO_crypto_fifo.db     ← Demo database (gitignored)
+│   ├── DEMO_*.csv              ← Demo CSV files (tracked in git)
 │   ├── eurusd.csv              ← ECB historical EUR/USD rates
-│   ├── sample_transactions.csv ← Sample data for testing
+│   ├── crypto_prices.csv       ← CryptoCompare daily prices
 │   └── ...                     ← Your exchange CSV files (gitignored)
-├── reports/                    ← Generated reports (gitignored)
 ├── doc/
+│   ├── schema.sql              ← Database DDL
 │   ├── en/                     ← English documentation
 │   └── pt/                     ← Portuguese documentation
-├── tests/                      ← Test scripts
-└── backups/                    ← Database backups (gitignored)
+└── tests/                      ← Test scripts
 ```
 
 ## How it works
@@ -137,7 +183,7 @@ See `CONTRIBUTING.md` for details on adding a new country or exchange.
 
 - Python 3.11+
 - No database server (SQLite is built into Python)
-- Packages: `pandas`, `pytz`, `openpyxl`, `requests`
+- Packages: `flask`, `pandas`, `pytz`, `openpyxl`, `requests`
 
 ## License
 

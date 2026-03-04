@@ -6,36 +6,79 @@ Sistema open-source de rastreamento FIFO para mais-valias de criptoativos, conce
 
 ## Funcionalidades
 
+- **Interface web** — wizard guiado (Collect → Import → Status → FIFO → Reports)
 - **Base de dados SQLite** — ficheiro único, sem servidor, portátil
 - **Método FIFO** — obrigatório pela legislação fiscal portuguesa
-- **Multi-exchange** — importadores dedicados para Binance, Coinbase, Coinbase Prime, Bitstamp, Bitfinex, Kraken, Mt.Gox, TRT, Wirex, Revolut e importador genérico CSV
+- **Multi-exchange** — importadores dedicados para Binance, Coinbase, Coinbase Prime, Bitstamp, Bitfinex, Kraken, Mt.Gox, TRT, Wirex, Revolut, Bybit e importador genérico CSV
 - **Moeda EUR** — conversão USD→EUR via taxas históricas oficiais do BCE
 - **Relatórios IRS** — Excel com Anexo G1 (isentos, ≥365 dias) e Anexo J (tributáveis, <365 dias)
 - **Agregação diária** — conforme exigido pela Autoridade Tributária
 - **Preparado para multi-país** — regras fiscais separadas em `config.py`
 
-## Início rápido
+## Experimentar a demo
+
+Para explorar a aplicação com dados de exemplo realistas, sem ficheiros reais das exchanges:
+
+```bash
+git clone https://github.com/YOUR_USERNAME/crypto-fifo-tracker.git
+cd crypto-fifo-tracker
+pip install flask pandas pytz openpyxl requests
+
+# Gerar 900 transações demo e criar a base de dados demo
+python3 generate_demo_data.py
+python3 setup_demo.py
+
+# Lançar a interface web com a base de dados demo
+FIFO_DB=data/DEMO_crypto_fifo.db python3 web/app.py
+# Abrir http://127.0.0.1:5002
+```
+
+A demo cria 3 exchanges fictícias (DEMO Alpha, DEMO Beta, DEMO Gamma) com
+600 BUY e 300 SELL de 2016 a 2025, com preços BTC/EUR realistas.
+O cálculo FIFO produz um mix de mais-valias a longo prazo (isentas)
+e a curto prazo (tributáveis).
+
+> A base de dados demo (`data/DEMO_crypto_fifo.db`) é completamente separada
+> da base de dados de produção (`data/crypto_fifo.db`). Pode usar ambas.
+
+## Configuração de produção
 
 ```bash
 # 1. Clonar e configurar
 git clone https://github.com/YOUR_USERNAME/crypto-fifo-tracker.git
 cd crypto-fifo-tracker
 chmod +x setup.sh
-./setup.sh
+./setup.sh              # cria venv, instala pacotes, inicializa BD
 
 # 2. Ativar o ambiente virtual
 source venv/bin/activate
 
-# 3. Colocar os ficheiros CSV das exchanges em data/
+# 3. Lançar a interface web
+python3 web/app.py
+# Abrir http://127.0.0.1:5002
+```
 
-# 4. Importar (uma exchange de cada vez)
-python3 importers/import_binance_with_fees.py
+A interface web guia através de todo o fluxo de trabalho:
+
+1. **Collect** — carregar os ficheiros CSV das exchanges
+2. **Import** — importar cada ficheiro para a base de dados
+3. **Status** — verificar consistência CSV ↔ BD
+4. **FIFO** — calcular lotes FIFO e mais/menos-valias
+5. **Reports** — gerar relatórios IRS em Excel, executar consultas SQL
+
+### Fluxo via linha de comandos (alternativa)
+
+Também se pode executar cada passo pelo terminal:
+
+```bash
+# Importar (uma exchange de cada vez)
+python3 importers/import_binance_with_fees.py data/binance.csv
 python3 importers/verify_exchange_import.py "Binance"
 
-# 5. Calcular FIFO (~2 min para conjuntos grandes)
+# Calcular FIFO
 python3 calculators/calculate_fifo.py
 
-# 6. Gerar relatório IRS
+# Gerar relatório IRS
 python3 calculators/generate_irs_report.py 2025
 ```
 
@@ -44,27 +87,32 @@ python3 calculators/generate_irs_report.py 2025
 ```
 crypto-fifo-tracker/
 ├── config.py                   ← Configuração de país/regras fiscais
-├── setup.sh                    ← Script de configuração automática
+├── setup.sh                    ← Configuração automática para produção
+├── generate_demo_data.py       ← Gerar ficheiros CSV demo (900 transações)
+├── setup_demo.py               ← Construir base de dados demo
+├── web/
+│   ├── app.py                  ← Aplicação web Flask
+│   └── templates/              ← Templates HTML (base, collect, import, status, fifo, reports, manual)
 ├── calculators/
 │   ├── crypto_fifo_tracker.py  ← Biblioteca FIFO principal
 │   ├── calculate_fifo.py       ← Script de cálculo FIFO
-│   └── generate_irs_report.py  ← Gerador de relatório IRS (Excel)
+│   ├── generate_irs_report.py  ← Gerador de relatório IRS (Excel)
+│   └── *.sql                   ← Consultas SQL (executáveis pela página Reports)
 ├── importers/
 │   ├── ecb_rates.py            ← Conversão USD→EUR (taxas BCE)
-│   ├── import_binance_with_fees.py
-│   ├── import_coinbase_prime.py
+│   ├── crypto_prices.py        ← Preços crypto (CryptoCompare)
 │   ├── import_standard_csv.py  ← Importador genérico CSV
-│   ├── verify_exchange_import.py
+│   ├── import_binance_with_fees.py
 │   └── ...                     ← Um script por exchange
-├── data/                       ← TODOS os dados pessoais (excluídos do git exceto amostras)
-│   ├── crypto_fifo.db          ← Base de dados SQLite (criada pelo setup.sh)
+├── data/
+│   ├── crypto_fifo.db          ← Base de dados de produção (excluída do git)
+│   ├── DEMO_crypto_fifo.db     ← Base de dados demo (excluída do git)
+│   ├── DEMO_*.csv              ← Ficheiros CSV demo (incluídos no git)
 │   ├── eurusd.csv              ← Taxas históricas EUR/USD do BCE
-│   ├── sample_transactions.csv ← Dados de exemplo (incluídos no git)
-│   ├── ...                     ← Os seus ficheiros CSV
-│   ├── reports/                ← Relatórios IRS gerados
-│   ├── backups/                ← Cópias de segurança da BD
-│   └── supporting_documents/   ← Extratos, faturas
+│   ├── crypto_prices.csv       ← Preços diários CryptoCompare
+│   └── ...                     ← Os seus ficheiros CSV (excluídos do git)
 ├── doc/
+│   ├── schema.sql              ← DDL da base de dados
 │   ├── en/                     ← Documentação em inglês
 │   └── pt/                     ← Documentação em português
 └── tests/                      ← Scripts de teste
@@ -136,7 +184,7 @@ Consulte `CONTRIBUTING.md` para detalhes sobre como adicionar uma nova exchange 
 
 - Python 3.11+
 - Sem servidor de base de dados (SQLite está incluído no Python)
-- Pacotes: `pandas`, `pytz`, `openpyxl`, `requests`
+- Pacotes: `flask`, `pandas`, `pytz`, `openpyxl`, `requests`
 
 ## Licença
 

@@ -251,6 +251,7 @@ EXCHANGE_PATTERNS = [
     (r'gdtre',                      'GDTRE',           'importers/import_standard_csv.py'),
     (r'inheritance',                'Inheritance',     'importers/import_standard_csv.py'),
     (r'otc',                        'OTC',             'importers/import_standard_csv.py'),
+    (r'(?i)demo',                   'DEMO',            'importers/import_standard_csv.py'),
 ]
 
 EXCHANGE_INSTRUCTIONS = {
