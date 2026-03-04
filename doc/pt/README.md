@@ -23,15 +23,11 @@ Para explorar a aplicação com dados de exemplo realistas, sem ficheiros reais 
 git clone https://github.com/gabridome/crypto-fifo-tracker.git
 cd crypto-fifo-tracker
 
-# Criar ambiente virtual e instalar dependências
-python3 -m venv venv
-source venv/bin/activate
-pip install flask pandas pytz openpyxl requests
-
-# Gerar dados demo, importar e calcular FIFO — tudo num único passo
+# Configura tudo: venv, dependências, dados demo, cálculo FIFO
 python3 setup_demo.py
 
 # Lançar a interface web com a base de dados demo
+source venv/bin/activate
 FIFO_DB=data/DEMO_crypto_fifo.db python3 web/app.py
 # Abrir http://127.0.0.1:5002
 ```

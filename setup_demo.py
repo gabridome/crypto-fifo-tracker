@@ -2,8 +2,12 @@
 """
 Create and populate a demo database for the Crypto FIFO Tracker.
 
-Creates data/DEMO_crypto_fifo.db with sample transactions across 3 fictional
-exchanges, then runs FIFO calculation to populate lots and sale matches.
+Handles everything automatically:
+  1. Creates a virtual environment and installs dependencies (if needed)
+  2. Generates realistic demo CSV files (900 transactions)
+  3. Creates the database schema
+  4. Imports demo data
+  5. Runs FIFO calculation
 
 Usage:
     python3 setup_demo.py
@@ -14,19 +18,59 @@ Then run the web app pointing at the demo database:
 
 import os
 import sys
-import glob
-import sqlite3
 import subprocess
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+VENV_DIR = os.path.join(PROJECT_ROOT, 'venv')
+VENV_PYTHON = os.path.join(VENV_DIR, 'bin', 'python3')
 DEMO_DB = os.path.join(PROJECT_ROOT, 'data', 'DEMO_crypto_fifo.db')
 SCHEMA_FILE = os.path.join(PROJECT_ROOT, 'doc', 'schema.sql')
+PACKAGES = ['flask', 'pandas', 'pytz', 'openpyxl', 'requests']
 
-# Demo CSV files to import
-DEMO_CSVS = sorted(glob.glob(os.path.join(PROJECT_ROOT, 'data', 'DEMO_*.csv')))
+
+def ensure_venv():
+    """Create venv and install dependencies if needed, then re-exec inside it."""
+    # Already running inside a virtual environment — nothing to do
+    if sys.prefix != sys.base_prefix:
+        return
+
+    print("=" * 60)
+    print("CRYPTO FIFO TRACKER — ENVIRONMENT SETUP")
+    print("=" * 60)
+
+    # Create venv if it doesn't exist
+    if not os.path.exists(VENV_PYTHON):
+        print("\n  Creating virtual environment...")
+        try:
+            subprocess.run(
+                [sys.executable, '-m', 'venv', VENV_DIR],
+                check=True,
+            )
+        except subprocess.CalledProcessError:
+            print("\n  ✗ Failed to create virtual environment.")
+            print("    On Debian/Ubuntu you may need: sudo apt install python3-venv")
+            sys.exit(1)
+        print(f"  ✓ venv created in {VENV_DIR}/")
+
+    # Install/upgrade packages
+    print(f"\n  Installing dependencies: {', '.join(PACKAGES)}")
+    subprocess.run(
+        [VENV_PYTHON, '-m', 'pip', 'install', '-q', '--upgrade'] + PACKAGES,
+        check=True,
+    )
+    print("  ✓ Dependencies installed")
+
+    # Re-exec this script inside the venv
+    print(f"\n  Restarting inside virtual environment...\n")
+    os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
 
 
 def main():
+    ensure_venv()
+
+    import glob
+    import sqlite3
+
     print("=" * 60)
     print("CRYPTO FIFO TRACKER — DEMO SETUP")
     print("=" * 60)
@@ -36,8 +80,8 @@ def main():
         print(f"\n✗ Schema file not found: {SCHEMA_FILE}")
         sys.exit(1)
 
-    # Step 0: Generate demo CSV files
-    print(f"\n[0/4] Generating demo CSV data...")
+    # Step 1: Generate demo CSV files
+    print(f"\n[1/5] Generating demo CSV data...")
     from generate_demo_data import main as generate_main
     generate_main()
 
@@ -53,8 +97,8 @@ def main():
         os.remove(DEMO_DB)
         print(f"\n  Removed old demo database")
 
-    # Create schema
-    print(f"\n[1/4] Creating database schema...")
+    # Step 2: Create schema
+    print(f"\n[2/5] Creating database schema...")
     conn = sqlite3.connect(DEMO_DB)
     with open(SCHEMA_FILE, 'r') as f:
         conn.executescript(f.read())
@@ -65,8 +109,8 @@ def main():
     env = os.environ.copy()
     env['FIFO_DB'] = DEMO_DB
 
-    # Import demo CSVs
-    print(f"\n[2/4] Importing demo data...")
+    # Step 3: Import demo CSVs
+    print(f"\n[3/5] Importing demo data...")
     importer = os.path.join(PROJECT_ROOT, 'importers', 'import_standard_csv.py')
     total_imported = 0
 
@@ -94,8 +138,8 @@ def main():
 
     print(f"\n  ✓ Imported {total_imported} files")
 
-    # Run FIFO calculation
-    print(f"\n[3/4] Calculating FIFO lots...")
+    # Step 4: Run FIFO calculation
+    print(f"\n[4/5] Calculating FIFO lots...")
     fifo_script = os.path.join(PROJECT_ROOT, 'calculators', 'calculate_fifo.py')
     result = subprocess.run(
         [sys.executable, fifo_script],
@@ -116,8 +160,8 @@ def main():
                                       'Long-term', 'Short-term', 'COMPLETE']):
             print(f"    {line.strip()}")
 
-    # Verify
-    print(f"\n[4/4] Verifying...")
+    # Step 5: Verify
+    print(f"\n[5/5] Verifying...")
     conn = sqlite3.connect(DEMO_DB)
     tx_count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
     lot_count = conn.execute("SELECT COUNT(*) FROM fifo_lots").fetchone()[0]
