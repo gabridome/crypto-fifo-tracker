@@ -20,8 +20,12 @@ Open-source FIFO tracking system for cryptocurrency capital gains, designed for 
 Run the demo to explore the application with realistic sample data — no real exchange files needed.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/crypto-fifo-tracker.git
+git clone https://github.com/gabridome/crypto-fifo-tracker.git
 cd crypto-fifo-tracker
+
+# Create virtual environment and install dependencies
+python3 -m venv venv
+source venv/bin/activate
 pip install flask pandas pytz openpyxl requests
 
 # Generate 900 demo transactions and build the demo database

@@ -20,8 +20,12 @@ Sistema open-source de rastreamento FIFO para mais-valias de criptoativos, conce
 Para explorar a aplicação com dados de exemplo realistas, sem ficheiros reais das exchanges:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/crypto-fifo-tracker.git
+git clone https://github.com/gabridome/crypto-fifo-tracker.git
 cd crypto-fifo-tracker
+
+# Criar ambiente virtual e instalar dependências
+python3 -m venv venv
+source venv/bin/activate
 pip install flask pandas pytz openpyxl requests
 
 # Gerar 900 transações demo e criar a base de dados demo
