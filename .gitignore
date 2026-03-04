@@ -6,6 +6,7 @@
 data/
 backups/
 !data/sample_*.csv
+!data/template_*.csv
 
 # ---- PYTHON ------------------------------------------------
 venv/

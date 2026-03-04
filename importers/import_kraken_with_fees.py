@@ -9,256 +9,268 @@ BUY:
 SELL:
   Row 1: BTC, amount=negative (BTC sold), fee=0
   Row 2: EUR, amount=positive (EUR received), fee=EUR_fee
+
+Usage:
+  python3 importers/import_kraken_with_fees.py <filepath> [exchange_name]
 """
 
+import sys
+import os
 import pandas as pd
 import sqlite3
 from datetime import datetime
 import pytz
 from collections import defaultdict
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+
 from config import DATABASE_PATH
+from importers.import_utils import compute_record_hash, delete_by_source
+
 DB_PATH = DATABASE_PATH
 
-KRAKEN_FILE = 'data/historical/kraken_ledgers.csv'
 
-print("="*80)
-print("IMPORTING KRAKEN LEDGER WITH FEE HANDLING")
-print("="*80)
+def import_kraken(filepath, exchange_name='Kraken'):
+    """Import Kraken ledger CSV with fee handling and source tracking."""
 
-# Read file
-df = pd.read_csv(KRAKEN_FILE)
-print(f"\nLoaded {len(df):,} rows from {KRAKEN_FILE}")
+    source = os.path.basename(filepath)
+    imported_at = datetime.now().isoformat()
 
-# Parse dates
-df['time'] = pd.to_datetime(df['time'])
+    print("=" * 80)
+    print(f"IMPORTING KRAKEN LEDGER WITH FEE HANDLING")
+    print(f"  File:     {filepath}")
+    print(f"  Exchange: {exchange_name}")
+    print(f"  Source:   {source}")
+    print("=" * 80)
 
-# Filter only trades (not deposits/withdrawals)
-df_trades = df[df['type'] == 'trade'].copy()
-print(f"Trade rows: {len(df_trades):,}")
+    # Read file
+    df = pd.read_csv(filepath)
+    print(f"\nLoaded {len(df):,} rows from {filepath}")
 
-# Group by refid to pair BTC and EUR rows
-print("\nPairing BTC/EUR rows by refid...")
+    # Parse dates
+    df['time'] = pd.to_datetime(df['time'])
 
-trades = defaultdict(dict)
+    # Filter only trades (not deposits/withdrawals)
+    df_trades = df[df['type'] == 'trade'].copy()
+    print(f"Trade rows: {len(df_trades):,}")
 
-for _, row in df_trades.iterrows():
-    refid = row['refid']
-    asset = row['asset']
-    amount = float(row['amount'])
-    fee = float(row['fee'])
-    time = row['time']
-    
-    if asset == 'BTC':
-        trades[refid]['btc_amount'] = amount
-        trades[refid]['time'] = time
-    elif asset == 'EUR':
-        trades[refid]['eur_amount'] = amount
-        trades[refid]['eur_fee'] = fee
-        trades[refid]['time'] = time
+    # Group by refid to pair BTC and EUR rows
+    print("\nPairing BTC/EUR rows by refid...")
 
-# Convert to list and determine trade type
-complete_trades = []
+    trades = defaultdict(dict)
 
-for refid, data in trades.items():
-    # Skip incomplete trades
-    if 'btc_amount' not in data or 'eur_amount' not in data:
-        continue
-    
-    btc_amount = data['btc_amount']
-    eur_amount = data['eur_amount']
-    eur_fee = data.get('eur_fee', 0)
-    time = data['time']
-    
-    # Determine trade type
-    if btc_amount > 0 and eur_amount < 0:
-        # BUY: received BTC, paid EUR
-        trade_type = 'BUY'
-        btc_net = btc_amount
-        eur_paid = abs(eur_amount)
-    elif btc_amount < 0 and eur_amount > 0:
-        # SELL: sold BTC, received EUR
-        trade_type = 'SELL'
-        btc_net = abs(btc_amount)
-        eur_paid = eur_amount  # EUR received (will be proceeds)
-    else:
-        # Invalid combination
-        continue
-    
-    complete_trades.append({
-        'refid': refid,
-        'time': time,
-        'type': trade_type,
-        'btc_amount': btc_net,
-        'eur_amount': eur_paid,
-        'fee_eur': eur_fee
-    })
+    for _, row in df_trades.iterrows():
+        refid = row['refid']
+        asset = row['asset']
+        amount = float(row['amount'])
+        fee = float(row['fee'])
+        time = row['time']
 
-print(f"Reconstructed {len(complete_trades):,} complete BTC/EUR trades")
+        if asset == 'BTC':
+            trades[refid]['btc_amount'] = amount
+            trades[refid]['time'] = time
+        elif asset == 'EUR':
+            trades[refid]['eur_amount'] = amount
+            trades[refid]['eur_fee'] = fee
+            trades[refid]['time'] = time
 
-# Separate by type
-trades_buy = [t for t in complete_trades if t['type'] == 'BUY']
-trades_sell = [t for t in complete_trades if t['type'] == 'SELL']
+    # Convert to list and determine trade type
+    complete_trades = []
 
-print(f"  BUY:  {len(trades_buy):,} trades")
-print(f"  SELL: {len(trades_sell):,} trades")
+    for refid, data in trades.items():
+        # Skip incomplete trades
+        if 'btc_amount' not in data or 'eur_amount' not in data:
+            continue
 
-# Statistics
-total_btc_buy = sum(t['btc_amount'] for t in trades_buy)
-total_btc_sell = sum(t['btc_amount'] for t in trades_sell)
-total_eur_buy = sum(t['eur_amount'] for t in trades_buy)
-total_eur_sell = sum(t['eur_amount'] for t in trades_sell)
-total_fees = sum(t['fee_eur'] for t in complete_trades)
+        btc_amount = data['btc_amount']
+        eur_amount = data['eur_amount']
+        eur_fee = data.get('eur_fee', 0)
+        time = data['time']
 
-print(f"\nBTC purchased: {total_btc_buy:.8f}")
-print(f"BTC sold: {total_btc_sell:.8f}")
-print(f"EUR spent: €{total_eur_buy:,.2f}")
-print(f"EUR received: €{total_eur_sell:,.2f}")
-print(f"Total fees: €{total_fees:.2f}")
+        # Determine trade type
+        if btc_amount > 0 and eur_amount < 0:
+            # BUY: received BTC, paid EUR
+            trade_type = 'BUY'
+            btc_net = btc_amount
+            eur_paid = abs(eur_amount)
+        elif btc_amount < 0 and eur_amount > 0:
+            # SELL: sold BTC, received EUR
+            trade_type = 'SELL'
+            btc_net = abs(btc_amount)
+            eur_paid = eur_amount  # EUR received (will be proceeds)
+        else:
+            # Invalid combination
+            continue
 
-# Connect to database
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
+        complete_trades.append({
+            'refid': refid,
+            'time': time,
+            'type': trade_type,
+            'btc_amount': btc_net,
+            'eur_amount': eur_paid,
+            'fee_eur': eur_fee
+        })
 
-# Check current Kraken data
-cursor.execute("""
-    SELECT COUNT(*), MIN(transaction_date), MAX(transaction_date)
-    FROM transactions
-    WHERE exchange_name = 'Kraken'
-    AND cryptocurrency = 'BTC'
-""")
-current_data = cursor.fetchone()
-print(f"\nCurrent Kraken BTC data in DB:")
-print(f"  Transactions: {current_data[0]:,}")
-if current_data[1]:
-    print(f"  Date range: {current_data[1]} to {current_data[2]}")
+    print(f"Reconstructed {len(complete_trades):,} complete BTC/EUR trades")
 
-# Prepare transactions
-transactions_to_insert = []
+    # Separate by type
+    trades_buy = [t for t in complete_trades if t['type'] == 'BUY']
+    trades_sell = [t for t in complete_trades if t['type'] == 'SELL']
 
-for trade in complete_trades:
-    # Parse date with timezone
-    dt = pytz.UTC.localize(trade['time'].to_pydatetime())
-    
-    # Calculate price per unit
-    if trade['btc_amount'] > 0:
-        price_per_unit = trade['eur_amount'] / trade['btc_amount']
-    else:
-        price_per_unit = 0
-    
-    transactions_to_insert.append({
-        'date': dt.isoformat(),
-        'type': trade['type'],
-        'exchange': 'Kraken',
-        'crypto': 'BTC',
-        'amount': trade['btc_amount'],
-        'price': price_per_unit,
-        'total': trade['eur_amount'],
-        'fee': trade['fee_eur'],
-        'refid': trade['refid']
-    })
+    print(f"  BUY:  {len(trades_buy):,} trades")
+    print(f"  SELL: {len(trades_sell):,} trades")
 
-print(f"\n\nPrepared {len(transactions_to_insert):,} transactions for import")
+    # Statistics
+    total_btc_buy = sum(t['btc_amount'] for t in trades_buy)
+    total_btc_sell = sum(t['btc_amount'] for t in trades_sell)
+    total_eur_buy = sum(t['eur_amount'] for t in trades_buy)
+    total_eur_sell = sum(t['eur_amount'] for t in trades_sell)
+    total_fees = sum(t['fee_eur'] for t in complete_trades)
 
-# Show sample
-print("\n" + "="*80)
-print("SAMPLE TRANSACTIONS (first 5):")
-print("="*80)
+    print(f"\nBTC purchased: {total_btc_buy:.8f}")
+    print(f"BTC sold: {total_btc_sell:.8f}")
+    print(f"EUR spent: EUR{total_eur_buy:,.2f}")
+    print(f"EUR received: EUR{total_eur_sell:,.2f}")
+    print(f"Total fees: EUR{total_fees:.2f}")
 
-for i, tx in enumerate(transactions_to_insert[:5]):
-    print(f"\n{i+1}. {tx['type']} on {tx['date'][:10]}")
-    print(f"   Amount: {tx['amount']:.8f} BTC")
-    print(f"   Price:  €{tx['price']:.2f}/BTC")
-    print(f"   Total:  €{tx['total']:.2f}")
-    print(f"   Fee:    €{tx['fee']:.4f}")
-    print(f"   RefID:  {tx['refid']}")
+    # Connect to database
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
 
-# Ask for confirmation
-print("\n" + "="*80)
-print("DECISION POINT")
-print("="*80)
-print(f"\nCurrent DB has: {current_data[0]:,} Kraken BTC transactions")
-print(f"New import will add: {len(transactions_to_insert):,} transactions")
-print("\nOptions:")
-print("1. DELETE existing Kraken data and import new (RECOMMENDED)")
-print("2. APPEND new data (keep existing)")
-print("3. Cancel (no changes)")
+    # Prepare transactions
+    transactions_to_insert = []
 
-choice = input("\nEnter choice (1, 2, or 3): ").strip()
+    for trade in complete_trades:
+        # Parse date with timezone
+        dt = pytz.UTC.localize(trade['time'].to_pydatetime())
 
-if choice == '1':
-    # Delete existing
-    print("\nDeleting existing Kraken data...")
-    cursor.execute("""
-        DELETE FROM transactions
-        WHERE exchange_name = 'Kraken'
-        AND cryptocurrency = 'BTC'
-    """)
-    deleted = cursor.rowcount
-    print(f"  Deleted: {deleted:,} transactions")
-elif choice != '2':
-    print("\n✗ Aborted. No changes made.")
+        # Calculate price per unit
+        if trade['btc_amount'] > 0:
+            price_per_unit = trade['eur_amount'] / trade['btc_amount']
+        else:
+            price_per_unit = 0
+
+        tx_date = dt.isoformat()
+        tx_type = trade['type']
+        tx_amount = trade['btc_amount']
+        tx_total = trade['eur_amount']
+        tx_fee = trade['fee_eur']
+
+        record_hash = compute_record_hash(
+            source, tx_date, tx_type, exchange_name,
+            'BTC', tx_amount, tx_total, tx_fee
+        )
+
+        transactions_to_insert.append({
+            'date': tx_date,
+            'type': tx_type,
+            'exchange': exchange_name,
+            'crypto': 'BTC',
+            'amount': tx_amount,
+            'price': price_per_unit,
+            'total': tx_total,
+            'fee': tx_fee,
+            'refid': trade['refid'],
+            'source': source,
+            'imported_at': imported_at,
+            'record_hash': record_hash
+        })
+
+    print(f"\nPrepared {len(transactions_to_insert):,} transactions for import")
+
+    # Show sample
+    print("\n" + "=" * 80)
+    print("SAMPLE TRANSACTIONS (first 5):")
+    print("=" * 80)
+
+    for i, tx in enumerate(transactions_to_insert[:5]):
+        print(f"\n{i+1}. {tx['type']} on {tx['date'][:10]}")
+        print(f"   Amount: {tx['amount']:.8f} BTC")
+        print(f"   Price:  EUR{tx['price']:.2f}/BTC")
+        print(f"   Total:  EUR{tx['total']:.2f}")
+        print(f"   Fee:    EUR{tx['fee']:.4f}")
+        print(f"   RefID:  {tx['refid']}")
+
+    # Delete previous records for this source file
+    print(f"\nDeleting previous records for source '{source}'...")
+    deleted = delete_by_source(conn, source)
+    print(f"  Deleted {deleted} previous records for {source}")
+
+    # Insert new data
+    print("\nInserting new data...")
+    inserted = 0
+    for tx in transactions_to_insert:
+        cursor.execute("""
+            INSERT INTO transactions (
+                transaction_date, transaction_type, exchange_name, cryptocurrency,
+                amount, price_per_unit, total_value, fee_amount, currency,
+                source, imported_at, record_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            tx['date'], tx['type'], tx['exchange'], tx['crypto'],
+            tx['amount'], tx['price'], tx['total'], tx['fee'], 'EUR',
+            tx['source'], tx['imported_at'], tx['record_hash']
+        ))
+        inserted += 1
+
+    conn.commit()
     conn.close()
-    exit(0)
 
-# Insert new data
-print("\nInserting new data...")
-inserted = 0
-for tx in transactions_to_insert:
+    print(f"  Inserted: {inserted:,} transactions")
+
+    # Verify
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
     cursor.execute("""
-        INSERT INTO transactions (
-            transaction_date, transaction_type, exchange_name, cryptocurrency,
-            amount, price_per_unit, total_value, fee_amount, currency
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        tx['date'], tx['type'], tx['exchange'], tx['crypto'],
-        tx['amount'], tx['price'], tx['total'], tx['fee'], 'EUR'
-    ))
-    inserted += 1
+        SELECT
+            transaction_type,
+            COUNT(*) as count,
+            SUM(amount) as total_btc,
+            SUM(total_value) as total_eur,
+            SUM(fee_amount) as total_fees_eur
+        FROM transactions
+        WHERE exchange_name = ?
+        AND cryptocurrency = 'BTC'
+        GROUP BY transaction_type
+    """, (exchange_name,))
 
-conn.commit()
-conn.close()
+    print("\n" + "=" * 80)
+    print("VERIFICATION")
+    print("=" * 80)
 
-print(f"  Inserted: {inserted:,} transactions")
+    for row in cursor.fetchall():
+        tx_type, count, btc, eur, fees = row
+        print(f"\n{tx_type}:")
+        print(f"  Transactions: {count:,}")
+        print(f"  BTC: {btc:.8f}")
+        print(f"  EUR: EUR{eur:,.2f}")
+        print(f"  Fees: EUR{fees:,.2f}")
 
-# Verify
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
+    conn.close()
 
-cursor.execute("""
-    SELECT 
-        transaction_type,
-        COUNT(*) as count,
-        SUM(amount) as total_btc,
-        SUM(total_value) as total_eur,
-        SUM(fee_amount) as total_fees_eur
-    FROM transactions
-    WHERE exchange_name = 'Kraken'
-    AND cryptocurrency = 'BTC'
-    GROUP BY transaction_type
-""")
+    print("\n" + "=" * 80)
+    print("SUCCESS!")
+    print("=" * 80)
+    print(f"\n  Kraken ledger imported with fee handling")
+    print(f"  Source: {source}")
+    print(f"  Records: {inserted}")
+    print("\nKey points:")
+    print("  - Paired BTC/EUR rows by refid")
+    print("  - Fee extracted from EUR row")
+    print("  - Trade type determined by amount signs")
+    print("  - Source tracking: source, imported_at, record_hash set")
 
-print("\n" + "="*80)
-print("VERIFICATION")
-print("="*80)
+    print("\n" + "=" * 80)
 
-for row in cursor.fetchall():
-    tx_type, count, btc, eur, fees = row
-    print(f"\n{tx_type}:")
-    print(f"  Transactions: {count:,}")
-    print(f"  BTC: {btc:.8f}")
-    print(f"  EUR: €{eur:,.2f}")
-    print(f"  Fees: €{fees:,.2f}")
+    return inserted
 
-conn.close()
 
-print("\n" + "="*80)
-print("SUCCESS!")
-print("="*80)
-print("\n✓ Kraken ledger imported with fee handling")
-print("\nKey points:")
-print("  - Paired BTC/EUR rows by refid")
-print("  - Fee extracted from EUR row")
-print("  - Trade type determined by amount signs")
-
-print("\n" + "="*80)
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python3 importers/import_kraken_with_fees.py <filepath> [exchange_name]")
+        sys.exit(1)
+    filepath = sys.argv[1]
+    exchange = sys.argv[2] if len(sys.argv) > 2 else 'Kraken'
+    import_kraken(filepath, exchange)

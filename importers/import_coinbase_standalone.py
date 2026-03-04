@@ -1,217 +1,210 @@
 """
 Coinbase Standalone Importer with Fee Handling
 Extracts fees from 'Fees and/or Spread' column
+
+Usage:
+    python3 importers/import_coinbase_standalone.py <filepath> [exchange_name]
 """
 
+import sys
+import os
 import pandas as pd
 import sqlite3
 from datetime import datetime
 import pytz
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+
+from importers.import_utils import compute_record_hash, delete_by_source
 from config import DATABASE_PATH
 DB_PATH = DATABASE_PATH
 
-COINBASE_FILE = 'data/2024/coinbase_history.csv'
 
-print("="*80)
-print("IMPORTING COINBASE WITH FEE HANDLING")
-print("="*80)
+def import_coinbase(filepath, exchange_name='Coinbase'):
+    """Import Coinbase transactions from a CSV file with source tracking."""
 
-# Read file
-df = pd.read_csv(COINBASE_FILE)
-print(f"\nLoaded {len(df):,} rows from {COINBASE_FILE}")
+    source = os.path.basename(filepath)
+    imported_at = datetime.now().isoformat()
 
-# Deduplicate by ID
-original_count = len(df)
-df = df.drop_duplicates(subset=['ID'])
-print(f"After deduplication: {len(df):,} rows ({original_count - len(df):,} duplicates removed)")
+    print("="*80)
+    print("IMPORTING COINBASE WITH FEE HANDLING")
+    print("="*80)
+    print(f"  File:     {filepath}")
+    print(f"  Source:   {source}")
+    print(f"  Exchange: {exchange_name}")
 
-# Parse dates
-df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='%Y-%m-%d %H:%M:%S %Z', utc=True)
+    # Read file
+    df = pd.read_csv(filepath)
+    print(f"\nLoaded {len(df):,} rows from {filepath}")
 
-# Filter BTC only
-df_btc = df[df['Asset'] == 'BTC'].copy()
-print(f"BTC transactions: {len(df_btc):,}")
+    # Deduplicate by ID
+    original_count = len(df)
+    df = df.drop_duplicates(subset=['ID'])
+    print(f"After deduplication: {len(df):,} rows ({original_count - len(df):,} duplicates removed)")
 
-# Process each row
-transactions_to_insert = []
+    # Parse dates
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='%Y-%m-%d %H:%M:%S %Z', utc=True)
 
-for _, row in df_btc.iterrows():
-    trans_type = str(row['Transaction Type'])
-    quantity = float(row['Quantity Transacted'])
-    
-    if quantity == 0:
-        continue
-    
-    # Parse values
-    try:
-        price_at_trans = float(str(row['Price at Transaction']).replace('€', '').replace(',', '')) if pd.notna(row['Price at Transaction']) and row['Price at Transaction'] != '' else 0
-    except:
-        price_at_trans = 0
-    
-    try:
-        subtotal = float(str(row['Subtotal']).replace('€', '').replace(',', '').replace('-', '')) if pd.notna(row['Subtotal']) and row['Subtotal'] != '' else 0
-    except:
-        subtotal = 0
-    
-    # EXTRACT FEE from 'Fees and/or Spread'
-    fee_str = str(row.get('Fees and/or Spread', ''))
-    fee_amount = 0
-    if fee_str and fee_str != 'nan' and fee_str != '':
+    # Filter BTC only
+    df_btc = df[df['Asset'] == 'BTC'].copy()
+    print(f"BTC transactions: {len(df_btc):,}")
+
+    # Process each row
+    transactions_to_insert = []
+
+    for _, row in df_btc.iterrows():
+        trans_type = str(row['Transaction Type'])
+        quantity = float(row['Quantity Transacted'])
+
+        if quantity == 0:
+            continue
+
+        # Parse values
         try:
-            fee_amount = float(fee_str.replace('€', '').replace(',', '').replace('-', ''))
+            price_at_trans = float(str(row['Price at Transaction']).replace('€', '').replace(',', '')) if pd.notna(row['Price at Transaction']) and row['Price at Transaction'] != '' else 0
         except:
-            fee_amount = 0
-    
-    # Determine transaction type
-    trans_type_lower = trans_type.lower()
-    if 'buy' in trans_type_lower:
-        transaction_type = 'BUY'
-    elif 'sell' in trans_type_lower:
-        transaction_type = 'SELL'
-    elif 'send' in trans_type_lower:
-        transaction_type = 'WITHDRAWAL'
-    elif 'receive' in trans_type_lower:
-        transaction_type = 'DEPOSIT'
-    else:
-        transaction_type = 'OTHER'
-    
-    transactions_to_insert.append({
-        'date': row['Timestamp'].isoformat(),
-        'type': transaction_type,
-        'exchange': 'Coinbase',
-        'crypto': 'BTC',
-        'amount': abs(quantity),
-        'price': price_at_trans,
-        'total': subtotal,
-        'fee': fee_amount,
-        'id': str(row['ID'])
-    })
+            price_at_trans = 0
 
-print(f"\nPrepared {len(transactions_to_insert):,} transactions")
+        try:
+            subtotal = float(str(row['Subtotal']).replace('€', '').replace(',', '').replace('-', '')) if pd.notna(row['Subtotal']) and row['Subtotal'] != '' else 0
+        except:
+            subtotal = 0
 
-# Statistics
-buys = [t for t in transactions_to_insert if t['type'] == 'BUY']
-sells = [t for t in transactions_to_insert if t['type'] == 'SELL']
-total_fees = sum(t['fee'] for t in transactions_to_insert)
+        # EXTRACT FEE from 'Fees and/or Spread'
+        fee_str = str(row.get('Fees and/or Spread', ''))
+        fee_amount = 0
+        if fee_str and fee_str != 'nan' and fee_str != '':
+            try:
+                fee_amount = float(fee_str.replace('€', '').replace(',', '').replace('-', ''))
+            except:
+                fee_amount = 0
 
-print(f"  BUY:  {len(buys):,}")
-print(f"  SELL: {len(sells):,}")
-print(f"  Total fees: €{total_fees:,.2f}")
+        # Determine transaction type
+        trans_type_lower = trans_type.lower()
+        if 'buy' in trans_type_lower:
+            transaction_type = 'BUY'
+        elif 'sell' in trans_type_lower:
+            transaction_type = 'SELL'
+        elif 'send' in trans_type_lower:
+            transaction_type = 'WITHDRAWAL'
+        elif 'receive' in trans_type_lower:
+            transaction_type = 'DEPOSIT'
+        else:
+            transaction_type = 'OTHER'
 
-# Connect to database
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
+        record_hash = compute_record_hash(
+            source, row['Timestamp'].isoformat(), transaction_type,
+            exchange_name, 'BTC', abs(quantity), subtotal, fee_amount
+        )
 
-# Check current Coinbase data
-cursor.execute("""
-    SELECT COUNT(*), MIN(transaction_date), MAX(transaction_date)
-    FROM transactions
-    WHERE exchange_name = 'Coinbase'
-    AND cryptocurrency = 'BTC'
-""")
-current_data = cursor.fetchone()
-print(f"\nCurrent Coinbase BTC data in DB:")
-print(f"  Transactions: {current_data[0]:,}")
-if current_data[1]:
-    print(f"  Date range: {current_data[1]} to {current_data[2]}")
+        transactions_to_insert.append({
+            'date': row['Timestamp'].isoformat(),
+            'type': transaction_type,
+            'exchange': exchange_name,
+            'crypto': 'BTC',
+            'amount': abs(quantity),
+            'price': price_at_trans,
+            'total': subtotal,
+            'fee': fee_amount,
+            'id': str(row['ID']),
+            'record_hash': record_hash
+        })
 
-# Show sample
-print("\n" + "="*80)
-print("SAMPLE TRANSACTIONS (first 5):")
-print("="*80)
+    print(f"\nPrepared {len(transactions_to_insert):,} transactions")
 
-for i, tx in enumerate(transactions_to_insert[:5]):
-    print(f"\n{i+1}. {tx['type']} on {tx['date'][:10]}")
-    print(f"   Amount: {tx['amount']:.8f} BTC")
-    print(f"   Price:  €{tx['price']:.2f}/BTC")
-    print(f"   Total:  €{tx['total']:.2f}")
-    print(f"   Fee:    €{tx['fee']:.4f}")
+    # Statistics
+    buys = [t for t in transactions_to_insert if t['type'] == 'BUY']
+    sells = [t for t in transactions_to_insert if t['type'] == 'SELL']
+    total_fees = sum(t['fee'] for t in transactions_to_insert)
 
-# Ask for confirmation
-print("\n" + "="*80)
-print("DECISION POINT")
-print("="*80)
-print(f"\nCurrent DB has: {current_data[0]:,} Coinbase BTC transactions")
-print(f"New import will add: {len(transactions_to_insert):,} transactions")
-print("\nOptions:")
-print("1. DELETE existing Coinbase data and import new (RECOMMENDED)")
-print("2. APPEND new data (keep existing)")
-print("3. Cancel (no changes)")
+    print(f"  BUY:  {len(buys):,}")
+    print(f"  SELL: {len(sells):,}")
+    print(f"  Total fees: EUR{total_fees:,.2f}")
 
-choice = input("\nEnter choice (1, 2, or 3): ").strip()
+    # Show sample
+    print("\n" + "="*80)
+    print("SAMPLE TRANSACTIONS (first 5):")
+    print("="*80)
 
-if choice == '1':
-    # Delete existing
-    print("\nDeleting existing Coinbase data...")
+    for i, tx in enumerate(transactions_to_insert[:5]):
+        print(f"\n{i+1}. {tx['type']} on {tx['date'][:10]}")
+        print(f"   Amount: {tx['amount']:.8f} BTC")
+        print(f"   Price:  EUR{tx['price']:.2f}/BTC")
+        print(f"   Total:  EUR{tx['total']:.2f}")
+        print(f"   Fee:    EUR{tx['fee']:.4f}")
+
+    # Connect to database
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Delete by source
+    deleted = delete_by_source(conn, source)
+    print(f"\n  Deleted {deleted} previous records for {source}")
+
+    # Insert new data
+    print("\nInserting new data...")
+    inserted = 0
+    for tx in transactions_to_insert:
+        cursor.execute("""
+            INSERT INTO transactions (
+                transaction_date, transaction_type, exchange_name, cryptocurrency,
+                amount, price_per_unit, total_value, fee_amount, currency,
+                transaction_id, source, imported_at, record_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            tx['date'], tx['type'], tx['exchange'], tx['crypto'],
+            tx['amount'], tx['price'], tx['total'], tx['fee'], 'EUR',
+            tx['id'], source, imported_at, tx['record_hash']
+        ))
+        inserted += 1
+
+    conn.commit()
+    print(f"  Inserted: {inserted:,} transactions")
+
+    # Verify
     cursor.execute("""
-        DELETE FROM transactions
-        WHERE exchange_name = 'Coinbase'
+        SELECT
+            transaction_type,
+            COUNT(*) as count,
+            SUM(amount) as total_btc,
+            SUM(total_value) as total_eur,
+            SUM(fee_amount) as total_fees_eur
+        FROM transactions
+        WHERE exchange_name = ?
         AND cryptocurrency = 'BTC'
-    """)
-    deleted = cursor.rowcount
-    print(f"  Deleted: {deleted:,} transactions")
-elif choice != '2':
-    print("\n✗ Aborted. No changes made.")
+        GROUP BY transaction_type
+    """, (exchange_name,))
+
+    print("\n" + "="*80)
+    print("VERIFICATION")
+    print("="*80)
+
+    for row in cursor.fetchall():
+        tx_type, count, btc, eur, fees = row
+        print(f"\n{tx_type}:")
+        print(f"  Transactions: {count:,}")
+        print(f"  BTC: {btc:.8f}")
+        print(f"  EUR: EUR{eur:,.2f}")
+        print(f"  Fees: EUR{fees:,.2f}")
+
     conn.close()
-    exit(0)
 
-# Insert new data
-print("\nInserting new data...")
-inserted = 0
-for tx in transactions_to_insert:
-    cursor.execute("""
-        INSERT INTO transactions (
-            transaction_date, transaction_type, exchange_name, cryptocurrency,
-            amount, price_per_unit, total_value, fee_amount, currency
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        tx['date'], tx['type'], tx['exchange'], tx['crypto'],
-        tx['amount'], tx['price'], tx['total'], tx['fee'], 'EUR'
-    ))
-    inserted += 1
+    print("\n" + "="*80)
+    print("SUCCESS!")
+    print("="*80)
+    print(f"\n  Coinbase data imported with fee handling")
+    print(f"  Source: {source}")
+    print(f"  Records: {inserted}")
+    print("\n" + "="*80)
 
-conn.commit()
-conn.close()
+    return inserted
 
-print(f"  Inserted: {inserted:,} transactions")
 
-# Verify
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
-
-cursor.execute("""
-    SELECT 
-        transaction_type,
-        COUNT(*) as count,
-        SUM(amount) as total_btc,
-        SUM(total_value) as total_eur,
-        SUM(fee_amount) as total_fees_eur
-    FROM transactions
-    WHERE exchange_name = 'Coinbase'
-    AND cryptocurrency = 'BTC'
-    GROUP BY transaction_type
-""")
-
-print("\n" + "="*80)
-print("VERIFICATION")
-print("="*80)
-
-for row in cursor.fetchall():
-    tx_type, count, btc, eur, fees = row
-    print(f"\n{tx_type}:")
-    print(f"  Transactions: {count:,}")
-    print(f"  BTC: {btc:.8f}")
-    print(f"  EUR: €{eur:,.2f}")
-    print(f"  Fees: €{fees:,.2f}")
-
-conn.close()
-
-print("\n" + "="*80)
-print("SUCCESS!")
-print("="*80)
-print("\n✓ Coinbase data imported with fee handling")
-print("\nNext step:")
-print("  python3 verify_exchange_import.py Coinbase")
-
-print("\n" + "="*80)
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python3 import_coinbase_standalone.py <filepath> [exchange_name]")
+        sys.exit(1)
+    filepath = sys.argv[1]
+    exchange = sys.argv[2] if len(sys.argv) > 2 else 'Coinbase'
+    import_coinbase(filepath, exchange)

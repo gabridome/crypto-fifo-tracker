@@ -1,238 +1,239 @@
 """
 Wirex Card Payment Importer
 Handles Card Payment transactions (BTC sells via card)
-Processes 3 separate files (2023, 2024, 2025)
+Accepts a single CSV file via CLI argument.
 NOTE: Files MUST be in UTF-8 format (not UTF-16)
+
+EUR values: uses daily BTC/EUR prices from CryptoCompare (data/crypto_prices.csv).
+Fallback chain: Rate column → Foreign Amount → crypto_prices → yearly estimate.
 """
 
+import sys
+import os
 import pandas as pd
 import sqlite3
 from datetime import datetime
 import pytz
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+
 from config import DATABASE_PATH
-DB_PATH = DATABASE_PATH
+from importers.import_utils import compute_record_hash, delete_by_source
+from importers.crypto_prices import CryptoPrices
 
-WIREX_FILES = [
-    'data/wirex_2023.csv',
-    'data/wirex_2024.csv',
-    'data/wirex_2025.csv'
-]
 
-print("="*80)
-print("IMPORTING WIREX CARD PAYMENT TRANSACTIONS")
-print("="*80)
+def import_wirex(filepath, exchange_name='Wirex'):
+    """
+    Import Wirex card payment transactions from a single CSV file.
 
-# Read all files
-all_dfs = []
+    Args:
+        filepath: path to the Wirex CSV file (semicolon-delimited, UTF-8)
+        exchange_name: exchange name for DB records (default 'Wirex')
+    """
+    source = os.path.basename(filepath)
+    imported_at = datetime.now().isoformat()
 
-for file in WIREX_FILES:
+    print("=" * 80)
+    print(f"IMPORTING WIREX CARD PAYMENT TRANSACTIONS")
+    print(f"  File:     {filepath}")
+    print(f"  Source:   {source}")
+    print(f"  Exchange: {exchange_name}")
+    print("=" * 80)
+
+    # Read file with semicolon delimiter
     try:
-        # Read with semicolon delimiter
-        df = pd.read_csv(file, delimiter=';', encoding='utf-8')
-        print(f"\n✓ Loaded {len(df):,} rows from {file}")
-        all_dfs.append(df)
+        df = pd.read_csv(filepath, delimiter=';', encoding='utf-8')
+        print(f"\nLoaded {len(df):,} rows from {filepath}")
     except Exception as e:
-        print(f"\n✗ Error loading {file}: {e}")
+        print(f"\nError loading {filepath}: {e}")
         print(f"  Make sure file is converted to UTF-8!")
-        continue
+        print("  iconv -f UTF-16LE -t UTF-8 original.csv > wirex_YYYY.csv")
+        sys.exit(1)
 
-if not all_dfs:
-    print("\n✗ No files loaded successfully!")
-    print("\nPlease convert files to UTF-8 first:")
-    print("  iconv -f UTF-16LE -t UTF-8 original.csv > wirex_YYYY.csv")
-    exit(1)
+    print(f"Columns: {list(df.columns)}")
 
-# Combine all files
-df = pd.concat(all_dfs, ignore_index=True)
-print(f"\n✓ Combined total: {len(df):,} rows")
-print(f"Columns: {list(df.columns)}")
+    # Filter only Card Payment transactions
+    df_payments = df[df['Type'] == 'Card Payment'].copy()
+    print(f"\nCard Payment transactions: {len(df_payments):,}")
 
-# Filter only Card Payment transactions
-df_payments = df[df['Type'] == 'Card Payment'].copy()
-print(f"\nCard Payment transactions: {len(df_payments):,}")
+    if len(df_payments) == 0:
+        print("\nNo Card Payment transactions found!")
+        print("Check if:")
+        print("  1. Files are UTF-8 encoded")
+        print("  2. Column 'Type' contains 'Card Payment'")
+        print("  3. Delimiter is semicolon ';'")
+        sys.exit(1)
 
-if len(df_payments) == 0:
-    print("\n⚠️  No Card Payment transactions found!")
-    print("Check if:")
-    print("  1. Files are UTF-8 encoded")
-    print("  2. Column 'Type' contains 'Card Payment'")
-    print("  3. Delimiter is semicolon ';'")
-    exit(1)
+    # Parse datetime: "10-01-2024 11:36:28"
+    def parse_wirex_date(dt_str):
+        """Parse Wirex datetime: DD-MM-YYYY HH:MM:SS"""
+        dt = datetime.strptime(dt_str, '%d-%m-%Y %H:%M:%S')
+        return pytz.UTC.localize(dt)
 
-# Parse datetime: "10-01-2024 11:36:28"
-def parse_wirex_date(dt_str):
-    """Parse Wirex datetime: DD-MM-YYYY HH:MM:SS"""
-    dt = datetime.strptime(dt_str, '%d-%m-%Y %H:%M:%S')
-    return pytz.UTC.localize(dt)
+    df_payments['date_parsed'] = df_payments['Completed Date'].apply(parse_wirex_date)
 
-df_payments['date_parsed'] = df_payments['Completed Date'].apply(parse_wirex_date)
+    # Amount is negative (we spent BTC), make it positive
+    df_payments['amount'] = df_payments['Amount'].astype(float).abs()
 
-# Amount is negative (we spent BTC), make it positive
-df_payments['amount'] = df_payments['Amount'].astype(float).abs()
+    # Currency should be BTC
+    df_payments['cryptocurrency'] = df_payments['Account Currency']
 
-# Currency should be BTC
-df_payments['cryptocurrency'] = df_payments['Account Currency']
+    # Filter only BTC transactions
+    df_btc = df_payments[df_payments['cryptocurrency'] == 'BTC'].copy()
+    print(f"\nBTC Card Payments: {len(df_btc):,}")
 
-# Filter only BTC transactions
-df_btc = df_payments[df_payments['cryptocurrency'] == 'BTC'].copy()
-print(f"\nBTC Card Payments: {len(df_btc):,}")
-
-# Calculate EUR value from Rate or Foreign Amount
-# If Rate exists, EUR = Amount * Rate
-# If Foreign Amount exists, use that
-def calculate_eur_value(row):
-    """Calculate EUR value of the transaction"""
-    amount_btc = row['amount']
-    
-    # Try to use Rate column
-    if pd.notna(row['Rate']) and row['Rate'] != '':
-        rate = float(row['Rate'])
-        return amount_btc * rate
-    
-    # Try to use Foreign Amount
-    if pd.notna(row['Foreign Amount']) and row['Foreign Amount'] != '':
-        foreign = float(row['Foreign Amount'])
-        # If Foreign Currency is EUR, use directly
-        if row.get('Foreign Currency') == 'EUR':
-            return foreign
-        # Otherwise estimate (this shouldn't happen often)
-        return amount_btc * 50000  # Rough estimate ~€50k/BTC
-    
-    # Fallback: estimate based on year
-    year = row['date_parsed'].year
-    if year == 2023:
-        return amount_btc * 25000  # ~€25k/BTC in 2023
-    elif year == 2024:
-        return amount_btc * 60000  # ~€60k/BTC in 2024
+    # Load crypto prices for EUR valuation
+    prices_path = os.path.join(PROJECT_ROOT, 'data', 'crypto_prices.csv')
+    crypto_prices = None
+    if os.path.exists(prices_path):
+        crypto_prices = CryptoPrices(prices_path)
     else:
-        return amount_btc * 60000  # Use 2024 rate for 2025
+        print(f"  ⚠️  {prices_path} not found — EUR values will use CSV Rate/Foreign Amount only")
 
-df_btc['total_value'] = df_btc.apply(calculate_eur_value, axis=1)
-df_btc['price_per_unit'] = df_btc['total_value'] / df_btc['amount']
+    # Calculate EUR value from Rate or Foreign Amount or crypto prices
+    def calculate_eur_value(row):
+        """Calculate EUR value of the transaction.
 
-# No separate fee column, assume 0 (fee included in price)
-df_btc['fee_amount'] = 0.0
+        Fallback chain: Rate column → Foreign Amount → CryptoPrices daily → None (error).
+        """
+        amount_btc = row['amount']
+        crypto = row['cryptocurrency']
 
-# Statistics
-print(f"\nDate range: {df_btc['date_parsed'].min()} to {df_btc['date_parsed'].max()}")
-print(f"\nTotal BTC spent: {df_btc['amount'].sum():.8f}")
-print(f"Total EUR value: €{df_btc['total_value'].sum():,.2f}")
-print(f"Average price: €{df_btc['price_per_unit'].mean():,.2f}/BTC")
+        # Try to use Rate column (Wirex-provided exchange rate)
+        if pd.notna(row.get('Rate')) and row['Rate'] != '':
+            try:
+                rate = float(row['Rate'])
+                if rate > 0:
+                    return amount_btc * rate
+            except (ValueError, TypeError):
+                pass
 
-# Connect to database
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
+        # Try to use Foreign Amount (if in EUR)
+        if pd.notna(row.get('Foreign Amount')) and row['Foreign Amount'] != '':
+            try:
+                foreign = abs(float(row['Foreign Amount']))
+                if row.get('Foreign Currency') == 'EUR' and foreign > 0:
+                    return foreign
+            except (ValueError, TypeError):
+                pass
 
-# Check existing Wirex data
-cursor.execute("""
-    SELECT COUNT(*) FROM transactions
-    WHERE exchange_name = 'Wirex'
-    AND cryptocurrency = 'BTC'
-""")
-existing_count = cursor.fetchone()[0]
+        # Use CryptoPrices daily closing price
+        if crypto_prices:
+            eur_val = crypto_prices.crypto_to_eur(crypto, amount_btc, row['date_parsed'])
+            if eur_val is not None:
+                return eur_val
 
-print(f"\nCurrent DB has: {existing_count:,} Wirex BTC transactions")
+        print(f"    ⚠️  No EUR price for {crypto} on {row['date_parsed'].strftime('%Y-%m-%d')}")
+        return 0.0
 
-# Show sample
-print("\n" + "="*80)
-print("SAMPLE TRANSACTIONS (first 5):")
-print("="*80)
+    df_btc['total_value'] = df_btc.apply(calculate_eur_value, axis=1)
+    df_btc['price_per_unit'] = df_btc['total_value'] / df_btc['amount']
 
-for i, (_, row) in enumerate(df_btc.head(5).iterrows(), 1):
-    print(f"\n{i}. SELL (Card Payment) on {row['date_parsed'].strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"   Amount: {row['amount']:.8f} BTC")
-    print(f"   Price:  €{row['price_per_unit']:.2f}/BTC")
-    print(f"   Total:  €{row['total_value']:.2f}")
-    print(f"   Merchant: {row['Description'][:50]}")
+    # No separate fee column, assume 0 (fee included in price)
+    df_btc['fee_amount'] = 0.0
 
-# Ask for confirmation
-print("\n" + "="*80)
-print("DECISION POINT")
-print("="*80)
-print(f"\nCurrent DB has: {existing_count:,} Wirex transactions")
-print(f"New import will add: {len(df_btc):,} transactions")
-print("\nNOTE: Card Payments = BTC sells")
-print("\nOptions:")
-print("1. DELETE existing Wirex data and import new (RECOMMENDED)")
-print("2. APPEND new data (keep existing)")
-print("3. Cancel (no changes)")
+    # Statistics
+    print(f"\nDate range: {df_btc['date_parsed'].min()} to {df_btc['date_parsed'].max()}")
+    print(f"\nTotal BTC spent: {df_btc['amount'].sum():.8f}")
+    print(f"Total EUR value: {df_btc['total_value'].sum():,.2f} EUR")
+    print(f"Average price: {df_btc['price_per_unit'].mean():,.2f} EUR/BTC")
 
-choice = input("\nEnter choice (1, 2, or 3): ").strip()
+    # Connect to database
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
 
-if choice == '1':
-    print("\nDeleting existing Wirex data...")
-    cursor.execute("DELETE FROM transactions WHERE exchange_name = 'Wirex'")
-    deleted = cursor.rowcount
-    print(f"  Deleted: {deleted:,} transactions")
-elif choice != '2':
-    print("\n✗ Aborted. No changes made.")
-    conn.close()
-    exit(0)
+    # Delete previous records for this source file
+    deleted = delete_by_source(conn, source)
+    print(f"\n  Deleted {deleted} previous records for {source}")
 
-# Insert new data
-print("\nInserting new data...")
-inserted = 0
+    # Insert new data
+    print("\nInserting new data...")
+    inserted = 0
 
-for _, row in df_btc.iterrows():
+    for _, row in df_btc.iterrows():
+        tx_date = row['date_parsed'].isoformat()
+        tx_type = 'SELL'
+        crypto = row['cryptocurrency']
+        amount = row['amount']
+        total_value = row['total_value']
+        fee = row['fee_amount']
+
+        record_hash = compute_record_hash(
+            source, tx_date, tx_type, exchange_name,
+            crypto, amount, total_value, fee
+        )
+
+        cursor.execute("""
+            INSERT INTO transactions (
+                transaction_date, transaction_type, exchange_name, cryptocurrency,
+                amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
+                transaction_id, notes,
+                source, imported_at, record_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            tx_date,
+            tx_type,
+            exchange_name,
+            crypto,
+            amount,
+            row['price_per_unit'],
+            total_value,
+            fee,
+            'EUR',
+            'EUR',
+            row.get('Related Entity ID', ''),
+            row['Description'],
+            source,
+            imported_at,
+            record_hash
+        ))
+        inserted += 1
+
+    conn.commit()
+    print(f"  Inserted: {inserted:,} transactions")
+
+    # Verify
     cursor.execute("""
-        INSERT INTO transactions (
-            transaction_date, transaction_type, exchange_name, cryptocurrency,
-            amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
-            transaction_id, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        row['date_parsed'].isoformat(),
-        'SELL',
-        'Wirex',
-        row['cryptocurrency'],
-        row['amount'],
-        row['price_per_unit'],
-        row['total_value'],
-        row['fee_amount'],
-        'EUR',
-        'EUR',
-        row.get('Related Entity ID', ''),
-        row['Description']
-    ))
-    inserted += 1
+        SELECT
+            transaction_type,
+            COUNT(*) as count,
+            SUM(amount) as total_btc,
+            SUM(total_value) as total_eur,
+            SUM(fee_amount) as total_fees
+        FROM transactions
+        WHERE source = ?
+        GROUP BY transaction_type
+    """, (source,))
 
-conn.commit()
-print(f"  Inserted: {inserted:,} transactions")
+    print("\n" + "=" * 80)
+    print("VERIFICATION")
+    print("=" * 80)
 
-# Verify
-cursor.execute("""
-    SELECT 
-        transaction_type,
-        COUNT(*) as count,
-        SUM(amount) as total_btc,
-        SUM(total_value) as total_eur,
-        SUM(fee_amount) as total_fees
-    FROM transactions
-    WHERE exchange_name = 'Wirex'
-    AND cryptocurrency = 'BTC'
-    GROUP BY transaction_type
-""")
+    for row in cursor.fetchall():
+        tx_type, count, btc, eur, fees = row
+        print(f"\n{tx_type}:")
+        print(f"  Transactions: {count:,}")
+        print(f"  BTC: {btc:.8f}")
+        print(f"  EUR: {eur:,.2f} EUR")
+        print(f"  Fees: {fees:.2f} EUR")
 
-print("\n" + "="*80)
-print("VERIFICATION")
-print("="*80)
+    conn.close()
 
-for row in cursor.fetchall():
-    tx_type, count, btc, eur, fees = row
-    print(f"\n{tx_type}:")
-    print(f"  Transactions: {count:,}")
-    print(f"  BTC: {btc:.8f}")
-    print(f"  EUR: €{eur:,.2f}")
-    print(f"  Fees: €{fees:.2f}")
+    print("\n" + "=" * 80)
+    print("SUCCESS!")
+    print("=" * 80)
+    print(f"\nWirex card payment data imported from {source}")
+    print(f"  Source tracking: source={source}, imported_at={imported_at}")
+    print("\n" + "=" * 80)
 
-conn.close()
 
-print("\n" + "="*80)
-print("SUCCESS!")
-print("="*80)
-print("\n✓ Wirex card payment data imported")
-print("✓ Combined 3 years: 2023, 2024, 2025")
-print("\nNext step:")
-print("  python3 reports/verify_exchange_import.py Wirex")
-print("\n" + "="*80)
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python3 import_wirex.py <filepath> [exchange_name]")
+        print("  filepath:      path to Wirex CSV file (semicolon-delimited, UTF-8)")
+        print("  exchange_name: optional, default 'Wirex'")
+        sys.exit(1)
+    filepath = sys.argv[1]
+    exchange = sys.argv[2] if len(sys.argv) > 2 else 'Wirex'
+    import_wirex(filepath, exchange)
