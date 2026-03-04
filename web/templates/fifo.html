@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}FIFO — FIFO Tracker{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>④ FIFO Calculation</h2>
+  <p class="desc">Calculate FIFO lots and sale matches. This assigns each sale to the oldest available purchase lots, computes holding periods and gains/losses.</p>
+</div>
+
+{% if not db_exists %}
+<div class="flash flash-error">✗ Database not found. Run setup.sh first.</div>
+{% else %}
+
+<!-- Action -->
+<div class="section">
+  <form action="{{ url_for('run_fifo') }}" method="post" style="display:inline"
+        onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Calculating...';">
+    <button type="submit" class="btn btn-primary" style="font-size:0.9rem; padding:0.7rem 1.5rem;">
+      {% if stats.lot_count %}↻ Recalculate FIFO{% else %}▶ Calculate FIFO{% endif %}
+    </button>
+  </form>
+  <span class="dim" style="font-size:0.75rem; margin-left:1rem;">A backup is created automatically before each calculation</span>
+</div>
+
+{% if stats.lot_count %}
+
+<!-- Summary cards -->
+<div class="cards">
+  <div class="card">
+    <div class="label">FIFO lots</div>
+    <div class="value accent">{{ stats.lot_count|fmt_num }}</div>
+    <div class="detail">{{ stats.lots_with_remaining|fmt_num }} with remaining</div>
+  </div>
+  <div class="card">
+    <div class="label">Sale matches</div>
+    <div class="value accent">{{ stats.match_count|fmt_num }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Total gain/loss</div>
+    <div class="value {% if stats.total_gain >= 0 %}green{% else %}red{% endif %}">
+      €{{ "%.2f"|format(stats.total_gain) }}
+    </div>
+  </div>
+</div>
+
+<!-- Per-year breakdown -->
+{% if stats.years %}
+<div class="section">
+  <div class="section-title">📅 Yearly breakdown</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Year</th>
+          <th>Matches</th>
+          <th>Exempt (≥365d)</th>
+          <th>Taxable (&lt;365d)</th>
+          <th>Exempt gain</th>
+          <th>Taxable gain</th>
+          <th>Total gain/loss</th>
+          <th>Est. tax (28%)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for y in stats.years %}
+        <tr>
+          <td class="mono" style="font-weight:600">{{ y.year }}</td>
+          <td class="mono right">{{ y.matches }}</td>
+          <td class="mono right">
+            <span class="badge badge-green">{{ y.exempt }}</span>
+          </td>
+          <td class="mono right">
+            {% if y.taxable > 0 %}
+              <span class="badge badge-red">{{ y.taxable }}</span>
+            {% else %}
+              <span class="badge badge-dim">0</span>
+            {% endif %}
+          </td>
+          <td class="mono right green">€{{ "%.2f"|format(y.exempt_gain or 0) }}</td>
+          <td class="mono right {% if (y.taxable_gain or 0) > 0 %}red{% else %}green{% endif %}">
+            €{{ "%.2f"|format(y.taxable_gain or 0) }}
+          </td>
+          <td class="mono right" style="font-weight:600; {% if (y.gain_loss or 0) >= 0 %}color:var(--green){% else %}color:var(--red){% endif %}">
+            €{{ "%.2f"|format(y.gain_loss or 0) }}
+          </td>
+          <td class="mono right dim">
+            {% if (y.taxable_gain or 0) > 0 %}
+              €{{ "%.2f"|format((y.taxable_gain or 0) * 0.28) }}
+            {% else %}
+              —
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<!-- Current holdings -->
+{% if stats.holdings %}
+<div class="section">
+  <div class="section-title">💰 Current holdings (open FIFO lots)</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Crypto</th>
+          <th>Open lots</th>
+          <th>Remaining amount</th>
+          <th>Cost basis</th>
+          <th>Avg cost per unit</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for h in stats.holdings %}
+        <tr>
+          <td style="font-weight:600">{{ h.cryptocurrency }}</td>
+          <td class="mono right">{{ h.lots }}</td>
+          <td class="mono right">{{ "%.8f"|format(h.remaining) }}</td>
+          <td class="mono right">€{{ "%.2f"|format(h.cost or 0) }}</td>
+          <td class="mono right dim">
+            {% if h.remaining > 0 %}
+              €{{ "%.2f"|format((h.cost or 0) / h.remaining) }}
+            {% else %}
+              —
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty-state" style="margin-top:2rem">
+  <div class="icon">⚡</div>
+  <p>FIFO not calculated yet<br>Click the button above to run the calculation</p>
+</div>
+{% endif %}
+
+{% endif %}
+
+<div style="margin-top:2rem; padding-top:1.5rem; border-top:1px solid var(--border); display:flex; justify-content:space-between;">
+  <a href="{{ url_for('status') }}" class="btn">← Status</a>
+  <a href="{{ url_for('reports') }}" class="btn btn-primary">Next: Reports →</a>
+</div>
+{% endblock %}

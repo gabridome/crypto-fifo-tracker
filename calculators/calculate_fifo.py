@@ -3,10 +3,15 @@ Calculate FIFO matching for all cryptocurrencies
 SQLite Database | EUR Currency | Lisbon Timezone
 """
 
-from crypto_fifo_tracker import CryptoFIFOTracker
 import os
+import sys
 import time
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from crypto_fifo_tracker import CryptoFIFOTracker
 from config import DATABASE_PATH
 DB_PATH = DATABASE_PATH
 

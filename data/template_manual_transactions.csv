@@ -1,0 +1,2 @@
+transaction_date,transaction_type,exchange_name,cryptocurrency,amount,price_per_unit,total_value,fee_amount,fee_currency,currency,transaction_id,notes
+2024-01-15T10:00:00+00:00,BUY,Exchange Name,BTC,0.50000000,40000.00,20000.00,50.00,EUR,EUR,EXAMPLE_001,Example purchase - delete this row

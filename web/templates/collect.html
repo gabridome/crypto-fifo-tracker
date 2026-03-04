@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title %}Collect — FIFO Tracker{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>① Collect Exchange Data</h2>
+  <p class="desc">Upload CSV files exported from your exchanges. Each exchange has a different export format — follow the instructions below.</p>
+</div>
+
+<!-- Upload area -->
+<div class="section">
+  <form action="{{ url_for('upload_csv') }}" method="post" enctype="multipart/form-data" id="upload-form">
+    <div class="upload-area" id="drop-zone" onclick="document.getElementById('file-input').click()">
+      <input type="file" name="file" id="file-input" accept=".csv">
+      <div style="font-size:1.8rem; margin-bottom:0.5rem">📂</div>
+      <p style="font-size:0.9rem; font-weight:600; margin-bottom:0.25rem">Drop CSV file here or click to browse</p>
+      <p style="font-size:0.75rem; color:var(--text-dim)">Accepted: .csv files from any supported exchange</p>
+    </div>
+  </form>
+</div>
+
+<!-- ECB Rate file status -->
+<div class="section">
+  {% if not eurusd.exists %}
+  <div class="flash flash-error" style="margin-bottom:0">
+    ✗ <strong>eurusd.csv missing</strong> — required for USD→EUR conversion (Bitfinex, Kraken, Coinbase Prime, Mt.Gox).
+    Download from the ECB or run the rate fetcher.
+  </div>
+  {% elif eurusd.needs_update %}
+  <div class="flash flash-error" style="margin-bottom:0; background:var(--yellow-bg); border-color:var(--yellow-border); color:var(--yellow)">
+    ⚠ <strong>eurusd.csv is {{ eurusd.age_days }} days old</strong> — last rate: {{ eurusd.max_date }}.
+    Update it to cover recent trades.
+    {% if eurusd.gaps %} Affects: {{ eurusd.gaps|map(attribute='exchange')|join(', ') }}.{% endif %}
+  </div>
+  {% elif eurusd.gaps %}
+  <div class="flash flash-error" style="margin-bottom:0; background:var(--yellow-bg); border-color:var(--yellow-border); color:var(--yellow)">
+    ⚠ <strong>eurusd.csv doesn't cover all dates</strong> ({{ eurusd.min_date }} → {{ eurusd.max_date }}).
+    {% for g in eurusd.gaps %}{{ g.exchange }}: {{ g.problem }}. {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<!-- Current files -->
+<div class="section">
+  <div class="section-title">📁 Files in data/</div>
+  {% if csv_files %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Exchange</th>
+          <th>Rows</th>
+          <th>Size</th>
+          <th>Modified</th>
+          <th>Importer</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in csv_files %}
+        <tr>
+          <td class="mono">{{ f.filename }}</td>
+          <td>
+            {% if f.exchange == 'Unknown' %}
+              <span class="badge badge-yellow">Unknown</span>
+            {% else %}
+              <span class="badge badge-green">{{ f.exchange }}</span>
+            {% endif %}
+          </td>
+          <td class="mono right">{{ f.rows|fmt_num }}</td>
+          <td class="mono dim">{{ f.size|fmt_size }}</td>
+          <td class="mono dim">{{ f.modified.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td>
+            {% if f.importer %}
+              <span class="badge badge-green">✓</span>
+            {% else %}
+              <span class="badge badge-dim">—</span>
+            {% endif %}
+          </td>
+          <td>
+            <form action="{{ url_for('delete_csv', filename=f.filename) }}" method="post" style="display:inline"
+                  onsubmit="return confirm('Delete {{ f.filename }}?')">
+              <button type="submit" class="btn btn-danger btn-sm">✗</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="icon">📭</div>
+    <p>No exchange CSV files found in data/<br>Upload your first file above</p>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Exchange instructions -->
+<div class="section">
+  <div class="section-title">📋 How to download from each exchange</div>
+  <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap:1rem;">
+    {% for exchange, info in instructions.items() %}
+    <div class="card">
+      <div class="label">{{ exchange }}</div>
+      <ol style="margin:0.5rem 0 0.75rem 1.2rem; font-size:0.8rem; color:var(--text-dim); line-height:1.7;">
+        {% for step in info.steps %}
+        <li>{{ step }}</li>
+        {% endfor %}
+      </ol>
+      <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+        {% if info.url %}
+        <a href="{{ info.url }}" target="_blank" class="btn btn-sm">Open ↗</a>
+        {% endif %}
+        <span class="mono dim" style="font-size:0.7rem;">→ {{ info.expected_file }}</span>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- Next step -->
+<div class="section">
+  <div class="section-title">📝 Manual / OTC / Other sources</div>
+  <div class="card" style="max-width:640px">
+    <div class="label">Standard CSV format</div>
+    <p style="font-size:0.82rem; color:var(--text-dim); margin:0.5rem 0; line-height:1.6">
+      For transactions not from a supported exchange (OTC purchases, family office, gifts, airdrops, inheritance, etc.),
+      create a CSV file using the standard format. Name it after the source
+      (e.g. <code class="mono">otc_2017.csv</code>, <code class="mono">inheritance_2024.csv</code>).
+    </p>
+    <p style="font-size:0.75rem; color:var(--text-dim); margin-bottom:0.75rem">
+      Required columns: <code class="mono">transaction_date, transaction_type, exchange_name, cryptocurrency, amount, total_value</code><br>
+      Optional: <code class="mono">price_per_unit, fee_amount, fee_currency, currency, transaction_id, notes</code>
+    </p>
+    <a href="{{ url_for('download_template') }}" class="btn btn-sm btn-primary">⬇ Download template CSV</a>
+  </div>
+</div>
+
+<!-- Next step nav -->
+<div style="margin-top:2rem; padding-top:1.5rem; border-top:1px solid var(--border); display:flex; justify-content:flex-end;">
+  <a href="{{ url_for('import_page') }}" class="btn btn-primary">Next: Import into database →</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Drag & drop
+  const zone = document.getElementById('drop-zone');
+  const input = document.getElementById('file-input');
+  const form = document.getElementById('upload-form');
+
+  ['dragenter','dragover'].forEach(e => {
+    zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.add('dragover'); });
+  });
+  ['dragleave','drop'].forEach(e => {
+    zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.remove('dragover'); });
+  });
+  zone.addEventListener('drop', ev => {
+    const files = ev.dataTransfer.files;
+    if (files.length > 0) {
+      input.files = files;
+      form.submit();
+    }
+  });
+  input.addEventListener('change', () => { if (input.files.length > 0) form.submit(); });
+</script>
+{% endblock %}

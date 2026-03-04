@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}Reports — FIFO Tracker{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>⑤ Reports & Statistics</h2>
+  <p class="desc">Database overview, per-exchange statistics, and IRS report generation.</p>
+</div>
+
+{% if not db_exists %}
+<div class="flash flash-error">✗ Database not found. Run setup.sh first.</div>
+{% else %}
+
+<!-- Summary cards -->
+{% if stats.tx_count %}
+<div class="cards">
+  <div class="card">
+    <div class="label">Total transactions</div>
+    <div class="value accent">{{ stats.tx_count|fmt_num }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Exchanges</div>
+    <div class="value accent">{{ stats.exchange_count }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Cryptocurrencies</div>
+    <div class="value accent">{{ stats.crypto_count }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Date range</div>
+    <div class="value" style="font-size:1rem">{{ stats.date_range[0][:10] if stats.date_range[0] else '—' }}</div>
+    <div class="detail">→ {{ stats.date_range[1][:10] if stats.date_range[1] else '—' }}</div>
+  </div>
+</div>
+
+<!-- Per-exchange table -->
+{% if stats.exchanges %}
+<div class="section">
+  <div class="section-title">📊 Per-exchange summary</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Exchange</th>
+          <th>Total</th>
+          <th>Buy</th>
+          <th>Sell</th>
+          <th>Buy value</th>
+          <th>Sell value</th>
+          <th>Total fees</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in stats.exchanges %}
+        <tr>
+          <td style="font-weight:600">{{ e.exchange_name }}</td>
+          <td class="mono right">{{ e.total|fmt_num }}</td>
+          <td class="mono right">{{ e.buys|fmt_num }}</td>
+          <td class="mono right">{{ e.sells|fmt_num }}</td>
+          <td class="mono right">{{ e.buy_val|fmt_eur }}</td>
+          <td class="mono right">{{ e.sell_val|fmt_eur }}</td>
+          <td class="mono right dim">{{ e.fees|fmt_eur }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+
+<!-- Generate IRS report -->
+<div class="section">
+  <div class="section-title">🇵🇹 Generate IRS Report</div>
+  {% if available_years %}
+  <p class="desc" style="margin-bottom:1rem">Generate the Excel report for the Portuguese tax filing (Anexo G1 + Anexo J).</p>
+  <div style="display:flex; gap:0.75rem; flex-wrap:wrap">
+    {% for year in available_years %}
+    <form action="{{ url_for('generate_report', year=year) }}" method="post" style="display:inline"
+          onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Generating...';">
+      <button type="submit" class="btn btn-primary">
+        📄 Generate {{ year }}
+      </button>
+    </form>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="dim" style="font-size:0.85rem">No FIFO sale data found. Run the FIFO calculation first.</p>
+  {% endif %}
+</div>
+
+<!-- Existing reports -->
+{% if existing_reports %}
+<div class="section">
+  <div class="section-title">📁 Generated reports</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Size</th>
+          <th>Generated</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in existing_reports %}
+        <tr>
+          <td class="mono">{{ r.filename }}</td>
+          <td class="mono dim">{{ r.size|fmt_size }}</td>
+          <td class="mono dim">{{ r.modified.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td>
+            <a href="{{ url_for('download_report', filename=r.filename) }}" class="btn btn-sm btn-success">
+              ⬇ Download
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% endif %}
+
+<!-- SQL Queries -->
+{% if sql_queries %}
+<div class="section">
+  <div class="section-title">🔍 SQL Queries</div>
+  <p class="desc" style="margin-bottom:1rem">Run analysis queries from <code>calculators/*.sql</code> against the database.</p>
+  <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:1rem">
+    {% for q in sql_queries %}
+    <button class="btn btn-sm" onclick="runQuery('{{ q.filename }}', this)"
+            style="text-transform:none">{{ q.label }}</button>
+    {% endfor %}
+  </div>
+  <div id="sql-result"></div>
+</div>
+
+<script>
+function runQuery(filename, btn) {
+  const container = document.getElementById('sql-result');
+  const allBtns = btn.parentElement.querySelectorAll('button');
+  allBtns.forEach(b => b.classList.remove('btn-primary'));
+  btn.classList.add('btn-primary');
+  container.innerHTML = '<p class="dim">Running query...</p>';
+
+  fetch('/reports/query/' + encodeURIComponent(filename))
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        container.innerHTML = '<div class="flash flash-error">' + data.error + '</div>';
+        return;
+      }
+      let html = '';
+      // Result count
+      html += '<div style="margin-bottom:0.5rem; font-size:0.8rem" class="dim">'
+            + data.rows.length + (String(data.total).includes('+') ? '+' : '')
+            + ' row' + (data.rows.length !== 1 ? 's' : '') + '</div>';
+      // Table
+      if (data.rows.length > 0) {
+        html += '<div class="table-wrap"><table><thead><tr>';
+        data.columns.forEach(c => { html += '<th>' + c + '</th>'; });
+        html += '</tr></thead><tbody>';
+        data.rows.forEach(row => {
+          html += '<tr>';
+          row.forEach((val, i) => {
+            let cls = 'mono';
+            if (typeof val === 'number') cls += ' right';
+            if (val === null) { val = '—'; cls += ' dim'; }
+            else if (typeof val === 'number') {
+              val = Number.isInteger(val) ? val.toLocaleString() : val.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:8});
+            }
+            html += '<td class="' + cls + '">' + val + '</td>';
+          });
+          html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+      }
+      // SQL source (collapsible)
+      html += '<details style="margin-top:0.75rem"><summary class="dim" style="cursor:pointer; font-size:0.8rem">Show SQL</summary>';
+      html += '<pre style="margin-top:0.5rem; padding:0.75rem; background:var(--surface); border:1px solid var(--border); border-radius:4px; font-size:0.75rem; overflow-x:auto; white-space:pre-wrap">'
+            + data.query.replace(/</g,'&lt;') + '</pre></details>';
+      container.innerHTML = html;
+    })
+    .catch(err => {
+      container.innerHTML = '<div class="flash flash-error">Request failed: ' + err + '</div>';
+    });
+}
+</script>
+{% endif %}
+
+<div style="margin-top:2rem; padding-top:1.5rem; border-top:1px solid var(--border); display:flex; justify-content:space-between;">
+  <a href="{{ url_for('fifo') }}" class="btn">← FIFO</a>
+  <a href="{{ url_for('manual') }}" class="btn">Manual Entry →</a>
+</div>
+{% endblock %}

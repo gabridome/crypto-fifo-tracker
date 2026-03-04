@@ -1,0 +1,283 @@
+{% extends "base.html" %}
+{% block title %}Import — FIFO Tracker{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>② Import into Database</h2>
+  <p class="desc">Import CSV data into the database. Files are grouped by exchange. Each file is imported individually and tracked via the <code>source</code> field.</p>
+</div>
+
+{% if not db_exists %}
+<div class="flash flash-error">
+  ✗ Database not found. Run <code class="mono">./setup.sh</code> first to create the database.
+</div>
+{% endif %}
+
+<!-- Exchange groups -->
+{% if groups %}
+<div class="section">
+  <div class="section-title">📥 Exchanges ready to import</div>
+
+  {% for g in groups %}
+  <div class="import-group {% if g.multi %}multi-file{% endif %}">
+    <div class="group-header">
+      <div class="group-name">
+        {{ g.exchange }}
+        {% if g.multi %}
+          <span class="badge badge-yellow" style="margin-left:0.5rem">{{ g.file_count }} files</span>
+        {% endif %}
+      </div>
+      <div class="group-stats">
+        <span class="mono dim">{{ g.total_rows|fmt_num }} rows total</span>
+        {% if g.db %}
+          <span class="badge badge-green">{{ g.db.total }} tx in DB</span>
+          <span class="dim" style="font-size:0.72rem">({{ g.db.buys }}B / {{ g.db.sells }}S)</span>
+        {% else %}
+          <span class="badge badge-dim">Not imported</span>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- File list with per-file import buttons -->
+    <div class="group-files">
+      <table>
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Rows</th>
+            <th>Size</th>
+            <th>DB Status</th>
+            <th style="text-align:right">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for f in g.files %}
+          <tr>
+            <td class="mono" style="font-size:0.78rem">{{ f.filename }}</td>
+            <td class="mono right">{{ f.rows|fmt_num }}</td>
+            <td class="mono dim">{{ f.size|fmt_size }}</td>
+            <td>
+              {% if f.db_source %}
+                <span class="badge badge-green" style="font-size:0.65rem">{{ f.db_source.total }} tx</span>
+                <span class="dim" style="font-size:0.65rem">({{ f.db_source.buys }}B/{{ f.db_source.sells }}S)</span>
+              {% else %}
+                <span class="badge badge-dim" style="font-size:0.65rem">Not imported</span>
+              {% endif %}
+            </td>
+            <td style="text-align:right">
+              {% if g.importer and db_exists %}
+              <form action="{{ url_for('run_import_file', filename=f.filename) }}" method="post" style="display:inline"
+                    onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Importing...';">
+                <button type="submit" class="btn btn-sm {% if f.db_source %}btn-success{% else %}btn-primary{% endif %}">
+                  {% if f.db_source %}↻ Re-import{% else %}▶ Import{% endif %}
+                </button>
+              </form>
+              {% elif not g.importer %}
+                <span class="dim" style="font-size:0.75rem">No importer</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% else %}
+<div class="empty-state">
+  <div class="icon">📭</div>
+  <p>No CSV files found in data/<br>Go to <a href="{{ url_for('collect') }}" style="color:var(--accent)">Collect</a> to upload exchange files first</p>
+</div>
+{% endif %}
+
+<!-- Column mapping reference -->
+<div class="section">
+  <div class="section-title">🗂 Column mapping: CSV → Database</div>
+  <p class="desc" style="margin-bottom:1.25rem">How each importer maps the exchange's CSV columns to the standard database fields.</p>
+
+  {% for exchange, mapping in field_map.items() %}
+  <div class="mapping-block">
+    <div class="mapping-header">
+      <span style="font-weight:700">{{ exchange }}</span>
+      {% if mapping.notes %}
+        <span class="mapping-note">{{ mapping.notes }}</span>
+      {% endif %}
+    </div>
+    <table class="mapping-table">
+      <thead>
+        <tr>
+          <th style="width:28%">CSV column</th>
+          <th style="width:5%; text-align:center">→</th>
+          <th style="width:28%">DB field</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for csv_col, db_col, note in mapping.columns %}
+        <tr>
+          <td class="mono csv-col">{{ csv_col }}</td>
+          <td style="text-align:center; color:var(--text-muted)">→</td>
+          <td class="mono db-col">{{ db_col }}</td>
+          <td class="dim" style="font-size:0.75rem">{{ note }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if mapping.type_values %}
+    <div class="type-mapping">
+      <span class="dim" style="font-size:0.7rem">Type mapping:</span>
+      {% for csv_type, db_type in mapping.type_values.items() %}
+        <span class="type-pill">{{ csv_type }} → {{ db_type }}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+<div style="margin-top:2rem; padding-top:1.5rem; border-top:1px solid var(--border); display:flex; justify-content:space-between;">
+  <a href="{{ url_for('collect') }}" class="btn">← Collect</a>
+  <a href="{{ url_for('status') }}" class="btn btn-primary">Next: Check status →</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+  .import-group {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 1.25rem;
+  }
+
+  .import-group.multi-file {
+    border-left: 3px solid var(--yellow);
+  }
+
+  .group-header {
+    padding: 0.85rem 1.1rem;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .group-name {
+    font-weight: 700;
+    font-size: 1rem;
+    min-width: 140px;
+    display: flex;
+    align-items: center;
+  }
+
+  .group-stats {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .group-files table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+  }
+
+  .group-files thead th {
+    padding: 0.4rem 1rem;
+    text-align: left;
+    font-size: 0.6rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    background: var(--surface);
+    border-bottom: 1px solid rgba(42,46,66,0.5);
+  }
+
+  .group-files tbody td {
+    padding: 0.35rem 1rem;
+    border-bottom: 1px solid rgba(42,46,66,0.3);
+  }
+
+  .group-files tbody tr:last-child td { border-bottom: none; }
+
+  .mapping-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 1.25rem;
+  }
+
+  .mapping-header {
+    padding: 0.75rem 1.1rem;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .mapping-note {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
+  .mapping-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+  }
+
+  .mapping-table thead th {
+    padding: 0.45rem 1rem;
+    text-align: left;
+    font-size: 0.62rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .mapping-table tbody td {
+    padding: 0.35rem 1rem;
+    border-bottom: 1px solid rgba(42,46,66,0.4);
+  }
+
+  .mapping-table tbody tr:last-child td { border-bottom: none; }
+
+  .csv-col { color: var(--accent); }
+  .db-col  { color: var(--green); }
+
+  .type-mapping {
+    padding: 0.5rem 1rem;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .type-pill {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.65rem;
+    font-family: var(--mono);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+</style>
+{% endblock %}
