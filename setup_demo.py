@@ -23,7 +23,8 @@ import subprocess
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 VENV_DIR = os.path.join(PROJECT_ROOT, 'venv')
 VENV_PYTHON = os.path.join(VENV_DIR, 'bin', 'python3')
-DEMO_DB = os.path.join(PROJECT_ROOT, 'data', 'DEMO_crypto_fifo.db')
+DEMO_DIR = os.path.join(PROJECT_ROOT, 'demo')
+DEMO_DB = os.path.join(DEMO_DIR, 'DEMO_crypto_fifo.db')
 SCHEMA_FILE = os.path.join(PROJECT_ROOT, 'doc', 'schema.sql')
 PACKAGES = ['flask', 'pandas', 'pytz', 'openpyxl', 'requests']
 
@@ -80,16 +81,19 @@ def main():
         print(f"\n✗ Schema file not found: {SCHEMA_FILE}")
         sys.exit(1)
 
+    # Ensure demo directory exists
+    os.makedirs(DEMO_DIR, exist_ok=True)
+
     # Step 1: Generate demo CSV files
     print(f"\n[1/5] Generating demo CSV data...")
     from generate_demo_data import main as generate_main
     generate_main()
 
     # Re-scan after generation
-    demo_csvs = sorted(glob.glob(os.path.join(PROJECT_ROOT, 'data', 'DEMO_*.csv')))
+    demo_csvs = sorted(glob.glob(os.path.join(DEMO_DIR, 'DEMO_*.csv')))
 
     if not demo_csvs:
-        print(f"\n✗ No DEMO_*.csv files found in data/")
+        print(f"\n✗ No DEMO_*.csv files found in demo/")
         sys.exit(1)
 
     # Remove old demo DB
@@ -193,7 +197,7 @@ def main():
     print(f"  Exchanges:    {', '.join(r[0] for r in exchanges)}")
 
     print(f"\n  To run the web app with demo data:")
-    print(f"  FIFO_DB=data/DEMO_crypto_fifo.db FIFO_PORT=5003 python3 web/app.py")
+    print(f"  FIFO_DB=demo/DEMO_crypto_fifo.db FIFO_PORT=5003 python3 web/app.py")
     print(f"  Open http://127.0.0.1:5003")
     print(f"\n{'=' * 60}")
 

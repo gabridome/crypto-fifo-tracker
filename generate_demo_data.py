@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 
 random.seed(42)  # Reproducible
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'demo')
 
 # ── Realistic BTC/EUR monthly price anchors ──────────────────
 # (year, month) → approximate EUR price

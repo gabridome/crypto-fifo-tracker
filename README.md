@@ -28,7 +28,7 @@ python3 setup_demo.py
 
 # Launch the web interface with the demo database (port 5003)
 source venv/bin/activate
-FIFO_DB=data/DEMO_crypto_fifo.db FIFO_PORT=5003 python3 web/app.py
+FIFO_DB=demo/DEMO_crypto_fifo.db FIFO_PORT=5003 python3 web/app.py
 # Open http://127.0.0.1:5003
 ```
 
@@ -36,8 +36,8 @@ The demo creates 3 fictional exchanges (DEMO Alpha, DEMO Beta, DEMO Gamma) with
 600 BUY and 300 SELL transactions spanning 2016–2025, using realistic BTC/EUR prices.
 FIFO produces a mix of long-term (exempt) and short-term (taxable) gains.
 
-> The demo database (`data/DEMO_crypto_fifo.db`) is completely separate from
-> your production database (`data/crypto_fifo.db`). You can run both.
+> Demo data lives in `demo/`, your real data in `data/` — completely separate.
+> Both web instances can run at the same time (ports 5002 and 5003).
 
 ## Production setup
 
@@ -102,13 +102,14 @@ crypto-fifo-tracker/
 │   ├── import_standard_csv.py  ← Generic CSV importer
 │   ├── import_binance_with_fees.py
 │   └── ...                     ← One script per exchange
-├── data/
-│   ├── crypto_fifo.db          ← Production database (gitignored)
-│   ├── DEMO_crypto_fifo.db     ← Demo database (gitignored)
+├── demo/                       ← Demo environment (separate from real data)
 │   ├── DEMO_*.csv              ← Demo CSV files (tracked in git)
+│   └── DEMO_crypto_fifo.db    ← Demo database (gitignored)
+├── data/                       ← Your personal data (entirely gitignored)
+│   ├── crypto_fifo.db          ← Production database
 │   ├── eurusd.csv              ← ECB historical EUR/USD rates
 │   ├── crypto_prices.csv       ← CryptoCompare daily prices
-│   └── ...                     ← Your exchange CSV files (gitignored)
+│   └── ...                     ← Your exchange CSV files
 ├── doc/
 │   ├── schema.sql              ← Database DDL
 │   ├── en/                     ← English documentation
