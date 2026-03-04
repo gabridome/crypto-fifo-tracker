@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \":*)",
+      "Bash(ls /Users/gbd/proj/crypto-fifo-tracker/data/*revolut* /Users/gbd/proj/crypto-fifo-tracker/data/*Revolut*)",
+      "Bash(xxd)",
+      "Bash(sqlite3 /Users/gbd/proj/crypto-fifo-tracker/data/crypto_fifo.db \"SELECT transaction_date, transaction_type, amount, total_value FROM transactions WHERE exchange_name=''changely'' ORDER BY transaction_date\")",
+      "Bash(sqlite3 /Users/gbd/proj/crypto-fifo-tracker/data/crypto_fifo.db \"SELECT transaction_date, transaction_type, cryptocurrency, amount, total_value, fee_amount, fee_currency, currency FROM transactions WHERE exchange_name=''changely''\")",
+      "Bash(python3:*)",
+      "WebFetch(domain:min-api.cryptocompare.com)",
+      "WebFetch(domain:docs.coingecko.com)",
+      "WebFetch(domain:www.coingecko.com)",
+      "WebFetch(domain:developers.coindesk.com)",
+      "Bash(ls /Users/gbd/proj/crypto-fifo-tracker/data/otc*)",
+      "Bash(head -5 /Users/gbd/proj/crypto-fifo-tracker/data/changely*.csv)",
+      "Bash(git add calculators/calculate_fifo.py calculators/crypto_fifo_tracker.py)",
+      "Bash(git add web/app.py web/templates/base.html web/templates/import_data.html web/templates/reports.html web/templates/status.html CLAUDE.md)",
+      "Bash(git commit:*)",
+      "Bash(git checkout -- web/__pycache__/app.cpython-314.pyc)",
+      "Bash(FIFO_DB=data/DEMO_crypto_fifo.db python3 -c \":*)",
+      "Bash(git add README.md doc/pt/README.md generate_demo_data.py setup_demo.py .gitignore data/DEMO_alpha_buys.csv data/DEMO_beta_buys.csv data/DEMO_gamma_sells.csv importers/import_standard_csv.py web/app.py)",
+      "Bash(git add README.md doc/pt/README.md generate_demo_data.py setup_demo.py .gitignore importers/import_standard_csv.py web/app.py)",
+      "Bash(git add -f data/DEMO_alpha_buys.csv data/DEMO_beta_buys.csv data/DEMO_gamma_sells.csv)",
+      "Bash(deactivate)",
+      "Bash(/usr/local/bin/python3 setup_demo.py)",
+      "Bash(git rm -f data/DEMO_alpha_buys.csv data/DEMO_beta_buys.csv data/DEMO_gamma_sells.csv)",
+      "Bash(ls -la /Users/gbd/proj/crypto-fifo-tracker/demo/*.csv)",
+      "Bash(sqlite3 demo/DEMO_crypto_fifo.db \"SELECT DISTINCT cryptocurrency FROM sale_lot_matches LIMIT 5; SELECT DISTINCT cryptocurrency FROM transactions LIMIT 5;\")",
+      "Bash(sqlite3 demo/DEMO_crypto_fifo.db \"SELECT COUNT\\(*\\) FROM sale_lot_matches; SELECT COUNT\\(*\\) FROM sale_lot_matches WHERE cryptocurrency=''BTC'';\")",
+      "Bash(source venv/bin/activate)"
+    ],
+    "additionalDirectories": [
+      "/Users/gbd/proj/crypto-fifo-tracker/data"
+    ]
+  }
+}

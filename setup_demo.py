@@ -89,6 +89,54 @@ def main():
     from generate_demo_data import main as generate_main
     generate_main()
 
+    # Create a minimal eurusd.csv so the web app doesn't warn about missing rates.
+    # The demo exchanges are all EUR so this file isn't used for calculation,
+    # but its presence satisfies the Collect/Status page checks.
+    eurusd_path = os.path.join(DEMO_DIR, 'eurusd.csv')
+    if not os.path.exists(eurusd_path):
+        print(f"  Creating minimal eurusd.csv for demo...")
+        # Monthly EUR/USD rates 2016-2025 (approximate historical values)
+        monthly_rates = [
+            # 2016
+            ('2016-01-04', 1.0887), ('2016-04-01', 1.1391), ('2016-07-01', 1.1102),
+            ('2016-10-03', 1.1214),
+            # 2017
+            ('2017-01-02', 1.0471), ('2017-04-03', 1.0666), ('2017-07-03', 1.1412),
+            ('2017-10-02', 1.1815),
+            # 2018
+            ('2018-01-02', 1.2014), ('2018-04-03', 1.2281), ('2018-07-02', 1.1658),
+            ('2018-10-01', 1.1573),
+            # 2019
+            ('2019-01-02', 1.1467), ('2019-04-01', 1.1221), ('2019-07-01', 1.1367),
+            ('2019-10-01', 1.0894),
+            # 2020
+            ('2020-01-02', 1.1195), ('2020-04-01', 1.1023), ('2020-07-01', 1.1237),
+            ('2020-10-01', 1.1721),
+            # 2021
+            ('2021-01-04', 1.2271), ('2021-04-01', 1.1725), ('2021-07-01', 1.1856),
+            ('2021-10-01', 1.1579),
+            # 2022
+            ('2022-01-03', 1.1370), ('2022-04-01', 1.1053), ('2022-07-01', 1.0430),
+            ('2022-10-03', 0.9802),
+            # 2023
+            ('2023-01-02', 1.0666), ('2023-04-03', 1.0883), ('2023-07-03', 1.0907),
+            ('2023-10-02', 1.0579),
+            # 2024
+            ('2024-01-02', 1.1039), ('2024-04-02', 1.0746), ('2024-07-01', 1.0713),
+            ('2024-10-01', 1.1133),
+            # 2025
+            ('2025-01-02', 1.0352), ('2025-04-01', 1.0813), ('2025-07-01', 1.1350),
+            ('2025-10-01', 1.1200),
+        ]
+        with open(eurusd_path, 'w') as f:
+            f.write('"DATE","TIME PERIOD","US dollar/Euro (EXR.D.USD.EUR.SP00.A)"\n')
+            from datetime import datetime
+            for date_str, rate in monthly_rates:
+                dt = datetime.strptime(date_str, '%Y-%m-%d')
+                time_period = dt.strftime('%d %b %Y')
+                f.write(f'"{date_str}","{time_period}","{rate:.4f}"\n')
+        print(f"  ✓ {eurusd_path} ({len(monthly_rates)} rates)")
+
     # Re-scan after generation
     demo_csvs = sorted(glob.glob(os.path.join(DEMO_DIR, 'DEMO_*.csv')))
 

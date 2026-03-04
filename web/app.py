@@ -48,6 +48,10 @@ DATA_DIR = os.path.dirname(os.path.abspath(DATABASE_PATH))
 REPORTS_DIR = os.path.join(DATA_DIR, 'reports')
 BACKUPS_DIR = os.path.join(DATA_DIR, 'backups')
 
+# SQL queries: use DATA_DIR/queries/ if it exists, otherwise calculators/
+_custom_sql_dir = os.path.join(DATA_DIR, 'queries')
+SQL_DIR = _custom_sql_dir if os.path.isdir(_custom_sql_dir) else os.path.join(PROJECT_ROOT, 'calculators')
+
 app = Flask(__name__)
 app.secret_key = 'crypto-fifo-local-dev'  # local only, no real security needed
 
@@ -253,6 +257,9 @@ EXCHANGE_PATTERNS = [
     (r'gdtre',                      'GDTRE',           'importers/import_standard_csv.py'),
     (r'inheritance',                'Inheritance',     'importers/import_standard_csv.py'),
     (r'otc',                        'OTC',             'importers/import_standard_csv.py'),
+    (r'(?i)demo_alpha',             'DEMO Alpha',      'importers/import_standard_csv.py'),
+    (r'(?i)demo_beta',              'DEMO Beta',       'importers/import_standard_csv.py'),
+    (r'(?i)demo_gamma',             'DEMO Gamma',      'importers/import_standard_csv.py'),
     (r'(?i)demo',                   'DEMO',            'importers/import_standard_csv.py'),
 ]
 
@@ -432,6 +439,9 @@ CSV_PARSE_RULES = {
     'Coinpal': _STANDARD_CSV_RULES,
     'GDTRE': _STANDARD_CSV_RULES,
     'Inheritance': _STANDARD_CSV_RULES,
+    'DEMO Alpha': _STANDARD_CSV_RULES,
+    'DEMO Beta': _STANDARD_CSV_RULES,
+    'DEMO Gamma': _STANDARD_CSV_RULES,
     'OTC': _STANDARD_CSV_RULES,
     # Exchange-specific formats
     'Binance': {
@@ -1707,6 +1717,7 @@ def inject_globals():
         'wizard': get_wizard_status(),
         'db_exists': db_exists(),
         'eurusd': check_eurusd(),
+        'data_dir_name': os.path.basename(DATA_DIR),
     }
 
 
@@ -2224,10 +2235,9 @@ def reports():
                 'modified': datetime.fromtimestamp(stat.st_mtime),
             })
 
-    # SQL query files from calculators/
+    # SQL query files
     sql_queries = []
-    calc_dir = os.path.join(PROJECT_ROOT, 'calculators')
-    for f in sorted(glob.glob(os.path.join(calc_dir, '*.sql'))):
+    for f in sorted(glob.glob(os.path.join(SQL_DIR, '*.sql'))):
         basename = os.path.basename(f)
         label = os.path.splitext(basename)[0].replace('_', ' ')
         sql_queries.append({'filename': basename, 'label': label})
@@ -2242,14 +2252,14 @@ def reports():
 
 @app.route('/reports/query/<filename>')
 def run_sql_query(filename):
-    """Execute a .sql file from calculators/ and return JSON results."""
+    """Execute a .sql file and return JSON results."""
     from flask import jsonify
 
     # Validate filename: no path traversal, must be .sql
     if '/' in filename or '..' in filename or not filename.endswith('.sql'):
         return jsonify(error='Invalid filename'), 400
 
-    sql_path = os.path.join(PROJECT_ROOT, 'calculators', filename)
+    sql_path = os.path.join(SQL_DIR, filename)
     if not os.path.exists(sql_path):
         return jsonify(error='Query file not found'), 404
 

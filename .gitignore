@@ -8,8 +8,9 @@ backups/
 !data/sample_*.csv
 !data/template_*.csv
 
-# ---- DEMO (CSVs tracked, DB ignored) ----------------------
+# ---- DEMO (CSVs tracked, DB and generated files ignored) --
 demo/DEMO_crypto_fifo.db
+demo/eurusd.csv
 
 # ---- PYTHON ------------------------------------------------
 venv/

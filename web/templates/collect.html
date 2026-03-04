@@ -42,7 +42,7 @@
 
 <!-- Current files -->
 <div class="section">
-  <div class="section-title">📁 Files in data/</div>
+  <div class="section-title">📁 Files in {{ data_dir_name }}/</div>
   {% if csv_files %}
   <div class="table-wrap">
     <table>
@@ -92,7 +92,7 @@
   {% else %}
   <div class="empty-state">
     <div class="icon">📭</div>
-    <p>No exchange CSV files found in data/<br>Upload your first file above</p>
+    <p>No exchange CSV files found in {{ data_dir_name }}/<br>Upload your first file above</p>
   </div>
   {% endif %}
 </div>

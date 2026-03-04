@@ -88,7 +88,7 @@
 {% else %}
 <div class="empty-state">
   <div class="icon">📭</div>
-  <p>No CSV files found in data/<br>Go to <a href="{{ url_for('collect') }}" style="color:var(--accent)">Collect</a> to upload exchange files first</p>
+  <p>No CSV files found in {{ data_dir_name }}/<br>Go to <a href="{{ url_for('collect') }}" style="color:var(--accent)">Collect</a> to upload exchange files first</p>
 </div>
 {% endif %}
 
