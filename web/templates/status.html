@@ -107,13 +107,11 @@
     </div>
     <div class="ex-actions">
       {% if c.has_importer and c.csv_files %}
-        <form action="{{ url_for('run_import', exchange_name=c.exchange) }}" method="post" style="display:inline"
-              onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Running...';">
-          {% if c.status == 'not-imported' %}
-            <button type="submit" class="btn btn-primary btn-sm">▶ Import</button>
-          {% else %}
-            <button type="submit" class="btn btn-sm btn-success">↻ Re-import</button>
-          {% endif %}
+        <form action="{{ url_for('run_import_exchange', exchange_name=c.exchange) }}" method="post" style="display:inline">
+          <input type="hidden" name="redirect" value="status">
+          <button type="submit" class="btn btn-sm {% if c.status == 'not-imported' %}btn-primary{% else %}btn-success{% endif %}">
+            {% if c.status == 'not-imported' %}▶ Import{% else %}↻ Re-import{% endif %}
+          </button>
         </form>
       {% endif %}
     </div>

@@ -4,7 +4,7 @@
 {% block content %}
 <div class="page-header">
   <h2>② Import into Database</h2>
-  <p class="desc">Import CSV data into the database. Files are grouped by exchange — when there are multiple CSVs for the same exchange (e.g. by year or month), they are merged automatically before import.</p>
+  <p class="desc">Import CSV data into the database. Files are grouped by exchange. Each file is imported individually and tracked via the <code>source</code> field.</p>
 </div>
 
 {% if not db_exists %}
@@ -24,7 +24,7 @@
       <div class="group-name">
         {{ g.exchange }}
         {% if g.multi %}
-          <span class="badge badge-yellow" style="margin-left:0.5rem">{{ g.file_count }} files → merged</span>
+          <span class="badge badge-yellow" style="margin-left:0.5rem">{{ g.file_count }} files</span>
         {% endif %}
       </div>
       <div class="group-stats">
@@ -36,25 +36,9 @@
           <span class="badge badge-dim">Not imported</span>
         {% endif %}
       </div>
-      <div class="group-action">
-        {% if g.importer and db_exists %}
-        <form action="{{ url_for('run_import', exchange_name=g.exchange) }}" method="post" style="display:inline"
-              onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='{% if g.multi %}Merging & importing...{% else %}Importing...{% endif %}';">
-          <button type="submit" class="btn btn-sm {% if g.db %}btn-success{% else %}btn-primary{% endif %}">
-            {% if g.db %}
-              {% if g.multi %}↻ Merge & re-import{% else %}↻ Re-import{% endif %}
-            {% else %}
-              {% if g.multi %}▶ Merge & import{% else %}▶ Import{% endif %}
-            {% endif %}
-          </button>
-        </form>
-        {% elif not g.importer %}
-          <span class="dim" style="font-size:0.75rem">No importer available</span>
-        {% endif %}
-      </div>
     </div>
 
-    <!-- File list within group -->
+    <!-- File list with per-file import buttons -->
     <div class="group-files">
       <table>
         <thead>
@@ -62,10 +46,8 @@
             <th>File</th>
             <th>Rows</th>
             <th>Size</th>
-            <th>Modified</th>
-            {% if g.multi %}
-            <th>Order</th>
-            {% endif %}
+            <th>DB Status</th>
+            <th style="text-align:right">Action</th>
           </tr>
         </thead>
         <tbody>
@@ -74,20 +56,30 @@
             <td class="mono" style="font-size:0.78rem">{{ f.filename }}</td>
             <td class="mono right">{{ f.rows|fmt_num }}</td>
             <td class="mono dim">{{ f.size|fmt_size }}</td>
-            <td class="mono dim" style="font-size:0.72rem">{{ f.modified.strftime('%Y-%m-%d %H:%M') }}</td>
-            {% if g.multi %}
-            <td class="mono dim" style="font-size:0.72rem">{{ loop.index }} of {{ g.file_count }}</td>
-            {% endif %}
+            <td>
+              {% if f.db_source %}
+                <span class="badge badge-green" style="font-size:0.65rem">{{ f.db_source.total }} tx</span>
+                <span class="dim" style="font-size:0.65rem">({{ f.db_source.buys }}B/{{ f.db_source.sells }}S)</span>
+              {% else %}
+                <span class="badge badge-dim" style="font-size:0.65rem">Not imported</span>
+              {% endif %}
+            </td>
+            <td style="text-align:right">
+              {% if g.importer and db_exists %}
+              <form action="{{ url_for('run_import_file', filename=f.filename) }}" method="post" style="display:inline"
+                    onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Importing...';">
+                <button type="submit" class="btn btn-sm {% if f.db_source %}btn-success{% else %}btn-primary{% endif %}">
+                  {% if f.db_source %}↻ Re-import{% else %}▶ Import{% endif %}
+                </button>
+              </form>
+              {% elif not g.importer %}
+                <span class="dim" style="font-size:0.75rem">No importer</span>
+              {% endif %}
+            </td>
           </tr>
           {% endfor %}
         </tbody>
       </table>
-      {% if g.multi %}
-      <div class="merge-note">
-        ℹ These {{ g.file_count }} files will be concatenated in alphabetical order before import.
-        The importer will DELETE all existing {{ g.exchange }} data and re-import from the merged result.
-      </div>
-      {% endif %}
     </div>
   </div>
   {% endfor %}
@@ -191,8 +183,6 @@
     flex-wrap: wrap;
   }
 
-  .group-action { flex-shrink: 0; }
-
   .group-files table {
     width: 100%;
     border-collapse: collapse;
@@ -217,15 +207,6 @@
   }
 
   .group-files tbody tr:last-child td { border-bottom: none; }
-
-  .merge-note {
-    padding: 0.6rem 1rem;
-    font-size: 0.72rem;
-    color: var(--yellow);
-    background: var(--yellow-bg);
-    border-top: 1px solid var(--yellow-border);
-    line-height: 1.5;
-  }
 
   .mapping-block {
     background: var(--surface);

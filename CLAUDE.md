@@ -2,7 +2,7 @@
 
 > This file is written by Claude for Claude. It contains everything needed
 > to understand, maintain, and reconstruct this project from scratch.
-> Last updated: 2026-03-02.
+> Last updated: 2026-03-03.
 
 ## What this project is
 
@@ -24,7 +24,7 @@ updatable) and **personal data** (gitignored, private, backed up separately).
 crypto-fifo-tracker/
 ├── config.py                    ← Country/tax configuration, DATABASE_PATH
 ├── setup.sh                     ← Automated setup for new users
-├── .gitignore                   ← Ignores data/ except data/sample_*.csv
+├── .gitignore                   ← Ignores data/ except sample_*.csv and template_*.csv
 ├── LICENSE                      ← MIT
 ├── CONTRIBUTING.md
 ├── CHANGELOG.md
@@ -51,9 +51,11 @@ crypto-fifo-tracker/
 │
 ├── importers/                   ← One script per exchange
 │   ├── __init__.py
-│   ├── import_utils.py          ← Shared: compute_record_hash(), post_import_update() (NEW)
+│   ├── import_utils.py          ← Shared: compute_record_hash(), delete_by_source()
 │   ├── ecb_rates.py             ← USD→EUR conversion via ECB CSV
-│   ├── import_standard_csv.py   ← Generic CSV importer (updated with source tracking)
+│   ├── crypto_prices.py         ← Crypto price lookup (CryptoCompare daily BTC/EUR etc.)
+│   ├── fetch_crypto_prices.py   ← Download historical crypto prices from CryptoCompare API
+│   ├── import_standard_csv.py   ← Generic CSV importer (handles EUR, USD, crypto-to-crypto)
 │   ├── import_binance_with_fees.py
 │   ├── import_coinbase_prime.py
 │   ├── import_coinbase_standalone.py
@@ -78,6 +80,7 @@ crypto-fifo-tracker/
 ├── data/                        ← ALL personal data (gitignored except samples)
 │   ├── crypto_fifo.db           ← SQLite database
 │   ├── eurusd.csv               ← ECB historical EUR/USD rates
+│   ├── crypto_prices.csv        ← CryptoCompare daily prices (BTC/EUR, BCH/EUR, ETH/EUR)
 │   ├── template_manual_transactions.csv  ← Template for manual/OTC imports (NEW)
 │   ├── sample_transactions.csv  ← Fake data for testing (TRACKED in git)
 │   ├── *.csv                    ← User's exchange export files
@@ -92,7 +95,7 @@ crypto-fifo-tracker/
 │
 └── tests/
     ├── __init__.py
-    └── test_fifo_workflow.py    ← 33 automated tests
+    └── test_fifo_workflow.py    ← 9 test functions (~33 assertions)
 ```
 
 ## Web interface (NEW — March 2026)
@@ -128,11 +131,9 @@ Per-exchange download instructions (Binance, Coinbase, Bitstamp, etc.).
 Template download for manual/OTC transactions.
 ECB eurusd.csv freshness warning if stale or missing.
 
-**② Import** (`/import`): Files grouped by exchange. Multi-file exchanges
-(Wirex 2023+2024+2025, Coinbase monthly files) shown as groups with
-"Merge & import" button. Column mapping documentation per exchange.
-Standard CSV files imported file-by-file with DELETE-by-source.
-Exchange-specific importers use merge+swap for multi-file.
+**② Import** (`/import`): Files grouped by exchange. Each file has its own
+Import button and DB status badge (tx count, buys/sells). Per-file import
+via `POST /import/run-file/<filename>`. Column mapping documentation per exchange.
 
 **③ Status** (`/status`): Symmetric CSV↔DB comparison. Same metrics
 (BUY count, SELL count, dates, values, fees) extracted from both
@@ -166,16 +167,17 @@ for deep-parsing CSV files to extract aggregate statistics for Status comparison
 
 ### Import flow
 
-Standard CSV (OTC/manual): `import_standard_csv.py <filepath> <exchange_name>`
-→ DELETE by source (file-level) → INSERT with source/imported_at/record_hash.
-Each file imported independently, no merge needed.
+All importers follow the same per-file pattern:
+```
+python3 importers/import_EXCHANGE.py <filepath> [exchange_name]
+```
+→ `delete_by_source(conn, source)` removes previous records for this file
+→ INSERT with `source`, `imported_at`, `record_hash` on every record.
 
-Exchange-specific (single file): `python3 importers/import_EXCHANGE.py`
-→ importer does DELETE by exchange → INSERT
-→ `post_import_source_update()` backfills source/hash on NULL records.
-
-Exchange-specific (multi-file): files merged into temp CSV → swap with original
-→ run importer → restore original → `post_import_source_update()`.
+Each CSV file is imported individually — no concatenation or merging.
+Multi-file exchanges (Wirex yearly, Coinbase monthly) import each file
+separately. The web app route `POST /import/run-file/<filename>` detects
+the exchange and importer from the filename, then calls the importer CLI.
 
 ## Source tracking system (NEW — March 2026)
 
@@ -221,7 +223,6 @@ DELETE FROM transactions WHERE imported_at >= '2026-03-02';
 `importers/import_utils.py` provides:
 - `compute_record_hash()` — deterministic SHA256
 - `delete_by_source()` — surgical DELETE by source file
-- `post_import_update()` — backfill source/hash after exchange-specific importers
 
 ## Database schema
 
@@ -289,6 +290,31 @@ Config: `config.py`. Legal basis: Art.º 10.º CIRS, Lei 24-D/2022.
 USD→EUR via `data/eurusd.csv`. USD exchanges: Bitfinex, Coinbase Prime, Kraken, Mt.Gox.
 Web app checks coverage vs CSV date ranges, warns if stale (>30d) or gaps exist.
 
+## Crypto price data (CryptoCompare)
+
+Daily closing prices for BTC, BCH, ETH in EUR from CryptoCompare API.
+Stored in `data/crypto_prices.csv` (format: `date,coin,close_eur`).
+
+**Download**: `python3 importers/fetch_crypto_prices.py [coins...] [--full]`
+- Default coins: BTC, BCH, ETH
+- Incremental mode: appends only new dates to existing file
+- `--full` flag: re-downloads all history from scratch
+- API: `https://min-api.cryptocompare.com/data/v2/histoday` (free, no API key)
+
+**Lookup module**: `importers/crypto_prices.py`
+```python
+from importers.crypto_prices import CryptoPrices
+prices = CryptoPrices('data/crypto_prices.csv')
+eur_price = prices.get_eur_price('BTC', '2017-10-25')   # → 4876.32
+eur_total = prices.crypto_to_eur('BTC', 0.5, '2017-10-25')  # → 2438.16
+```
+- Mirrors `ECBRates` pattern: load CSV once, lookup by (coin, date)
+- 5-day fallback for weekends/holidays
+- Used by: `import_wirex.py` (BTC card payments), `import_standard_csv.py`
+  (crypto-to-crypto EUR valuation), status page parser (Wirex)
+
+**Coverage**: BTC from 2011-08-27, BCH from 2017-08-01, ETH from 2015-08-07.
+
 ## Exchange CSV files and their importers
 
 | Exchange | Importer | Format | Multi-file |
@@ -321,7 +347,7 @@ EXCHANGE_COUNTRIES. Env overrides: FIFO_COUNTRY, FIFO_DB.
 
 ## Test suite
 
-`tests/test_fifo_workflow.py` — 33 tests. Run: `python3 tests/test_fifo_workflow.py`
+`tests/test_fifo_workflow.py` — 9 test functions (~33 assertions). Run: `python3 tests/test_fifo_workflow.py`
 
 ## Dependencies
 
@@ -331,16 +357,22 @@ flask, pandas, openpyxl, pytz, requests
 
 ## Known issues and TODO
 
-- [ ] Exchange-specific importers still DELETE by exchange_name, not by source.
-      `post_import_source_update()` is the bridge. Gradually migrate each importer
-      to use `import_utils.py` directly for native source tracking.
-- [ ] `generate_irs_report.py` line 612 path bug: creates `data/data/reports`.
-      Fix: `os.path.join(project_dir, 'reports')` not `os.path.join(project_dir, 'data', 'reports')`.
+- [x] ~~Exchange-specific importers still DELETE by exchange_name~~ — all 11 importers
+      now use `delete_by_source()` and accept `<filepath> [exchange_name]` CLI arguments.
+- [x] ~~`generate_irs_report.py` line 612 path bug~~ — verified correct.
+- [x] ~~Crypto-to-crypto trades (changely, OTC) only recorded one side~~ — fixed in
+      `import_standard_csv.py`: now creates sideA + sideB with EUR values from CryptoPrices.
+- [x] ~~Wirex EUR values were yearly estimates~~ — now uses CryptoCompare daily prices.
+- [x] ~~No crypto price data source~~ — CryptoCompare API integrated (BTC/BCH/ETH daily from 2011).
 - [ ] Report generators in `reports/` could be consolidated into `calculators/`
 - [ ] Exchange country code formats not unified between config.py and generate_irs_report.py
 - [ ] No automated ECB rate fetching
 - [ ] Web status page record matching could use record_hash once all importers set it natively
 - [ ] Test suite uses embedded FIFO calculator — ideally test crypto_fifo_tracker.py directly
+- [ ] Binance status page: USDT fees not converted to EUR (display-only, DB correct) — +€19.57
+- [ ] Binance Card status page: `abs()` on negative differenza (display-only) — +€95.83
+- [ ] Bybit CSV missing from data/ — 1 BUY in DB but no source file
+- [ ] Kraken: verify if ledger CSV is complete (user suspects missing trades)
 
 ## Development workflow
 

@@ -124,6 +124,73 @@
 
 {% endif %}
 
+<!-- SQL Queries -->
+{% if sql_queries %}
+<div class="section">
+  <div class="section-title">🔍 SQL Queries</div>
+  <p class="desc" style="margin-bottom:1rem">Run analysis queries from <code>calculators/*.sql</code> against the database.</p>
+  <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:1rem">
+    {% for q in sql_queries %}
+    <button class="btn btn-sm" onclick="runQuery('{{ q.filename }}', this)"
+            style="text-transform:none">{{ q.label }}</button>
+    {% endfor %}
+  </div>
+  <div id="sql-result"></div>
+</div>
+
+<script>
+function runQuery(filename, btn) {
+  const container = document.getElementById('sql-result');
+  const allBtns = btn.parentElement.querySelectorAll('button');
+  allBtns.forEach(b => b.classList.remove('btn-primary'));
+  btn.classList.add('btn-primary');
+  container.innerHTML = '<p class="dim">Running query...</p>';
+
+  fetch('/reports/query/' + encodeURIComponent(filename))
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        container.innerHTML = '<div class="flash flash-error">' + data.error + '</div>';
+        return;
+      }
+      let html = '';
+      // Result count
+      html += '<div style="margin-bottom:0.5rem; font-size:0.8rem" class="dim">'
+            + data.rows.length + (String(data.total).includes('+') ? '+' : '')
+            + ' row' + (data.rows.length !== 1 ? 's' : '') + '</div>';
+      // Table
+      if (data.rows.length > 0) {
+        html += '<div class="table-wrap"><table><thead><tr>';
+        data.columns.forEach(c => { html += '<th>' + c + '</th>'; });
+        html += '</tr></thead><tbody>';
+        data.rows.forEach(row => {
+          html += '<tr>';
+          row.forEach((val, i) => {
+            let cls = 'mono';
+            if (typeof val === 'number') cls += ' right';
+            if (val === null) { val = '—'; cls += ' dim'; }
+            else if (typeof val === 'number') {
+              val = Number.isInteger(val) ? val.toLocaleString() : val.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:8});
+            }
+            html += '<td class="' + cls + '">' + val + '</td>';
+          });
+          html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+      }
+      // SQL source (collapsible)
+      html += '<details style="margin-top:0.75rem"><summary class="dim" style="cursor:pointer; font-size:0.8rem">Show SQL</summary>';
+      html += '<pre style="margin-top:0.5rem; padding:0.75rem; background:var(--surface); border:1px solid var(--border); border-radius:4px; font-size:0.75rem; overflow-x:auto; white-space:pre-wrap">'
+            + data.query.replace(/</g,'&lt;') + '</pre></details>';
+      container.innerHTML = html;
+    })
+    .catch(err => {
+      container.innerHTML = '<div class="flash flash-error">Request failed: ' + err + '</div>';
+    });
+}
+</script>
+{% endif %}
+
 <div style="margin-top:2rem; padding-top:1.5rem; border-top:1px solid var(--border); display:flex; justify-content:space-between;">
   <a href="{{ url_for('fifo') }}" class="btn">← FIFO</a>
   <a href="{{ url_for('manual') }}" class="btn">Manual Entry →</a>

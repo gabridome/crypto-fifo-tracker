@@ -520,5 +520,61 @@
 </main>
 
 {% block scripts %}{% endblock %}
+
+<!-- Loading overlay — shown on navigation and form submission -->
+<div id="loading-overlay" class="loading-overlay">
+  <div class="loading-spinner"></div>
+  <div class="loading-text">Loading…</div>
+</div>
+<style>
+  .loading-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(12,14,20,0.75);
+    z-index: 9999;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .loading-overlay.active { display: flex; }
+  .loading-spinner {
+    width: 36px; height: 36px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    font-family: var(--mono);
+  }
+</style>
+<script>
+(function() {
+  var overlay = document.getElementById('loading-overlay');
+  // Show on nav link clicks (not external, not #anchors)
+  document.addEventListener('click', function(e) {
+    var a = e.target.closest('a[href]');
+    if (!a) return;
+    var href = a.getAttribute('href');
+    if (!href || href.startsWith('#') || href.startsWith('javascript') || a.target === '_blank') return;
+    if (a.hasAttribute('download')) return;
+    overlay.classList.add('active');
+  });
+  // Show on form submissions
+  document.addEventListener('submit', function() {
+    overlay.classList.add('active');
+    overlay.querySelector('.loading-text').textContent = 'Working…';
+  });
+  // Hide if user navigates back (bfcache)
+  window.addEventListener('pageshow', function(e) {
+    if (e.persisted) overlay.classList.remove('active');
+  });
+})();
+</script>
 </body>
 </html>

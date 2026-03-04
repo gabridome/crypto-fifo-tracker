@@ -11,7 +11,7 @@ A wizard-style local web app to guide the user through:
 
 Usage:
     python3 web/app.py
-    Open http://127.0.0.1:5000
+    Open http://127.0.0.1:5002
 """
 
 import sqlite3
@@ -26,6 +26,7 @@ import shutil
 import hashlib
 from datetime import datetime
 from collections import defaultdict
+import pytz
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, jsonify, send_file)
 
@@ -61,6 +62,22 @@ def db_exists():
 
 # Exchanges whose CSV data is in USD and requires EUR conversion via eurusd.csv
 USD_EXCHANGES = {'Bitfinex', 'Coinbase Prime', 'Kraken', 'Mt.Gox'}
+
+# Lazy-loaded crypto prices for status page (Wirex EUR valuation, etc.)
+_crypto_prices_cache = None
+
+def _get_crypto_prices():
+    """Lazy-load CryptoPrices for status page parsers."""
+    global _crypto_prices_cache
+    if _crypto_prices_cache is None:
+        prices_path = os.path.join(DATA_DIR, 'crypto_prices.csv')
+        if os.path.exists(prices_path):
+            try:
+                from importers.crypto_prices import CryptoPrices
+                _crypto_prices_cache = CryptoPrices(prices_path)
+            except Exception:
+                _crypto_prices_cache = False  # mark as attempted
+    return _crypto_prices_cache if _crypto_prices_cache is not False else None
 
 def check_eurusd():
     """
@@ -226,6 +243,7 @@ EXCHANGE_PATTERNS = [
     (r'kraken',                     'Kraken',          'importers/import_kraken_with_fees.py'),
     (r'mtgox|mt_gox',              'Mt.Gox',          'importers/import_mtgox_with_fees.py'),
     (r'revolut',                    'Revolut',         'importers/import_revolut.py'),
+    (r'bybit',                      'Bybit',           'importers/import_bybit.py'),
     (r'wirex',                      'Wirex',           'importers/import_wirex.py'),
     (r'trt',                        'TRT',             'importers/import_trt_with_fees.py'),
     (r'changely',                   'changely',        'importers/import_standard_csv.py'),
@@ -390,7 +408,29 @@ EXCHANGE_FIELD_MAP = {
 
 # ── CSV deep parser ────────────────────────────────────────
 
+# Standard CSV format used by import_standard_csv.py
+_STANDARD_CSV_RULES = {
+    'date_col': 'transaction_date',
+    'type_col': 'transaction_type',
+    'amount_col': 'amount',
+    'value_col': 'total_value',
+    'fee_col': 'fee_amount',
+    'buy_types': ['BUY'],
+    'sell_types': ['SELL'],
+    'strip_suffix': False,
+    'currency_col': 'currency',
+    'usd_currencies': ['USD'],
+}
+
 CSV_PARSE_RULES = {
+    # All standard-CSV exchanges
+    'Binance OTC': _STANDARD_CSV_RULES,
+    'changely': _STANDARD_CSV_RULES,
+    'Coinpal': _STANDARD_CSV_RULES,
+    'GDTRE': _STANDARD_CSV_RULES,
+    'Inheritance': _STANDARD_CSV_RULES,
+    'OTC': _STANDARD_CSV_RULES,
+    # Exchange-specific formats
     'Binance': {
         'date_col': 'Date(UTC)',
         'type_col': 'Side',
@@ -400,46 +440,159 @@ CSV_PARSE_RULES = {
         'buy_types': ['BUY'],
         'sell_types': ['SELL'],
         'strip_suffix': True,
+        'pair_col': 'Pair',           # column that identifies the trading pair
+        'usd_pairs': ['BTCUSDT', 'BTCBUSD'],  # pairs needing USD→EUR conversion
+    },
+    'Binance Card': {
+        'date_col': 'datetime_tz_CET',
+        'type_col': 'type',
+        'amount_col': 'sent_amount',
+        'value_col': 'received_amount',
+        'fee_col': 'differenza',
+        'buy_types': [],
+        'sell_types': ['Sell'],
+        'strip_suffix': False,
+        'tz_source': 'CET',  # dates in CSV are CET, importer converts to UTC
     },
     'Coinbase': {
         'date_col': 'Timestamp',
         'type_col': 'Transaction Type',
         'amount_col': 'Quantity Transacted',
-        'value_col': 'Total (inclusive of fees and/or spread)',
-        'fee_col': None,
+        'value_col': 'Subtotal',
+        'fee_col': 'Fees and/or Spread',
         'buy_types': ['Buy', 'Advanced Trade Buy'],
         'sell_types': ['Sell', 'Advanced Trade Sell'],
         'strip_suffix': False,
+        'asset_col': 'Asset',         # filter by asset
+        'asset_filter': ['BTC'],       # only BTC (skip USDC etc.)
     },
-    'Bitstamp': {
-        'date_col': 'Datetime',
-        'type_col': 'Type',
-        'amount_col': 'Amount',
-        'value_col': 'Value',
-        'fee_col': 'Fee',
-        'buy_types': ['Buy', 'Market buy'],
-        'sell_types': ['Sell', 'Market sell'],
-        'strip_suffix': False,
-    },
-    'Kraken': {
-        'date_col': 'time',
-        'type_col': 'type',
-        'amount_col': 'amount',
-        'value_col': 'cost',
-        'fee_col': 'fee',
-        'buy_types': ['buy'],
-        'sell_types': ['sell'],
-        'strip_suffix': False,
-    },
-    'Bitfinex': {
-        'date_col': 'Date',
-        'type_col': '_amount_sign',  # special: positive=BUY, negative=SELL
-        'amount_col': 'Amount',
-        'value_col': 'Price',
-        'fee_col': 'Fee',
+    'Coinbase Prime': {
+        'date_col': 'initiated time',
+        'type_col': 'side',
+        'amount_col': 'filled base quantity',
+        'value_col': 'filled quote quantity',
+        'fee_col': 'total fees and commissions',
         'buy_types': ['BUY'],
         'sell_types': ['SELL'],
         'strip_suffix': False,
+        'all_usd': True,              # values in USD, convert via ECB
+        'type_filter_col': 'status',   # only Completed orders
+        'type_filter_val': 'Completed',
+        'pair_col': 'market',
+        'pair_filter': ['BTC/USD'],    # only BTC market
+    },
+    'Bitstamp': {
+        'date_col': 'Datetime',
+        'type_col': 'Sub Type',
+        'amount_col': 'Amount',
+        'value_col': 'Value',
+        'fee_col': 'Fee',
+        'buy_types': ['Buy'],
+        'sell_types': ['Sell'],
+        'strip_suffix': True,    # values have suffixes: "5.00 BTC", "45.48 USD"
+        'all_usd': True,         # all monetary values are in USD, convert via ECB
+        'type_filter_col': 'Type',  # only process rows where Type == 'Market'
+        'type_filter_val': 'Market',
+    },
+    'Kraken': {
+        'paired_ledger': True,     # each trade = 2 rows (BTC + EUR) joined by refid
+        'date_col': 'time',
+        'refid_col': 'refid',
+        'asset_col': 'asset',
+        'amount_col': 'amount',
+        'fee_col': 'fee',
+        'type_filter_col': 'type',
+        'type_filter_val': 'trade',
+        'crypto_asset': 'BTC',
+        'fiat_asset': 'EUR',
+    },
+    'Bitfinex': {
+        'date_col': 'DATE',
+        'type_col': '_amount_sign',  # no type column; derive from AMOUNT sign
+        'amount_col': 'AMOUNT',
+        'value_col': 'PRICE',
+        'fee_col': 'FEE',
+        'buy_types': ['BUY'],
+        'sell_types': ['SELL'],
+        'strip_suffix': False,
+        'value_is_unit_price': True,   # total = abs(amount) × price
+        'fee_is_crypto': True,         # fee in BTC, convert: abs(fee) × price_eur
+        'pair_col': 'PAIR',
+        'pair_filter': ['BTC/EUR', 'BTC/USD'],
+        'usd_pairs': ['BTC/USD'],
+    },
+    'Mt.Gox': {
+        'date_col': 'Date',
+        'type_col': 'Type',
+        'amount_col': 'Bitcoins',
+        'value_col': 'Money',
+        'fee_col': 'Bitcoin_Fee',
+        'buy_types': ['buy'],
+        'sell_types': ['sell'],
+        'strip_suffix': False,
+        'fee_is_crypto': True,         # fee in BTC, convert via price
+        'dedup_col': 'ID',            # skip duplicate rows by ID
+        'currency_col': 'Currency',    # per-row currency detection
+        'usd_currencies': ['USD'],     # rows with these currencies → convert via ECB
+    },
+    'Revolut': {
+        'date_col': 'Date',
+        'type_col': 'Type',
+        'amount_col': 'Quantity',
+        'value_col': 'Value',
+        'fee_col': 'Fees',
+        'buy_types': ['Buy'],
+        'sell_types': ['Sell'],
+        'strip_suffix': False,
+        'asset_col': 'Symbol',
+        'asset_filter': ['BTC'],
+    },
+    'TRT': {
+        'grouped_trade': True,
+        'date_col': 'Date',
+        'type_col': 'Type',
+        'currency_col': 'Currency',
+        'value_col': 'Price (cents)',
+        'desc_col': 'Description',
+        'desc_filter': 'Trade Bitcoin with Euro',
+        'cents_factor': 100,
+        'satoshi_factor': 100_000_000,
+        'buy_crypto_type': 'acquired_currency_from_fund',
+        'buy_fiat_type': 'bought_currency_from_fund',
+        'sell_crypto_type': 'released_currency_to_fund',
+        'sell_fiat_type': 'sold_currency_to_fund',
+        'fee_type': 'paid_commission',
+        'crypto_asset': 'BTC',
+        'fiat_asset': 'EUR',
+    },
+    'Bybit': {
+        'date_col': 'Time(UTC)',
+        'type_col': '_amount_sign',
+        'amount_col': 'Quantity',
+        'value_col': 'Filled Price',
+        'fee_col': 'Fee Paid',
+        'buy_types': [],
+        'sell_types': [],
+        'strip_suffix': False,
+        'value_is_unit_price': True,
+        'type_filter_col': 'Type',
+        'type_filter_val': 'TRADE',
+        'asset_col': 'Currency',
+        'asset_filter': ['BTC'],
+        'skip_first_line': True,
+        'aggregate_by_time': True,  # Bybit CSV has individual fills; importer aggregates by timestamp
+    },
+    'Wirex': {
+        'date_col': 'Completed Date',
+        'type_col': 'Type',
+        'amount_col': 'Amount',
+        'value_col': None,
+        'fee_col': None,
+        'buy_types': [],
+        'sell_types': ['Card Payment'],
+        'strip_suffix': False,
+        'asset_col': 'Account Currency',
+        'asset_filter': ['BTC'],
     },
 }
 
@@ -502,7 +655,8 @@ def _safe_float(val):
     if not val or val == '':
         return 0.0
     try:
-        return float(str(val).replace(',', '').replace('€', '').replace('$', '').strip())
+        cleaned = re.sub(r'[^\d.\-]', '', str(val))
+        return float(cleaned) if cleaned else 0.0
     except (ValueError, TypeError):
         return 0.0
 
@@ -511,16 +665,296 @@ def _parse_date(s):
     if not s:
         return None
     s = str(s).strip()
+    # Normalize unicode whitespace (Revolut uses U+202F narrow no-break space)
+    s = re.sub(r'[\u00A0\u202F\u2009\u200A]+', ' ', s)
+    # Strip non-ASCII chars (handles double-encoded UTF-8 from Revolut)
+    s = re.sub(r'[^\x00-\x7F]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    # Strip trailing timezone abbreviations: "2016-02-27 17:42:24 UTC" → "2016-02-27 17:42:24"
+    s = re.sub(r'\s+(?:UTC|GMT|CET|CEST)$', '', s)
+    # Normalize abbreviated months with period: "Nov." → "Nov", "Dec." → "Dec"
+    s_norm = re.sub(r'\b([A-Z][a-z]{2})\.\s', r'\1 ', s)
     for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M:%S%z',
-                '%Y-%m-%d', '%d/%m/%Y %H:%M:%S', '%b %d, %Y, %I:%M %p', '%b %d, %Y'):
+                '%Y-%m-%d-%H:%M:%S', '%Y-%m-%d', '%d/%m/%Y %H:%M:%S', '%d-%m-%Y %H:%M:%S',
+                '%d %b %Y, %H:%M:%S', '%b %d, %Y, %I:%M:%S %p', '%b %d, %Y, %I:%M %p', '%b %d, %Y'):
         try:
-            return datetime.strptime(s, fmt)
+            return datetime.strptime(s_norm, fmt)
         except (ValueError, TypeError):
             continue
     try:
-        return datetime.fromisoformat(s.replace('Z', '+00:00'))
+        return datetime.fromisoformat(s_norm.replace('Z', '+00:00'))
     except (ValueError, TypeError):
         return None
+
+
+def _parse_paired_ledger_deep(filepath, rules, result):
+    """Parse paired-row ledger (Kraken) into aggregate stats."""
+    from collections import defaultdict
+    try:
+        with open(filepath, 'r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            trades = defaultdict(dict)
+            filter_col = rules.get('type_filter_col')
+            filter_val = rules.get('type_filter_val')
+            crypto = rules['crypto_asset']
+            fiat = rules['fiat_asset']
+
+            for row in reader:
+                row = {k.strip(): v for k, v in row.items() if k}
+                result['total_rows'] += 1
+                if filter_col and row.get(filter_col, '').strip() != filter_val:
+                    continue
+                refid = row.get(rules['refid_col'], '').strip()
+                asset = row.get(rules['asset_col'], '').strip()
+                amount = _safe_float(row.get(rules['amount_col'], ''))
+                fee = _safe_float(row.get(rules['fee_col'], ''))
+                d = _parse_date(row.get(rules['date_col'], ''))
+                if asset == crypto:
+                    trades[refid]['crypto_amount'] = amount
+                    trades[refid]['date'] = d
+                elif asset == fiat:
+                    trades[refid]['fiat_amount'] = amount
+                    trades[refid]['fiat_fee'] = fee
+                    if 'date' not in trades[refid]:
+                        trades[refid]['date'] = d
+
+            dates = []
+            for data in trades.values():
+                if 'crypto_amount' not in data or 'fiat_amount' not in data:
+                    continue
+                ca = data['crypto_amount']
+                fa = data['fiat_amount']
+                fee = data.get('fiat_fee', 0)
+                d = data.get('date')
+                if ca > 0 and fa < 0:  # BUY
+                    result['buy_count'] += 1
+                    result['buy_value'] += abs(fa)
+                elif ca < 0 and fa > 0:  # SELL
+                    result['sell_count'] += 1
+                    result['sell_value'] += abs(fa)
+                else:
+                    continue
+                result['total_fees'] += abs(fee)
+                if d:
+                    dates.append(d)
+
+            if dates:
+                result['min_date'] = min(dates).strftime('%Y-%m-%d')
+                result['max_date'] = max(dates).strftime('%Y-%m-%d')
+    except Exception:
+        pass
+    return result
+
+
+def _parse_paired_ledger_rows(filepath, rules):
+    """Parse paired-row ledger (Kraken) into individual trade rows."""
+    from collections import defaultdict
+    try:
+        with open(filepath, 'r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            trades = defaultdict(dict)
+            filter_col = rules.get('type_filter_col')
+            filter_val = rules.get('type_filter_val')
+            crypto = rules['crypto_asset']
+            fiat = rules['fiat_asset']
+            line_map = {}  # refid → first CSV line number
+
+            for line_num, row in enumerate(reader, 2):
+                row = {k.strip(): v for k, v in row.items() if k}
+                if filter_col and row.get(filter_col, '').strip() != filter_val:
+                    continue
+                refid = row.get(rules['refid_col'], '').strip()
+                asset = row.get(rules['asset_col'], '').strip()
+                amount = _safe_float(row.get(rules['amount_col'], ''))
+                fee = _safe_float(row.get(rules['fee_col'], ''))
+                d = _parse_date(row.get(rules['date_col'], ''))
+                date_str = row.get(rules['date_col'], '').strip()
+                if refid not in line_map:
+                    line_map[refid] = line_num
+                if asset == crypto:
+                    trades[refid]['crypto_amount'] = amount
+                    trades[refid]['date'] = d
+                    trades[refid]['date_str'] = date_str
+                elif asset == fiat:
+                    trades[refid]['fiat_amount'] = amount
+                    trades[refid]['fiat_fee'] = fee
+                    if 'date' not in trades[refid]:
+                        trades[refid]['date'] = d
+                        trades[refid]['date_str'] = date_str
+
+            rows = []
+            for refid, data in trades.items():
+                if 'crypto_amount' not in data or 'fiat_amount' not in data:
+                    continue
+                ca = data['crypto_amount']
+                fa = data['fiat_amount']
+                fee = abs(data.get('fiat_fee', 0))
+                d = data.get('date')
+                if ca > 0 and fa < 0:
+                    norm_type = 'BUY'
+                elif ca < 0 and fa > 0:
+                    norm_type = 'SELL'
+                else:
+                    continue
+                rows.append({
+                    'line': line_map.get(refid, 0),
+                    'date_str': data.get('date_str', ''),
+                    'date': d.strftime('%Y-%m-%d %H:%M') if d else None,
+                    'date_day': d.strftime('%Y-%m-%d') if d else None,
+                    'type_raw': norm_type,
+                    'type': norm_type,
+                    'is_trade': True,
+                    'pair': f'{crypto}/{fiat}',
+                    'amount': abs(ca),
+                    'value': abs(fa),
+                    'fee': fee,
+                })
+            return sorted(rows, key=lambda r: r['date_str'])
+    except Exception:
+        return []
+
+
+def _parse_trt_grouped_deep(filepath, rules, result):
+    """Parse TRT multi-line grouped trades into aggregate stats."""
+    from collections import defaultdict
+    try:
+        with open(filepath, 'r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            desc_filter = rules['desc_filter']
+            crypto = rules['crypto_asset']
+            fiat = rules['fiat_asset']
+            cents = rules['cents_factor']
+            satoshi = rules['satoshi_factor']
+            buy_crypto_t = rules['buy_crypto_type']
+            buy_fiat_t = rules['buy_fiat_type']
+            sell_crypto_t = rules['sell_crypto_type']
+            sell_fiat_t = rules['sell_fiat_type']
+            fee_t = rules['fee_type']
+
+            # Group by (date, description)
+            groups = defaultdict(list)
+            for row in reader:
+                row = {k.strip(): v for k, v in row.items() if k}
+                result['total_rows'] += 1
+                desc = row.get(rules['desc_col'], '').strip()
+                if desc_filter not in desc:
+                    continue
+                date_str = row.get(rules['date_col'], '').strip()
+                groups[(date_str, desc)].append(row)
+
+            dates = []
+            for (date_str, desc), rows_g in groups.items():
+                btc_amount = 0
+                eur_amount = 0
+                fee_eur = 0
+                trade_type = None
+                for r in rows_g:
+                    cur = r.get(rules['currency_col'], '').strip()
+                    t = r.get(rules['type_col'], '').strip()
+                    val = _safe_float(r.get(rules['value_col'], ''))
+                    if t == fee_t and cur == fiat:
+                        fee_eur += val / cents
+                    elif t == buy_crypto_t and cur == crypto:
+                        btc_amount = val / satoshi
+                        trade_type = 'BUY'
+                    elif t == buy_fiat_t and cur == fiat:
+                        eur_amount = val / cents
+                    elif t == sell_crypto_t and cur == crypto:
+                        btc_amount = val / satoshi
+                        trade_type = 'SELL'
+                    elif t == sell_fiat_t and cur == fiat:
+                        eur_amount = val / cents
+
+                if trade_type and btc_amount > 0 and eur_amount > 0:
+                    if trade_type == 'BUY':
+                        result['buy_count'] += 1
+                        result['buy_value'] += eur_amount
+                    else:
+                        result['sell_count'] += 1
+                        result['sell_value'] += eur_amount
+                    result['total_fees'] += fee_eur
+                    d = _parse_date(date_str)
+                    if d:
+                        dates.append(d)
+
+            if dates:
+                result['min_date'] = min(dates).strftime('%Y-%m-%d')
+                result['max_date'] = max(dates).strftime('%Y-%m-%d')
+    except Exception:
+        pass
+    return result
+
+
+def _parse_trt_grouped_rows(filepath, rules):
+    """Parse TRT multi-line grouped trades into individual trade rows."""
+    from collections import defaultdict
+    try:
+        with open(filepath, 'r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            desc_filter = rules['desc_filter']
+            crypto = rules['crypto_asset']
+            fiat = rules['fiat_asset']
+            cents = rules['cents_factor']
+            satoshi = rules['satoshi_factor']
+            buy_crypto_t = rules['buy_crypto_type']
+            buy_fiat_t = rules['buy_fiat_type']
+            sell_crypto_t = rules['sell_crypto_type']
+            sell_fiat_t = rules['sell_fiat_type']
+            fee_t = rules['fee_type']
+
+            groups = defaultdict(lambda: {'rows': [], 'first_line': 0})
+            for line_num, row in enumerate(reader, 2):
+                row = {k.strip(): v for k, v in row.items() if k}
+                desc = row.get(rules['desc_col'], '').strip()
+                if desc_filter not in desc:
+                    continue
+                date_str = row.get(rules['date_col'], '').strip()
+                key = (date_str, desc)
+                groups[key]['rows'].append(row)
+                if groups[key]['first_line'] == 0:
+                    groups[key]['first_line'] = line_num
+
+            result_rows = []
+            for (date_str, desc), g in groups.items():
+                btc_amount = 0
+                eur_amount = 0
+                fee_eur = 0
+                trade_type = None
+                for r in g['rows']:
+                    cur = r.get(rules['currency_col'], '').strip()
+                    t = r.get(rules['type_col'], '').strip()
+                    val = _safe_float(r.get(rules['value_col'], ''))
+                    if t == fee_t and cur == fiat:
+                        fee_eur += val / cents
+                    elif t == buy_crypto_t and cur == crypto:
+                        btc_amount = val / satoshi
+                        trade_type = 'BUY'
+                    elif t == buy_fiat_t and cur == fiat:
+                        eur_amount = val / cents
+                    elif t == sell_crypto_t and cur == crypto:
+                        btc_amount = val / satoshi
+                        trade_type = 'SELL'
+                    elif t == sell_fiat_t and cur == fiat:
+                        eur_amount = val / cents
+
+                if trade_type and btc_amount > 0 and eur_amount > 0:
+                    d = _parse_date(date_str)
+                    result_rows.append({
+                        'line': g['first_line'],
+                        'date_str': date_str,
+                        'date': d.strftime('%Y-%m-%d %H:%M') if d else None,
+                        'date_day': d.strftime('%Y-%m-%d') if d else None,
+                        'type_raw': trade_type,
+                        'type': trade_type,
+                        'is_trade': True,
+                        'pair': f'{crypto}/{fiat}',
+                        'amount': btc_amount,
+                        'value': eur_amount,
+                        'fee': fee_eur,
+                    })
+            return sorted(result_rows, key=lambda r: r['date_str'])
+    except Exception:
+        return []
 
 
 def parse_csv_deep(filepath, exchange):
@@ -544,11 +978,47 @@ def parse_csv_deep(filepath, exchange):
             pass
         return result
 
+    # --- Paired ledger mode (Kraken: each trade = 2 rows joined by refid) ---
+    if rules.get('paired_ledger'):
+        return _parse_paired_ledger_deep(filepath, rules, result)
+
+    # --- Grouped trade mode (TRT: each trade = 3-4 rows grouped by date+desc) ---
+    if rules.get('grouped_trade'):
+        return _parse_trt_grouped_deep(filepath, rules, result)
+
+    # Load ECB rates lazily if this exchange has USD pairs or all_usd
+    ecb = None
+    pair_col = rules.get('pair_col')
+    usd_pairs = set(rules.get('usd_pairs', []))
+    all_usd = rules.get('all_usd', False)
+    currency_col = rules.get('currency_col')
+    usd_currencies = set(rules.get('usd_currencies', []))
+    if (pair_col and usd_pairs) or all_usd or (currency_col and usd_currencies):
+        try:
+            from importers.ecb_rates import ECBRates
+            ecb = ECBRates(os.path.join(DATA_DIR, 'eurusd.csv'))
+        except Exception:
+            pass
+
+    def _to_eur(raw_val, date, is_usd_row, fee_currency=None):
+        """Convert a value to EUR. Handles BTC fees via price lookup."""
+        if fee_currency == 'BTC':
+            # BTC fee: can't convert here without price, skip (tiny amounts)
+            return 0.0
+        if is_usd_row and ecb and date:
+            return ecb.usd_to_eur(raw_val, date)
+        return raw_val
+
     try:
         with open(filepath, 'r', encoding='utf-8-sig') as f:
+            # Skip metadata header line (e.g. Bybit "UID: ..." line)
+            if rules.get('skip_first_line'):
+                f.readline()
             sniffer = csv.Sniffer()
             sample = f.read(4096)
             f.seek(0)
+            if rules.get('skip_first_line'):
+                f.readline()
             try:
                 dialect = sniffer.sniff(sample)
             except csv.Error:
@@ -557,40 +1027,174 @@ def parse_csv_deep(filepath, exchange):
             reader = csv.DictReader(f, dialect=dialect)
             dates = []
 
+            # Timezone conversion: if tz_source is set, parsed dates are in that
+            # timezone and must be converted to UTC to match the DB (importers store UTC).
+            tz_source = None
+            if rules.get('tz_source'):
+                tz_source = pytz.timezone(rules['tz_source'])
+
+            pair_filter = set(rules.get('pair_filter', []))
+            type_from_sign = rules['type_col'] == '_amount_sign'
+            value_is_unit_price = rules.get('value_is_unit_price', False)
+            fee_is_crypto = rules.get('fee_is_crypto', False)
+            type_filter_col = rules.get('type_filter_col')
+            type_filter_val = rules.get('type_filter_val')
+            asset_filter = set(rules.get('asset_filter', []))
+            dedup_col = rules.get('dedup_col')
+            seen_ids = set()
+            aggregate_by_time = rules.get('aggregate_by_time', False)
+            agg_buy_times = set()   # unique timestamps for buy aggregation
+            agg_sell_times = set()  # unique timestamps for sell aggregation
+
             for row in reader:
                 row = {k.strip(): v for k, v in row.items() if k}
                 result['total_rows'] += 1
 
                 try:
+                    # Dedup by column (e.g. Mt.Gox: skip duplicate IDs)
+                    if dedup_col:
+                        row_id = row.get(dedup_col, '').strip()
+                        if row_id in seen_ids:
+                            continue
+                        seen_ids.add(row_id)
+
+                    # Pre-filter rows (e.g. Bitstamp: only Type == 'Market')
+                    if type_filter_col and row.get(type_filter_col, '').strip() != type_filter_val:
+                        continue
+
+                    # Filter by pair if configured
+                    if pair_filter and pair_col:
+                        pair_val = row.get(pair_col, '').strip()
+                        if pair_val not in pair_filter:
+                            continue
+
+                    # Filter by asset if configured (e.g. Coinbase: only BTC)
+                    asset_col = rules.get('asset_col')
+                    if asset_col:
+                        asset_val = row.get(asset_col, '').strip()
+                        if asset_val not in asset_filter:
+                            continue
+
                     # Date
                     d = _parse_date(row.get(rules['date_col'], ''))
-                    if d:
-                        dates.append(d)
+                    if d and tz_source and d.tzinfo is None:
+                        d = tz_source.localize(d).astimezone(pytz.UTC).replace(tzinfo=None)
 
-                    # Type
-                    type_val = row.get(rules['type_col'], '').strip()
-                    is_buy = type_val in rules['buy_types']
-                    is_sell = type_val in rules['sell_types']
+                    # Check if this row is a USD-quoted pair
+                    is_usd_row = all_usd
+                    if pair_col:
+                        pair_val = row.get(pair_col, '').strip()
+                        is_usd_row = is_usd_row or pair_val in usd_pairs
+                    row_currency = ''
+                    is_crypto_currency = False
+                    if currency_col:
+                        row_currency = row.get(currency_col, '').strip().upper()
+                        is_usd_row = is_usd_row or row_currency in usd_currencies
+                        _FIAT = {'EUR', 'USD', 'GBP', 'CHF', 'JPY', 'CAD', 'AUD', ''}
+                        is_crypto_currency = row_currency not in _FIAT
+
+                    # Amount (needed early for sign-based type and unit-price calc)
+                    amt_raw = row.get(rules['amount_col'], '')
+                    amt = _strip_currency(amt_raw) if rules['strip_suffix'] else _safe_float(amt_raw)
+
+                    # Type — derive from amount sign if no type column
+                    if type_from_sign:
+                        is_buy = amt > 0
+                        is_sell = amt < 0
+                    else:
+                        type_val = row.get(rules['type_col'], '').strip()
+                        is_buy = type_val in rules['buy_types']
+                        is_sell = type_val in rules['sell_types']
 
                     # Value
                     val_raw = row.get(rules['value_col'], '') if rules['value_col'] else ''
                     val = _strip_currency(val_raw) if rules['strip_suffix'] else _safe_float(val_raw)
 
-                    if is_buy:
-                        result['buy_count'] += 1
-                        result['buy_value'] += abs(val)
-                    elif is_sell:
-                        result['sell_count'] += 1
-                        result['sell_value'] += abs(val)
+                    # Crypto-to-crypto: total_value is in crypto, not fiat
+                    # Use CryptoPrices to get EUR value of the main asset
+                    if is_crypto_currency and d:
+                        cp = _get_crypto_prices()
+                        crypto_name = row.get('cryptocurrency', '').strip().upper() if 'cryptocurrency' in row else ''
+                        if cp and crypto_name and abs(amt) > 0:
+                            cp_val = cp.crypto_to_eur(crypto_name, abs(amt), d)
+                            if cp_val is not None:
+                                val = cp_val
+                            else:
+                                val = 0.0
+                        else:
+                            val = 0.0
+                    else:
+                        val = _to_eur(abs(val), d, is_usd_row)
 
-                    # Fee
-                    if rules['fee_col'] and rules['fee_col'] in row:
+                    if value_is_unit_price:
+                        val = abs(amt) * val  # price_per_unit × amount = total
+
+                    # If no value from CSV, try crypto prices (Wirex, etc.)
+                    if val == 0 and abs(amt) > 0 and d and not rules.get('value_col'):
+                        cp = _get_crypto_prices()
+                        asset = next(iter(asset_filter)) if asset_filter else 'BTC'
+                        if cp:
+                            cp_val = cp.crypto_to_eur(asset, abs(amt), d)
+                            if cp_val is not None:
+                                val = cp_val
+
+                    if is_buy:
+                        if aggregate_by_time and d:
+                            agg_buy_times.add(d.strftime('%Y-%m-%d %H:%M:%S'))
+                        else:
+                            result['buy_count'] += 1
+                        result['buy_value'] += val
+                        if d:
+                            dates.append(d)
+                    elif is_sell:
+                        if aggregate_by_time and d:
+                            agg_sell_times.add(d.strftime('%Y-%m-%d %H:%M:%S'))
+                        else:
+                            result['sell_count'] += 1
+                        result['sell_value'] += val
+                        if d:
+                            dates.append(d)
+
+                    # Crypto-to-crypto: also count the counterpart side
+                    if is_crypto_currency and (is_buy or is_sell) and d:
+                        counter_val = 0.0
+                        cp = _get_crypto_prices()
+                        counter_amount = _safe_float(val_raw)
+                        if cp and row_currency and counter_amount > 0:
+                            cp_val = cp.crypto_to_eur(row_currency, counter_amount, d)
+                            if cp_val is not None:
+                                counter_val = cp_val
+                        if is_buy:
+                            result['sell_count'] += 1
+                            result['sell_value'] += counter_val
+                        else:
+                            result['buy_count'] += 1
+                            result['buy_value'] += counter_val
+
+                    # Fee (only count for buy/sell rows)
+                    if (is_buy or is_sell) and rules['fee_col'] and rules['fee_col'] in row:
                         fee_raw = row[rules['fee_col']]
-                        fee = _strip_currency(fee_raw) if rules['strip_suffix'] else _safe_float(fee_raw)
-                        result['total_fees'] += abs(fee)
+                        fee_val = _strip_currency(fee_raw) if rules['strip_suffix'] else _safe_float(fee_raw)
+                        if fee_is_crypto:
+                            # Fee in crypto (e.g. BTC): convert via unit price in EUR
+                            fee_eur = abs(fee_val) * val / abs(amt) if amt != 0 else 0.0
+                        else:
+                            # Detect fee currency from suffix
+                            fee_cur = None
+                            if rules['strip_suffix'] and fee_raw:
+                                s = str(fee_raw).strip()
+                                if s.endswith('BTC'):
+                                    fee_cur = 'BTC'
+                            fee_eur = _to_eur(abs(fee_val), d, is_usd_row, fee_currency=fee_cur)
+                        result['total_fees'] += fee_eur
 
                 except Exception:
                     result['parse_errors'] += 1
+
+            # Aggregate counts by unique timestamp (Bybit: fills → trades)
+            if aggregate_by_time:
+                result['buy_count'] += len(agg_buy_times)
+                result['sell_count'] += len(agg_sell_times)
 
             if dates:
                 result['min_date'] = min(dates).strftime('%Y-%m-%d')
@@ -608,50 +1212,174 @@ def parse_csv_rows(filepath, exchange):
     if not rules:
         return []
 
+    # --- Paired ledger mode (Kraken) ---
+    if rules.get('paired_ledger'):
+        return _parse_paired_ledger_rows(filepath, rules)
+
+    # --- Grouped trade mode (TRT) ---
+    if rules.get('grouped_trade'):
+        return _parse_trt_grouped_rows(filepath, rules)
+
+    # Load ECB rates if exchange has USD pairs or all_usd
+    ecb = None
+    pair_col = rules.get('pair_col')
+    usd_pairs = set(rules.get('usd_pairs', []))
+    all_usd = rules.get('all_usd', False)
+    currency_col = rules.get('currency_col')
+    usd_currencies = set(rules.get('usd_currencies', []))
+    if (pair_col and usd_pairs) or all_usd or (currency_col and usd_currencies):
+        try:
+            from importers.ecb_rates import ECBRates
+            ecb = ECBRates(os.path.join(DATA_DIR, 'eurusd.csv'))
+        except Exception:
+            pass
+
     rows = []
     try:
         with open(filepath, 'r', encoding='utf-8-sig') as f:
+            # Skip metadata header line (e.g. Bybit "UID: ..." line)
+            if rules.get('skip_first_line'):
+                f.readline()
             sniffer = csv.Sniffer()
             sample = f.read(4096)
             f.seek(0)
+            if rules.get('skip_first_line'):
+                f.readline()
             try:
                 dialect = sniffer.sniff(sample)
             except csv.Error:
                 dialect = csv.excel
 
             reader = csv.DictReader(f, dialect=dialect)
+
+            # Timezone conversion (same as parse_csv_deep)
+            tz_source = None
+            if rules.get('tz_source'):
+                tz_source = pytz.timezone(rules['tz_source'])
+
+            pair_filter = set(rules.get('pair_filter', []))
+            type_from_sign = rules['type_col'] == '_amount_sign'
+            value_is_unit_price = rules.get('value_is_unit_price', False)
+            fee_is_crypto = rules.get('fee_is_crypto', False)
+            type_filter_col = rules.get('type_filter_col')
+            type_filter_val = rules.get('type_filter_val')
+            asset_filter = set(rules.get('asset_filter', []))
+            dedup_col = rules.get('dedup_col')
+            seen_ids = set()
+
             for line_num, row in enumerate(reader, 2):  # line 2 = first data row
                 row = {k.strip(): v for k, v in row.items() if k}
                 try:
+                    # Dedup by column (e.g. Mt.Gox: skip duplicate IDs)
+                    if dedup_col:
+                        row_id = row.get(dedup_col, '').strip()
+                        if row_id in seen_ids:
+                            continue
+                        seen_ids.add(row_id)
+
+                    # Pre-filter rows (e.g. Bitstamp: only Type == 'Market')
+                    if type_filter_col and row.get(type_filter_col, '').strip() != type_filter_val:
+                        continue
+
+                    # Filter by pair if configured
+                    if pair_filter and pair_col:
+                        pair_val = row.get(pair_col, '').strip()
+                        if pair_val not in pair_filter:
+                            continue
+
+                    # Filter by asset if configured (e.g. Coinbase: only BTC)
+                    asset_col = rules.get('asset_col')
+                    if asset_col:
+                        asset_val = row.get(asset_col, '').strip()
+                        if asset_val not in asset_filter:
+                            continue
+
                     date_str = row.get(rules['date_col'], '').strip()
                     d = _parse_date(date_str)
-                    type_val = row.get(rules['type_col'], '').strip()
+                    if d and tz_source and d.tzinfo is None:
+                        d = tz_source.localize(d).astimezone(pytz.UTC).replace(tzinfo=None)
+
+                    # Check if USD-quoted pair
+                    is_usd_row = all_usd
+                    if pair_col:
+                        is_usd_row = is_usd_row or row.get(pair_col, '').strip() in usd_pairs
+                    row_currency = ''
+                    is_crypto_currency = False
+                    if currency_col:
+                        row_currency = row.get(currency_col, '').strip().upper()
+                        is_usd_row = is_usd_row or row_currency in usd_currencies
+                        _FIAT = {'EUR', 'USD', 'GBP', 'CHF', 'JPY', 'CAD', 'AUD', ''}
+                        is_crypto_currency = row_currency not in _FIAT
 
                     # Amount
                     amt_raw = row.get(rules['amount_col'], '')
                     amt = _strip_currency(amt_raw) if rules['strip_suffix'] else _safe_float(amt_raw)
 
-                    # Value
+                    # Type — derive from amount sign if no type column
+                    if type_from_sign:
+                        is_buy = amt > 0
+                        is_sell = amt < 0
+                        type_val = 'BUY' if is_buy else ('SELL' if is_sell else '')
+                    else:
+                        type_val = row.get(rules['type_col'], '').strip()
+                        is_buy = type_val in rules['buy_types']
+                        is_sell = type_val in rules['sell_types']
+                    norm_type = 'BUY' if is_buy else ('SELL' if is_sell else type_val)
+
+                    # Value — convert USD to EUR if needed
                     val_raw = row.get(rules['value_col'], '') if rules['value_col'] else ''
                     val = _strip_currency(val_raw) if rules['strip_suffix'] else _safe_float(val_raw)
+
+                    # Crypto-to-crypto: total_value is in crypto, not fiat
+                    if is_crypto_currency and d:
+                        cp = _get_crypto_prices()
+                        crypto_name = row.get('cryptocurrency', '').strip().upper() if 'cryptocurrency' in row else ''
+                        if cp and crypto_name and abs(amt) > 0:
+                            cp_val = cp.crypto_to_eur(crypto_name, abs(amt), d)
+                            if cp_val is not None:
+                                val = cp_val
+                            else:
+                                val = 0.0
+                        else:
+                            val = 0.0
+                    else:
+                        if is_usd_row and ecb and d:
+                            val = ecb.usd_to_eur(abs(val), d)
+                    if value_is_unit_price:
+                        val = abs(amt) * abs(val)  # price_per_unit × amount = total
+
+                    # If no value from CSV, try crypto prices (Wirex, etc.)
+                    if val == 0 and abs(amt) > 0 and d and not rules.get('value_col'):
+                        cp = _get_crypto_prices()
+                        asset = next(iter(asset_filter)) if asset_filter else 'BTC'
+                        if cp:
+                            cp_val = cp.crypto_to_eur(asset, abs(amt), d)
+                            if cp_val is not None:
+                                val = cp_val
 
                     # Fee
                     fee = 0.0
                     if rules['fee_col'] and rules['fee_col'] in row:
                         fee_raw = row[rules['fee_col']]
-                        fee = _strip_currency(fee_raw) if rules['strip_suffix'] else _safe_float(fee_raw)
+                        fee_val = _strip_currency(fee_raw) if rules['strip_suffix'] else _safe_float(fee_raw)
+                        if fee_is_crypto:
+                            # Fee in crypto: convert via unit price in EUR
+                            fee = abs(fee_val) * abs(val) / abs(amt) if amt != 0 else 0.0
+                        else:
+                            fee_is_btc = rules['strip_suffix'] and str(fee_raw).strip().endswith('BTC')
+                            if fee_is_btc:
+                                fee = 0.0
+                            elif is_usd_row and ecb and d:
+                                fee = ecb.usd_to_eur(abs(fee_val), d)
+                            else:
+                                fee = abs(fee_val)
 
                     # Pair / crypto
                     pair = ''
-                    for col in ('Pair', 'Asset', 'asset', 'pair'):
+                    for col in ('PAIR', 'Pair', 'Asset', 'asset', 'pair'):
                         if col in row and row[col].strip():
                             pair = row[col].strip()
                             break
-
-                    # Classify type
-                    is_buy = type_val in rules['buy_types']
-                    is_sell = type_val in rules['sell_types']
-                    norm_type = 'BUY' if is_buy else ('SELL' if is_sell else type_val)
 
                     rows.append({
                         'line': line_num,
@@ -664,8 +1392,32 @@ def parse_csv_rows(filepath, exchange):
                         'pair': pair,
                         'amount': abs(amt),
                         'value': abs(val),
-                        'fee': abs(fee),
+                        'fee': fee,
                     })
+
+                    # Crypto-to-crypto: emit counterpart row
+                    if is_crypto_currency and (is_buy or is_sell) and d:
+                        counter_val = 0.0
+                        counter_amount = _safe_float(val_raw)
+                        cp = _get_crypto_prices()
+                        if cp and row_currency and counter_amount > 0:
+                            cp_val = cp.crypto_to_eur(row_currency, counter_amount, d)
+                            if cp_val is not None:
+                                counter_val = cp_val
+                        counter_type = 'SELL' if is_buy else 'BUY'
+                        rows.append({
+                            'line': line_num,
+                            'date_str': date_str,
+                            'date': d.strftime('%Y-%m-%d %H:%M') if d else None,
+                            'date_day': d.strftime('%Y-%m-%d') if d else None,
+                            'type_raw': f'{counter_type} (counterpart)',
+                            'type': counter_type,
+                            'is_trade': True,
+                            'pair': row_currency,
+                            'amount': counter_amount,
+                            'value': counter_val,
+                            'fee': 0,
+                        })
                 except Exception:
                     rows.append({
                         'line': line_num,
@@ -676,6 +1428,37 @@ def parse_csv_rows(filepath, exchange):
                     })
     except Exception:
         pass
+
+    # Aggregate fills by timestamp (Bybit: multiple fills → one trade per timestamp)
+    if rules.get('aggregate_by_time') and rows:
+        from collections import defaultdict
+        groups = defaultdict(list)
+        non_trade = []
+        for r in rows:
+            if r['is_trade'] and r['date_str']:
+                # Use date_str (second-level precision) for grouping to match importer
+                key = (r['date_str'], r['type'])
+                groups[key].append(r)
+            else:
+                non_trade.append(r)
+        if groups:
+            agg_rows = []
+            for (ds, typ), fills in sorted(groups.items()):
+                agg_rows.append({
+                    'line': fills[0]['line'],
+                    'date_str': ds,
+                    'date': fills[0]['date'],
+                    'date_day': fills[0]['date_day'],
+                    'type_raw': fills[0]['type_raw'],
+                    'type': typ,
+                    'is_trade': True,
+                    'pair': fills[0]['pair'],
+                    'amount': sum(f['amount'] for f in fills),
+                    'value': sum(f['value'] for f in fills),
+                    'fee': sum(f['fee'] for f in fills),
+                })
+            agg_rows.extend(non_trade)
+            rows = agg_rows
 
     return rows
 
@@ -857,49 +1640,6 @@ def compute_record_hash(source, date, tx_type, exchange, crypto, amount, value, 
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
-def post_import_source_update(source_filename, exchange_name):
-    """
-    After an exchange-specific importer runs (which doesn't know about source tracking),
-    update the newly inserted records that have NULL source/hash.
-
-    This is the bridge: old importers INSERT without source/hash,
-    this function fills them in afterward.
-    """
-    if not db_exists():
-        return 0
-
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    now = datetime.now().isoformat()
-
-    # Set source and imported_at on NULL records for this exchange
-    conn.execute(
-        "UPDATE transactions SET source = ?, imported_at = ? "
-        "WHERE exchange_name = ? AND source IS NULL",
-        (source_filename, now, exchange_name)
-    )
-
-    # Compute hash for records without one
-    rows = conn.execute("""
-        SELECT id, source, transaction_date, transaction_type,
-               exchange_name, cryptocurrency, amount, total_value, fee_amount
-        FROM transactions
-        WHERE record_hash IS NULL AND exchange_name = ?
-    """, (exchange_name,)).fetchall()
-
-    for row in rows:
-        h = compute_record_hash(
-            row['source'], row['transaction_date'], row['transaction_type'],
-            row['exchange_name'], row['cryptocurrency'],
-            row['amount'], row['total_value'], row['fee_amount']
-        )
-        conn.execute("UPDATE transactions SET record_hash = ? WHERE id = ?", (h, row['id']))
-
-    conn.commit()
-    updated = len(rows)
-    conn.close()
-    return updated
-
 
 def get_db_exchange_stats():
     """Get transaction stats per exchange from the database."""
@@ -924,6 +1664,29 @@ def get_db_exchange_stats():
             ORDER BY exchange_name
         """).fetchall()
         return {r['exchange_name']: dict(r) for r in rows}
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        conn.close()
+
+
+def get_db_source_stats():
+    """Get transaction stats per source file from the database."""
+    if not db_exists():
+        return {}
+    conn = get_db()
+    try:
+        rows = conn.execute("""
+            SELECT source,
+                   COUNT(*) as total,
+                   COUNT(CASE WHEN transaction_type='BUY' THEN 1 END) as buys,
+                   COUNT(CASE WHEN transaction_type='SELL' THEN 1 END) as sells,
+                   MAX(imported_at) as last_imported
+            FROM transactions
+            WHERE source IS NOT NULL
+            GROUP BY source
+        """).fetchall()
+        return {r['source']: dict(r) for r in rows}
     except sqlite3.OperationalError:
         return {}
     finally:
@@ -1022,7 +1785,12 @@ def download_template():
 def import_page():
     csv_files = scan_csv_files()
     db_stats = get_db_exchange_stats()
+    source_stats = get_db_source_stats()
     field_map = EXCHANGE_FIELD_MAP
+
+    # Attach per-file DB stats to each CSV file
+    for f in csv_files:
+        f['db_source'] = source_stats.get(f['filename'])
 
     # Group CSV files by exchange
     exchange_groups = defaultdict(list)
@@ -1054,56 +1822,21 @@ def import_page():
                            page='import')
 
 
-def merge_csv_files(filepaths):
+@app.route('/import/run-file/<filename>', methods=['POST'])
+def run_import_file(filename):
+    """Import a single CSV file into the database.
+
+    All importers now accept: python3 importer.py <filepath> [exchange_name]
+    Each importer handles DELETE by source and sets source/imported_at/record_hash.
     """
-    Merge multiple CSVs with the same structure into one temp file.
-    Keeps header from first file, appends data rows from subsequent files.
-    Returns path to the merged temp file.
-    """
-    import tempfile
-    merged_path = tempfile.mktemp(suffix='.csv', dir=DATA_DIR)
-
-    header = None
-    with open(merged_path, 'w', encoding='utf-8', newline='') as out:
-        for i, fp in enumerate(sorted(filepaths)):
-            with open(fp, 'r', encoding='utf-8-sig') as inp:
-                lines = inp.readlines()
-                if not lines:
-                    continue
-                if i == 0:
-                    # First file: write header + all data
-                    header = lines[0]
-                    out.writelines(lines)
-                else:
-                    # Subsequent files: skip header, append data
-                    file_header = lines[0]
-                    # Verify header matches (same columns)
-                    if file_header.strip().split(',')[:3] == header.strip().split(',')[:3]:
-                        out.writelines(lines[1:])
-                    else:
-                        # Different structure — still append but note it
-                        out.writelines(lines[1:])
-
-    return merged_path
-
-
-@app.route('/import/run/<exchange_name>', methods=['POST'])
-def run_import(exchange_name):
-    """Import all CSV files for an exchange.
-
-    Standard CSV importers: import file-by-file (DELETE by source).
-    Exchange-specific importers: merge + import (DELETE by exchange), then backfill source.
-    """
-    csv_files = scan_csv_files()
-    exchange_files = [f for f in csv_files if f['exchange'] == exchange_name]
-
-    if not exchange_files:
-        flash(f'No CSV files found for {exchange_name}', 'error')
+    filepath = os.path.join(DATA_DIR, filename)
+    if not os.path.isfile(filepath):
+        flash(f'File not found: {filename}', 'error')
         return redirect(url_for('import_page'))
 
-    importer_script = exchange_files[0]['importer']
+    exchange_name, importer_script = detect_exchange(filename)
     if not importer_script:
-        flash(f'No importer available for {exchange_name}', 'error')
+        flash(f'No importer available for {filename}', 'error')
         return redirect(url_for('import_page'))
 
     importer_path = os.path.join(PROJECT_ROOT, importer_script)
@@ -1111,93 +1844,66 @@ def run_import(exchange_name):
         flash(f'Importer script not found: {importer_script}', 'error')
         return redirect(url_for('import_page'))
 
-    is_standard = importer_script.endswith('import_standard_csv.py')
-
-    merged_path = None
     try:
-        if is_standard:
-            # ── Standard CSV: import file by file (DELETE by source) ──
-            total_inserted = 0
-            for ef in exchange_files:
-                cmd = [sys.executable, importer_path, ef['filepath'], exchange_name]
-                result = subprocess.run(
-                    cmd, cwd=PROJECT_ROOT,
-                    capture_output=True, text=True,
-                    input='1\n', timeout=120,
-                )
-                output = result.stdout + result.stderr
-                if result.returncode == 0:
-                    total_inserted += ef['rows']
-                else:
-                    flash(f'Import error for {ef["filename"]}: {output[-500:]}', 'error')
-                    return redirect(url_for('import_page'))
-
-            if len(exchange_files) == 1:
-                flash(f'Imported {exchange_name} ({exchange_files[0]["filename"]}, {total_inserted:,} rows)', 'success')
-            else:
-                filenames = ', '.join(f['filename'] for f in exchange_files)
-                flash(f'Imported {exchange_name}: {len(exchange_files)} files ({filenames}), {total_inserted:,} total rows', 'success')
-
-        elif len(exchange_files) > 1:
-            # ── Exchange-specific, multi-file: merge + import ──
-            filepaths = [f['filepath'] for f in exchange_files]
-            merged_path = merge_csv_files(filepaths)
-            total_rows = sum(f['rows'] for f in exchange_files)
-            filenames = ', '.join(f['filename'] for f in exchange_files)
-            source_label = '+'.join(f['filename'] for f in exchange_files)
-
-            main_file = exchange_files[0]['filepath']
-            backup_path = main_file + '.bak'
-
-            if os.path.exists(main_file):
-                shutil.copy2(main_file, backup_path)
-            shutil.copy2(merged_path, main_file)
-
-            try:
-                result = subprocess.run(
-                    [sys.executable, importer_path],
-                    cwd=PROJECT_ROOT,
-                    capture_output=True, text=True,
-                    input='1\n', timeout=120,
-                )
-                output = result.stdout + result.stderr
-                if result.returncode == 0:
-                    # Post-import: backfill source/hash for new records
-                    updated = post_import_source_update(source_label, exchange_name)
-                    flash(f'Imported {exchange_name}: merged {len(exchange_files)} files ({filenames}), {total_rows:,} rows ({updated} hashed)', 'success')
-                else:
-                    flash(f'Import error for {exchange_name}: {output[-500:]}', 'error')
-            finally:
-                if os.path.exists(backup_path):
-                    shutil.move(backup_path, main_file)
-
+        cmd = [sys.executable, importer_path, filepath, exchange_name]
+        result = subprocess.run(
+            cmd, cwd=PROJECT_ROOT,
+            capture_output=True, text=True,
+            timeout=120,
+        )
+        output = result.stdout + result.stderr
+        if result.returncode == 0:
+            flash(f'Imported {filename} ({exchange_name})', 'success')
         else:
-            # ── Exchange-specific, single file ──
-            source_label = exchange_files[0]['filename']
-
-            result = subprocess.run(
-                [sys.executable, importer_path],
-                cwd=PROJECT_ROOT,
-                capture_output=True, text=True,
-                input='1\n', timeout=120,
-            )
-            output = result.stdout + result.stderr
-            if result.returncode == 0:
-                # Post-import: backfill source/hash for new records
-                updated = post_import_source_update(source_label, exchange_name)
-                flash(f'Imported {exchange_name} ({source_label}, {updated} records hashed)', 'success')
-            else:
-                flash(f'Import error for {exchange_name}: {output[-500:]}', 'error')
+            flash(f'Import error for {filename}: {output[-500:]}', 'error')
 
     except subprocess.TimeoutExpired:
-        flash(f'Import timed out for {exchange_name}', 'error')
+        flash(f'Import timed out for {filename}', 'error')
     except Exception as e:
-        flash(f'Import failed: {str(e)}', 'error')
-    finally:
-        if merged_path and os.path.exists(merged_path):
-            os.remove(merged_path)
+        flash(f'Import failed for {filename}: {str(e)}', 'error')
 
     return redirect(url_for('import_page'))
+
+
+@app.route('/import/run-exchange/<exchange_name>', methods=['POST'])
+def run_import_exchange(exchange_name):
+    """Re-import all CSV files for a given exchange. Used by the Status page."""
+    redirect_to = request.form.get('redirect', 'status')
+    csv_files = scan_csv_files()
+    exchange_files = [f for f in csv_files if f['exchange'] == exchange_name and f['importer']]
+
+    if not exchange_files:
+        flash(f'No importable files found for {exchange_name}', 'error')
+        return redirect(url_for(redirect_to))
+
+    imported = []
+    errors = []
+    for f in exchange_files:
+        importer_path = os.path.join(PROJECT_ROOT, f['importer'])
+        filepath = f['filepath']
+        try:
+            cmd = [sys.executable, importer_path, filepath, exchange_name]
+            result = subprocess.run(
+                cmd, cwd=PROJECT_ROOT,
+                capture_output=True, text=True,
+                timeout=120,
+            )
+            if result.returncode == 0:
+                imported.append(f['filename'])
+            else:
+                output = result.stdout + result.stderr
+                errors.append(f"{f['filename']}: {output[-300:]}")
+        except subprocess.TimeoutExpired:
+            errors.append(f"{f['filename']}: timeout")
+        except Exception as e:
+            errors.append(f"{f['filename']}: {str(e)}")
+
+    if imported:
+        flash(f"Imported {exchange_name}: {', '.join(imported)}", 'success')
+    for err in errors:
+        flash(f'Import error — {err}', 'error')
+
+    return redirect(url_for(redirect_to))
 
 
 # ── Step 3: Status ─────────────────────────────────────────
@@ -1515,11 +2221,68 @@ def reports():
                 'modified': datetime.fromtimestamp(stat.st_mtime),
             })
 
+    # SQL query files from calculators/
+    sql_queries = []
+    calc_dir = os.path.join(PROJECT_ROOT, 'calculators')
+    for f in sorted(glob.glob(os.path.join(calc_dir, '*.sql'))):
+        basename = os.path.basename(f)
+        label = os.path.splitext(basename)[0].replace('_', ' ')
+        sql_queries.append({'filename': basename, 'label': label})
+
     return render_template('reports.html',
                            stats=stats,
                            available_years=available_years,
                            existing_reports=existing_reports,
+                           sql_queries=sql_queries,
                            page='reports')
+
+
+@app.route('/reports/query/<filename>')
+def run_sql_query(filename):
+    """Execute a .sql file from calculators/ and return JSON results."""
+    from flask import jsonify
+
+    # Validate filename: no path traversal, must be .sql
+    if '/' in filename or '..' in filename or not filename.endswith('.sql'):
+        return jsonify(error='Invalid filename'), 400
+
+    sql_path = os.path.join(PROJECT_ROOT, 'calculators', filename)
+    if not os.path.exists(sql_path):
+        return jsonify(error='Query file not found'), 404
+
+    # Read SQL
+    with open(sql_path, 'r') as f:
+        sql = f.read().strip()
+
+    # Security: only allow SELECT statements
+    sql_upper = sql.upper().lstrip()
+    forbidden = ('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE',
+                 'ATTACH', 'DETACH', 'PRAGMA', 'REPLACE', 'VACUUM', 'REINDEX')
+    for kw in forbidden:
+        if kw in sql_upper.split():
+            return jsonify(error=f'Forbidden SQL keyword: {kw}'), 403
+
+    if not sql_upper.startswith('SELECT') and not sql_upper.startswith('WITH'):
+        return jsonify(error='Only SELECT queries are allowed'), 403
+
+    if not db_exists():
+        return jsonify(error='Database not found'), 500
+
+    try:
+        # Open DB in read-only mode
+        db_uri = f'file:{DATABASE_PATH}?mode=ro'
+        conn = sqlite3.connect(db_uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        rows = [list(r) for r in cursor.fetchmany(500)]
+        total = len(rows)
+        if cursor.fetchone() is not None:
+            total = f'{total}+'  # indicate truncation
+        conn.close()
+        return jsonify(columns=columns, rows=rows, total=total, query=sql)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
 
 
 @app.route('/reports/generate/<int:year>', methods=['POST'])
@@ -1689,8 +2452,8 @@ if __name__ == '__main__':
     print("=" * 60)
     print(f"\n  Database:  {DATABASE_PATH}")
     print(f"  Data dir:  {DATA_DIR}")
-    print(f"\n  Open: http://127.0.0.1:5000")
+    print(f"\n  Open: http://127.0.0.1:5002")
     print(f"\n  Press CTRL+C to stop")
     print("=" * 60)
 
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    app.run(debug=True, host='127.0.0.1', port=5002)
