@@ -22,14 +22,13 @@
 <!-- ECB Rate file status -->
 <div class="section">
   {% if not eurusd.exists %}
-  <div class="flash flash-error" style="margin-bottom:0">
-    ✗ <strong>eurusd.csv missing</strong> — required for USD→EUR conversion (Bitfinex, Kraken, Coinbase Prime, Mt.Gox).
-    Download from the ECB or run the rate fetcher.
+  <div class="flash flash-error" style="margin-bottom:0; background:var(--yellow-bg); border-color:var(--yellow-border); color:var(--yellow)">
+    ⚠ <strong>eurusd.csv not yet created</strong> — will be fetched automatically from Frankfurter API on first import of a USD exchange (Bitfinex, Kraken, Coinbase Prime, Mt.Gox).
   </div>
   {% elif eurusd.needs_update %}
   <div class="flash flash-error" style="margin-bottom:0; background:var(--yellow-bg); border-color:var(--yellow-border); color:var(--yellow)">
     ⚠ <strong>eurusd.csv is {{ eurusd.age_days }} days old</strong> — last rate: {{ eurusd.max_date }}.
-    Update it to cover recent trades.
+    Will be updated automatically on next import.
     {% if eurusd.gaps %} Affects: {{ eurusd.gaps|map(attribute='exchange')|join(', ') }}.{% endif %}
   </div>
   {% elif eurusd.gaps %}

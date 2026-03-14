@@ -19,9 +19,8 @@
   <div class="eurusd-body">
     {% if not eurusd.exists %}
       <div class="eurusd-alert eurusd-alert-error">
-        <strong>File missing:</strong> <code>{{ data_dir_name }}/eurusd.csv</code> not found.
-        This file is required to convert USD prices to EUR for exchanges like Bitfinex, Kraken, Coinbase Prime, Mt.Gox.
-        Download it from the ECB or run the rate fetcher script.
+        <strong>File missing:</strong> <code>{{ data_dir_name }}/eurusd.csv</code> not yet created.
+        It will be fetched automatically from Frankfurter API on first import of a USD exchange.
       </div>
     {% else %}
       <div class="eurusd-stats">
