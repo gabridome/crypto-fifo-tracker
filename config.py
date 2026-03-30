@@ -13,6 +13,9 @@ To add a new country:
 
 import os
 
+# Project root — all relative paths are resolved from here
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 # ============================================================
 # ACTIVE COUNTRY — change this to switch jurisdiction
 # ============================================================
@@ -115,7 +118,12 @@ def get_profile():
 
 
 # Shortcuts for the most commonly used settings
-_profile = get_profile()
+try:
+    _profile = get_profile()
+except ValueError as e:
+    import sys
+    print(f"WARNING: {e}. Falling back to 'PT'.", file=sys.stderr)
+    _profile = COUNTRY_PROFILES["PT"]
 
 COUNTRY_NAME = _profile["name"]
 CURRENCY = _profile["currency"]
@@ -131,12 +139,15 @@ REPORT_LANGUAGE = _profile["report"]["language"]
 AGGREGATE_BY_DAY = _profile["report"]["aggregate_by_day"]
 
 ECB_RATES_ENABLED = _profile["ecb_rates"]["enabled"]
-ECB_RATES_FILE = _profile["ecb_rates"]["rates_file"]
+ECB_RATES_FILE = os.path.join(PROJECT_ROOT, _profile["ecb_rates"]["rates_file"])
 
 # ============================================================
 # DATABASE
 # ============================================================
-DATABASE_PATH = os.environ.get("FIFO_DB", "data/crypto_fifo.db")
+DATABASE_PATH = os.environ.get(
+    "FIFO_DB",
+    os.path.join(PROJECT_ROOT, "data", "crypto_fifo.db")
+)
 
 # ============================================================
 # EXCHANGE CLASSIFICATION
