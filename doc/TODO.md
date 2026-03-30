@@ -23,10 +23,10 @@
 - [x] ~~**Connection lifecycle**~~ — try/finally su tutte le connessioni (2026-03-30)
 - [x] ~~**Config path assoluti**~~ — `PROJECT_ROOT` + path assoluti (2026-03-30)
 - [x] ~~**Config safe import**~~ — fallback a PT con warning (2026-03-30)
-- [ ] **DB path da config**: `generate_irs_report.py` e `generate_annual_summary.py` usino `config.DATABASE_PATH`
-- [ ] **Exchange country unificato**: una sola mappa in `config.py` (ISO + codici numerici AT)
+- [x] ~~**DB path da config**~~ — report generators usano config.DATABASE_PATH (2026-03-30)
+- [x] ~~**Exchange country unificato**~~ — una mappa con iso + at_code + at_name (2026-03-30)
 - [x] ~~**Import path consistenti**~~ — `from importers.ecb_rates` in tutti i file (2026-03-30)
-- [ ] **Colonne mancanti**: aggiungere `fee_currency`/`currency` a Bitstamp, Kraken, Mt.Gox, TRT, Binance
+- [x] ~~**Colonne mancanti**~~ — fee_currency/currency in tutti i 13 importers (2026-03-30)
 - [x] ~~**Epsilon consistente**~~ — `DUST_THRESHOLD = Decimal('1e-8')` (2026-03-30)
 - [x] ~~**Unused imports**~~ — rimossi Dict, usato zoneinfo al posto di pytz (2026-03-30)
 
@@ -42,14 +42,14 @@
 
 - [ ] **Estrarre CSV parser**: `parse_csv_deep` / `parse_csv_rows` in `web/csv_parser.py` (eliminare ~500 righe duplicate)
 - [x] ~~**Estrarre boilerplate importers**~~ — `import_and_verify()` in `import_utils.py` (2026-03-30)
-- [ ] **Context processor caching**: `get_wizard_status()` e `check_eurusd()` con TTL o lazy per pagine HTML only
+- [x] ~~**Context processor caching**~~ — TTL 5s su inject_globals() (2026-03-30)
 
 ## Priorità BASSA — Miglioramenti
 
 - [ ] **CSRF protection**: aggiungere `flask-wtf` CSRFProtect
-- [ ] **Secret key**: generare random, non hardcoded
+- [x] ~~**Secret key**~~ — os.urandom(24) (2026-03-30)
 - [ ] **Logging**: migrare da `print()` a `logging` module negli importers
-- [ ] **`fmt_eur_filter`**: mostrare €0.00 per zero, '---' solo per None
+- [x] ~~**`fmt_eur_filter`**~~ — mostra €0.00 per zero, '—' solo per None (2026-03-30)
 
 ---
 
