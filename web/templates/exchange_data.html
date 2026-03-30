@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}Exchange Data — FIFO Tracker{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>Exchange Data</h2>
+  <p class="desc">Upload CSV files, import into database, and verify results.</p>
+</div>
+
+<!-- Upload bar -->
+<div class="section" style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap">
+  <form action="{{ url_for('upload_csv') }}" method="post" enctype="multipart/form-data"
+        style="display:flex; gap:0.5rem; align-items:center; flex:1; min-width:250px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="file" name="file" accept=".csv" required
+           style="flex:1; font-size:0.85rem; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:0.4rem">
+    <button type="submit" class="btn btn-primary btn-sm">Upload CSV</button>
+  </form>
+  <a href="{{ url_for('download_template') }}" class="btn btn-sm">Download template</a>
+</div>
+
+{% if not groups %}
+<div style="text-align:center; padding:3rem; color:var(--text-dim)">
+  No CSV files found. Upload exchange export files to get started.
+</div>
+{% endif %}
+
+<!-- Exchange cards -->
+{% for g in groups %}
+<div class="section" style="border:1px solid var(--border); border-radius:8px; padding:0; overflow:hidden; margin-bottom:1rem;
+  {% if g.status == 'ok' %}border-left:3px solid var(--green);
+  {% elif g.status == 'close' %}border-left:3px solid var(--yellow);
+  {% elif g.status == 'mismatch' %}border-left:3px solid var(--red);
+  {% elif g.status == 'not-imported' %}border-left:3px solid var(--text-dim);
+  {% endif %}">
+
+  <!-- Card header -->
+  <div style="display:flex; align-items:center; gap:0.75rem; padding:0.75rem 1rem; background:var(--surface2); flex-wrap:wrap">
+    <strong style="font-size:1rem; flex:1; min-width:120px">{{ g.exchange }}</strong>
+
+    {% if g.has_docs %}
+    <a href="{{ url_for('exchange_docs', exchange_name=g.exchange) }}" class="btn btn-sm" style="font-size:0.75rem">docs</a>
+    {% endif %}
+
+    {% if g.importer %}
+      {% if g.multi %}
+      <form action="{{ url_for('run_import_exchange', exchange_name=g.exchange) }}" method="post" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="redirect" value="exchanges">
+        <button type="submit" class="btn btn-sm btn-primary" style="font-size:0.75rem"
+                onclick="this.disabled=true; this.textContent='Importing...'; this.form.submit()">
+          {% if g.status == 'not-imported' %}&#9654; Import{% else %}&#8635; Re-import{% endif %}
+        </button>
+      </form>
+      {% else %}
+      <form action="{{ url_for('run_import_file', filename=g.files[0].filename) }}" method="post" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="redirect" value="exchanges">
+        <button type="submit" class="btn btn-sm btn-primary" style="font-size:0.75rem"
+                onclick="this.disabled=true; this.textContent='Importing...'; this.form.submit()">
+          {% if g.status == 'not-imported' %}&#9654; Import{% else %}&#8635; Re-import{% endif %}
+        </button>
+      </form>
+      {% endif %}
+    {% else %}
+    <span class="btn btn-sm" style="font-size:0.75rem; opacity:0.4; cursor:not-allowed" title="No importer available">No importer</span>
+    {% endif %}
+
+    {% for f in g.files %}
+    <form action="{{ url_for('delete_csv', filename=f.filename) }}" method="post" style="display:inline"
+          onsubmit="return confirm('Delete {{ f.filename }}?')">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn btn-sm btn-danger" style="font-size:0.7rem" title="Delete {{ f.filename }}">&times;</button>
+    </form>
+    {% endfor %}
+  </div>
+
+  <!-- Card body -->
+  <div style="padding:0.75rem 1rem">
+
+    <!-- File info -->
+    <div style="font-size:0.85rem; color:var(--text-dim); margin-bottom:0.5rem">
+      {% if g.multi %}
+      <span>Files: {% for f in g.files %}<span class="mono">{{ f.filename }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</span>
+      <span class="dim"> ({{ g.file_count }} files)</span>
+      {% else %}
+      <span>File: <span class="mono">{{ g.files[0].filename }}</span></span>
+      {% endif %}
+      <br>
+      <span class="mono">{{ g.total_rows }}</span> rows
+      &middot; {{ g.files|map(attribute='size')|sum|fmt_size }}
+      {% if g.files[0].modified %}
+      &middot; Modified: <span class="mono">{{ g.files[0].modified[:10] if g.files[0].modified is string else g.files[0].modified.strftime('%Y-%m-%d') }}</span>
+      {% endif %}
+    </div>
+
+    <!-- DB status -->
+    {% if g.status == 'not-imported' %}
+    <div style="padding:0.5rem; background:var(--surface); border-radius:6px; font-size:0.85rem; color:var(--text-dim)">
+      Not imported yet
+    </div>
+
+    {% elif g.status in ('ok', 'close', 'mismatch') %}
+    <div style="font-size:0.8rem">
+      <table style="width:auto; border-collapse:collapse; margin:0.25rem 0">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border)">
+            <th style="text-align:left; padding:0.2rem 1rem 0.2rem 0; font-size:0.75rem; color:var(--text-dim)"></th>
+            <th style="text-align:right; padding:0.2rem 0.75rem; font-size:0.75rem; color:var(--text-dim)">CSV</th>
+            <th style="text-align:right; padding:0.2rem 0.75rem; font-size:0.75rem; color:var(--text-dim)">DB</th>
+            <th style="text-align:center; padding:0.2rem 0.5rem; font-size:0.75rem; color:var(--text-dim)">&Delta;</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% set csv = g.csv_stats %}
+          {% set db = g.db %}
+          {% macro delta_cell(csv_val, db_val, fmt) %}
+            {% if csv_val == db_val %}
+            <td style="text-align:center; padding:0.2rem 0.5rem; color:var(--green)">&#10003;</td>
+            {% elif fmt == 'eur' and csv_val and db_val and (csv_val - db_val)|abs < 1.0 %}
+            <td style="text-align:center; padding:0.2rem 0.5rem; color:var(--yellow)" title="{{ '%.2f'|format((csv_val - db_val)|abs) }}">&asymp;</td>
+            {% elif fmt == 'int' and csv_val and db_val and (csv_val - db_val)|abs <= 1 %}
+            <td style="text-align:center; padding:0.2rem 0.5rem; color:var(--yellow)">&asymp;</td>
+            {% else %}
+            <td style="text-align:center; padding:0.2rem 0.5rem; color:var(--red)">&ne;</td>
+            {% endif %}
+          {% endmacro %}
+
+          <tr>
+            <td style="padding:0.2rem 1rem 0.2rem 0">BUY</td>
+            <td class="mono" style="text-align:right; padding:0.2rem 0.75rem">{{ csv.get('buy_count', '—') }}</td>
+            <td class="mono" style="text-align:right; padding:0.2rem 0.75rem">{{ db.get('buys', '—') }}</td>
+            {{ delta_cell(csv.get('buy_count'), db.get('buys'), 'int') }}
+          </tr>
+          <tr>
+            <td style="padding:0.2rem 1rem 0.2rem 0">SELL</td>
+            <td class="mono" style="text-align:right; padding:0.2rem 0.75rem">{{ csv.get('sell_count', '—') }}</td>
+            <td class="mono" style="text-align:right; padding:0.2rem 0.75rem">{{ db.get('sells', '—') }}</td>
+            {{ delta_cell(csv.get('sell_count'), db.get('sells'), 'int') }}
+          </tr>
+          {% if csv.get('total_fees') or db.get('total_fees') %}
+          <tr>
+            <td style="padding:0.2rem 1rem 0.2rem 0">Fees</td>
+            <td class="mono" style="text-align:right; padding:0.2rem 0.75rem">{{ '%.2f'|format(csv.get('total_fees', 0)) }}</td>
+            <td class="mono" style="text-align:right; padding:0.2rem 0.75rem">{{ '%.2f'|format(db.get('total_fees', 0)) }}</td>
+            {{ delta_cell(csv.get('total_fees', 0)|round(0), db.get('total_fees', 0)|round(0), 'eur') }}
+          </tr>
+          {% endif %}
+          {% if csv.get('min_date') or db.get('min_date') %}
+          <tr>
+            <td style="padding:0.2rem 1rem 0.2rem 0">Dates</td>
+            <td class="mono dim" style="text-align:right; padding:0.2rem 0.75rem; font-size:0.75rem">{{ csv.get('min_date', '?')[:10] }} &rarr; {{ csv.get('max_date', '?')[:10] }}</td>
+            <td class="mono dim" style="text-align:right; padding:0.2rem 0.75rem; font-size:0.75rem">{{ db.get('min_date', '?')[:10] if db.get('min_date') else '?' }} &rarr; {{ db.get('max_date', '?')[:10] if db.get('max_date') else '?' }}</td>
+            <td></td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+
+      {% if csv.get('parse_errors', 0) > 0 %}
+      <div style="margin-top:0.4rem; font-size:0.8rem; color:var(--red)">
+        &#9888; {{ csv.parse_errors }} parse errors
+        {% if g.has_docs %} — <a href="{{ url_for('exchange_docs', exchange_name=g.exchange) }}#fields" style="color:var(--accent)">check field format</a>{% endif %}
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Import timestamp -->
+    {% if g.last_imported %}
+    <div style="margin-top:0.4rem; font-size:0.78rem; color:var(--text-dim)">
+      Last import: <span class="mono">{{ g.last_imported[:16] }}</span>
+      &middot;
+      {% if g.status == 'ok' %}
+      <span style="color:var(--green)">&#10003; All matched</span>
+      {% elif g.status == 'close' %}
+      <span style="color:var(--yellow)">&asymp; Minor differences</span>
+      {% elif g.status == 'mismatch' %}
+      <span style="color:var(--red)">&#9888; Mismatches found</span>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% elif g.status == 'db-only' %}
+    <div style="padding:0.5rem; background:var(--surface); border-radius:6px; font-size:0.85rem; color:var(--yellow)">
+      Data in DB but no CSV file found. {{ db.get('total', 0) }} transactions.
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+{% endfor %}
+
+{% endblock %}

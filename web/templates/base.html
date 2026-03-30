@@ -453,24 +453,16 @@
 
   <div class="sidebar-section">Workflow</div>
   <ul class="sidebar-nav">
-    <li><a href="{{ url_for('collect') }}" class="{% if page == 'collect' %}active{% endif %}">
-      <span class="nav-step {% if wizard.collect == 'complete' %}complete{% elif wizard.collect == 'partial' %}partial{% endif %}">1</span>
-      <span class="nav-label">Collect</span>
-    </a></li>
-    <li><a href="{{ url_for('import_page') }}" class="{% if page == 'import' %}active{% endif %}">
-      <span class="nav-step {% if wizard.import == 'complete' %}complete{% elif wizard.import == 'partial' %}partial{% endif %}">2</span>
-      <span class="nav-label">Import</span>
-    </a></li>
-    <li><a href="{{ url_for('status') }}" class="{% if page == 'status' %}active{% endif %}">
-      <span class="nav-step {% if wizard.status == 'complete' %}complete{% elif wizard.status == 'partial' %}partial{% endif %}">3</span>
-      <span class="nav-label">Status</span>
+    <li><a href="{{ url_for('exchanges') }}" class="{% if page == 'exchanges' %}active{% endif %}">
+      <span class="nav-step {% if wizard.collect == 'complete' and wizard.import == 'complete' %}complete{% elif wizard.collect == 'complete' or wizard.import == 'partial' %}partial{% endif %}">1</span>
+      <span class="nav-label">Exchange Data</span>
     </a></li>
     <li><a href="{{ url_for('fifo') }}" class="{% if page == 'fifo' %}active{% endif %}">
-      <span class="nav-step {% if wizard.fifo == 'complete' %}complete{% elif wizard.fifo == 'partial' %}partial{% endif %}">4</span>
+      <span class="nav-step {% if wizard.fifo == 'complete' %}complete{% elif wizard.fifo == 'partial' %}partial{% endif %}">2</span>
       <span class="nav-label">FIFO</span>
     </a></li>
     <li><a href="{{ url_for('reports') }}" class="{% if page == 'reports' %}active{% endif %}">
-      <span class="nav-step {% if wizard.reports == 'complete' %}complete{% elif wizard.reports == 'partial' %}partial{% endif %}">5</span>
+      <span class="nav-step {% if wizard.reports == 'complete' %}complete{% elif wizard.reports == 'partial' %}partial{% endif %}">3</span>
       <span class="nav-label">Reports</span>
     </a></li>
   </ul>

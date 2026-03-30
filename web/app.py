@@ -728,7 +728,143 @@ def index():
     return redirect(url_for('collect'))
 
 
-# ── Step 1: Collect ────────────────────────────────────────
+# ── Exchange Data (unified page) ──────────────────────────
+
+@app.route('/exchanges')
+def exchanges():
+    """Unified page: collect + import + status for all exchanges."""
+    csv_files = scan_csv_files()
+    db_stats = get_db_exchange_stats()
+    source_stats = get_db_source_stats()
+
+    # Attach per-file DB stats
+    for f in csv_files:
+        f['db_source'] = source_stats.get(f['filename'])
+
+    # Group by exchange
+    exchange_groups = defaultdict(list)
+    for f in csv_files:
+        exchange_groups[f['exchange']].append(f)
+
+    # Build groups with CSV deep-parse comparison
+    from web.csv_parser import parse_csv_deep
+    groups = []
+    for exchange in sorted(exchange_groups.keys()):
+        files = exchange_groups[exchange]
+        importer = files[0]['importer'] if files else None
+        total_rows = sum(f['rows'] for f in files)
+        db = db_stats.get(exchange, {})
+
+        # CSV aggregate stats (from all files for this exchange)
+        csv_stats = {}
+        for f in files:
+            try:
+                deep = parse_csv_deep(f['filepath'], exchange, DATA_DIR)
+                for key in ('buy_count', 'sell_count', 'buy_value', 'sell_value', 'total_fees', 'parse_errors'):
+                    csv_stats[key] = csv_stats.get(key, 0) + deep.get(key, 0)
+                if deep.get('min_date'):
+                    if not csv_stats.get('min_date') or deep['min_date'] < csv_stats['min_date']:
+                        csv_stats['min_date'] = deep['min_date']
+                if deep.get('max_date'):
+                    if not csv_stats.get('max_date') or deep['max_date'] > csv_stats['max_date']:
+                        csv_stats['max_date'] = deep['max_date']
+            except Exception:
+                csv_stats['parse_errors'] = csv_stats.get('parse_errors', 0) + 1
+
+        # Determine status
+        has_db = db.get('total', 0) > 0
+        has_csv = total_rows > 0
+        if has_db and has_csv:
+            # Compare counts
+            csv_buys = csv_stats.get('buy_count', 0)
+            csv_sells = csv_stats.get('sell_count', 0)
+            db_buys = db.get('buys', 0)
+            db_sells = db.get('sells', 0)
+            if csv_buys == db_buys and csv_sells == db_sells:
+                status = 'ok'
+            elif abs(csv_buys - db_buys) <= max(1, csv_buys * 0.1) and abs(csv_sells - db_sells) <= max(1, csv_sells * 0.1):
+                status = 'close'
+            else:
+                status = 'mismatch'
+        elif has_csv and not has_db:
+            status = 'not-imported'
+        elif has_db and not has_csv:
+            status = 'db-only'
+        else:
+            status = 'empty'
+
+        # Last import time
+        last_imported = None
+        for f in files:
+            src = f.get('db_source')
+            if src and src.get('last_imported'):
+                if not last_imported or src['last_imported'] > last_imported:
+                    last_imported = src['last_imported']
+
+        groups.append({
+            'exchange': exchange,
+            'files': files,
+            'file_count': len(files),
+            'total_rows': total_rows,
+            'importer': importer,
+            'db': db,
+            'csv_stats': csv_stats,
+            'status': status,
+            'last_imported': last_imported,
+            'multi': len(files) > 1,
+            'has_docs': exchange in EXCHANGE_FIELD_MAP or exchange == 'Standard Format',
+        })
+
+    return render_template('exchange_data.html',
+                           groups=groups,
+                           page='exchanges')
+
+
+@app.route('/exchange-docs/<exchange_name>')
+def exchange_docs(exchange_name):
+    """Per-exchange documentation: field mapping, download instructions, known issues."""
+    field_map = EXCHANGE_FIELD_MAP.get(exchange_name)
+    if not field_map and exchange_name in [e for _, e, _ in EXCHANGE_PATTERNS
+                                           if 'standard_csv' in _]:
+        field_map = EXCHANGE_FIELD_MAP.get('Standard Format')
+
+    instructions = EXCHANGE_INSTRUCTIONS.get(exchange_name)
+
+    # Load known issues for this exchange from the markdown file
+    known_issues = []
+    issues_path = os.path.join(PROJECT_ROOT, 'doc', 'known_import_issues.md')
+    if os.path.exists(issues_path):
+        try:
+            with open(issues_path, 'r') as f:
+                content = f.read()
+            # Find the section for this exchange
+            import re
+            pattern = rf'### {re.escape(exchange_name)}.*?\n\n(.*?)(?=\n### |\n---|\n## |\Z)'
+            match = re.search(pattern, content, re.DOTALL)
+            if match:
+                # Parse table rows
+                for line in match.group(1).strip().split('\n'):
+                    if line.startswith('|') and not line.startswith('| Problema') and not line.startswith('|--'):
+                        parts = [p.strip() for p in line.split('|')[1:-1]]
+                        if len(parts) >= 3:
+                            known_issues.append({
+                                'problem': parts[0],
+                                'cause': parts[1],
+                                'status': parts[2],
+                                'notes': parts[3] if len(parts) > 3 else '',
+                            })
+        except Exception:
+            pass
+
+    return render_template('exchange_docs.html',
+                           exchange_name=exchange_name,
+                           field_map=field_map,
+                           instructions=instructions,
+                           known_issues=known_issues,
+                           page='exchanges')
+
+
+# ── Step 1: Collect (legacy, redirects to /exchanges) ─────
 
 @app.route('/collect')
 def collect():
