@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}{{ exchange_name }} — Documentation{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>{{ exchange_name }}</h2>
+  <p class="desc">Field mapping, download instructions, and known issues.</p>
+</div>
+
+<div style="margin-bottom:1.5rem">
+  <a href="{{ url_for('exchanges') }}" class="btn btn-sm">&larr; Back to Exchange Data</a>
+</div>
+
+{% if instructions %}
+<div class="section">
+  <div class="section-title" id="download">How to download</div>
+  <ol style="margin:0.5rem 0 0 1.2rem; line-height:1.8">
+    {% for step in instructions.steps %}
+    <li>{{ step }}</li>
+    {% endfor %}
+  </ol>
+  {% if instructions.url %}
+  <p style="margin-top:0.5rem; font-size:0.85rem">
+    <span class="dim">Direct link:</span>
+    <a href="{{ instructions.url }}" target="_blank" style="color:var(--accent)">{{ instructions.url }}</a>
+  </p>
+  {% endif %}
+  {% if instructions.expected_file %}
+  <p style="font-size:0.85rem">
+    <span class="dim">Expected filename:</span>
+    <code style="color:var(--accent)">{{ instructions.expected_file }}</code>
+  </p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if field_map %}
+<div class="section">
+  <div class="section-title" id="fields">CSV &rarr; Database field mapping</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>CSV Column</th>
+          <th>&rarr;</th>
+          <th>DB Field</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for csv_col, db_col, note in field_map.columns %}
+        <tr>
+          <td class="mono">{{ csv_col }}</td>
+          <td class="dim">&rarr;</td>
+          <td class="mono" style="color:var(--accent)">{{ db_col }}</td>
+          <td class="dim" style="font-size:0.8rem">{{ note }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if field_map.type_values %}
+  <div style="margin-top:0.75rem; font-size:0.85rem">
+    <span class="dim">Type mapping:</span>
+    {% for csv_val, db_val in field_map.type_values.items() %}
+    <span style="display:inline-block; margin:0.2rem 0.5rem 0.2rem 0; padding:0.15rem 0.5rem; background:var(--surface2); border-radius:4px; font-family:var(--mono); font-size:0.75rem">
+      {{ csv_val }} &rarr; {{ db_val }}
+    </span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if field_map.notes %}
+  <div style="margin-top:0.75rem; padding:0.6rem; background:var(--surface2); border-radius:6px; font-size:0.85rem; border-left:3px solid var(--accent)">
+    {{ field_map.notes }}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if known_issues %}
+<div class="section">
+  <div class="section-title" id="issues">Known issues</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Problem</th>
+          <th>Cause</th>
+          <th>Status</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for issue in known_issues %}
+        <tr>
+          <td>{{ issue.problem }}</td>
+          <td class="dim" style="font-size:0.8rem">{{ issue.cause }}</td>
+          <td>
+            {% if issue.status == 'Risolto' or issue.status == 'By design' %}
+            <span class="badge badge-green">{{ issue.status }}</span>
+            {% elif issue.status == 'APERTO' %}
+            <span class="badge badge-red">{{ issue.status }}</span>
+            {% elif issue.status == 'Fisiologico' %}
+            <span class="badge" style="background:var(--surface2)">{{ issue.status }}</span>
+            {% else %}
+            <span class="badge">{{ issue.status }}</span>
+            {% endif %}
+          </td>
+          <td class="dim" style="font-size:0.8rem">{{ issue.notes }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% if not field_map and not instructions and not known_issues %}
+<div style="text-align:center; padding:3rem; color:var(--text-dim)">
+  No documentation available for {{ exchange_name }}.
+  {% if exchange_name not in ['Binance', 'Coinbase', 'Bitstamp', 'Kraken', 'Bitfinex'] %}
+  <br>This exchange uses the <a href="{{ url_for('exchange_docs', exchange_name='Standard Format') }}" style="color:var(--accent)">Standard CSV format</a>.
+  {% endif %}
+</div>
+{% endif %}
+
+{% endblock %}
