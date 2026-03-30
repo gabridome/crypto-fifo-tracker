@@ -24,12 +24,15 @@ import json
 import subprocess
 import shutil
 import hashlib
+import logging
 from datetime import datetime
 from collections import defaultdict
 import pytz
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, jsonify, send_file)
 from werkzeug.utils import secure_filename
+
+logger = logging.getLogger(__name__)
 
 # ── Project root detection ──────────────────────────────────
 # web/app.py lives inside web/, so project root is one level up
@@ -94,6 +97,7 @@ def _get_crypto_prices():
                 from importers.crypto_prices import CryptoPrices
                 _crypto_prices_cache = CryptoPrices(prices_path)
             except Exception:
+                logger.warning("Failed to load CryptoPrices from %s", prices_path, exc_info=True)
                 _crypto_prices_cache = False  # mark as attempted
     return _crypto_prices_cache if _crypto_prices_cache is not False else None
 
@@ -157,7 +161,7 @@ def check_eurusd():
             result['needs_update'] = result['age_days'] > 30
 
     except Exception:
-        pass
+        logger.warning("Failed to parse eurusd.csv at %s", eurusd_path, exc_info=True)
 
     # Cross-reference with USD exchange CSVs
     for fp in sorted(glob.glob(os.path.join(DATA_DIR, '*.csv'))):
@@ -662,6 +666,7 @@ def _scan_csv_date_range(filepath):
                     dates.append(d)
 
     except Exception:
+        logger.warning("Failed to parse date range from CSV %s", filepath, exc_info=True)
         return None, None
 
     if dates:
@@ -767,7 +772,7 @@ def _parse_paired_ledger_deep(filepath, rules, result):
                 result['min_date'] = min(dates).strftime('%Y-%m-%d')
                 result['max_date'] = max(dates).strftime('%Y-%m-%d')
     except Exception:
-        pass
+        logger.warning("Failed to parse paired ledger (deep) from %s", filepath, exc_info=True)
     return result
 
 
@@ -836,6 +841,7 @@ def _parse_paired_ledger_rows(filepath, rules):
                 })
             return sorted(rows, key=lambda r: r['date_str'])
     except Exception:
+        logger.warning("Failed to parse paired ledger rows from %s", filepath, exc_info=True)
         return []
 
 
@@ -906,7 +912,7 @@ def _parse_trt_grouped_deep(filepath, rules, result):
                 result['min_date'] = min(dates).strftime('%Y-%m-%d')
                 result['max_date'] = max(dates).strftime('%Y-%m-%d')
     except Exception:
-        pass
+        logger.warning("Failed to parse TRT grouped trades (deep) from %s", filepath, exc_info=True)
     return result
 
 
@@ -979,6 +985,7 @@ def _parse_trt_grouped_rows(filepath, rules):
                     })
             return sorted(result_rows, key=lambda r: r['date_str'])
     except Exception:
+        logger.warning("Failed to parse TRT grouped rows from %s", filepath, exc_info=True)
         return []
 
 
@@ -1000,7 +1007,7 @@ def parse_csv_deep(filepath, exchange):
             with open(filepath, 'r', encoding='utf-8-sig') as f:
                 result['total_rows'] = sum(1 for _ in f) - 1
         except Exception:
-            pass
+            logger.warning("Failed to count rows in %s", filepath, exc_info=True)
         return result
 
     # --- Paired ledger mode (Kraken: each trade = 2 rows joined by refid) ---
@@ -1023,7 +1030,7 @@ def parse_csv_deep(filepath, exchange):
             from importers.ecb_rates import ECBRates
             ecb = ECBRates(os.path.join(DATA_DIR, 'eurusd.csv'))
         except Exception:
-            pass
+            logger.warning("Failed to load ECB rates for parse_csv_deep (exchange=%s)", exchange, exc_info=True)
 
     def _to_eur(raw_val, date, is_usd_row, fee_currency=None):
         """Convert a value to EUR. Handles BTC fees via price lookup."""
@@ -1214,6 +1221,7 @@ def parse_csv_deep(filepath, exchange):
                         result['total_fees'] += fee_eur
 
                 except Exception:
+                    logger.debug("Parse error in CSV deep parse at %s", filepath, exc_info=True)
                     result['parse_errors'] += 1
 
             # Aggregate counts by unique timestamp (Bybit: fills → trades)
@@ -1226,7 +1234,7 @@ def parse_csv_deep(filepath, exchange):
                 result['max_date'] = max(dates).strftime('%Y-%m-%d')
 
     except Exception:
-        pass
+        logger.warning("Failed to parse CSV deep for %s", filepath, exc_info=True)
 
     return result
 
@@ -1257,7 +1265,7 @@ def parse_csv_rows(filepath, exchange):
             from importers.ecb_rates import ECBRates
             ecb = ECBRates(os.path.join(DATA_DIR, 'eurusd.csv'))
         except Exception:
-            pass
+            logger.warning("Failed to load ECB rates for parse_csv_rows (exchange=%s)", exchange, exc_info=True)
 
     rows = []
     try:
@@ -1444,6 +1452,7 @@ def parse_csv_rows(filepath, exchange):
                             'fee': 0,
                         })
                 except Exception:
+                    logger.debug("Parse error at line %d in %s", line_num, filepath, exc_info=True)
                     rows.append({
                         'line': line_num,
                         'date_str': '', 'date': None, 'date_day': None,
@@ -1452,7 +1461,7 @@ def parse_csv_rows(filepath, exchange):
                         'amount': 0, 'value': 0, 'fee': 0,
                     })
     except Exception:
-        pass
+        logger.warning("Failed to parse CSV rows from %s", filepath, exc_info=True)
 
     # Aggregate fills by timestamp (Bybit: multiple fills → one trade per timestamp)
     if rules.get('aggregate_by_time') and rows:
@@ -1631,6 +1640,7 @@ def scan_csv_files():
             with open(filepath, 'r', encoding='utf-8-sig') as f:
                 row_count = sum(1 for _ in f) - 1  # minus header
         except Exception:
+            logger.warning("Failed to count rows in %s", filepath, exc_info=True)
             row_count = -1
 
         files.append({
