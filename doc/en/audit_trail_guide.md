@@ -190,6 +190,44 @@ For USD transactions, ECB rates are baked in at import time. They can be verifie
 
 ---
 
+## Audit Trail Web Page
+
+The `/audit` page in the web interface provides visual, per-row traceability
+for the entire IRS report. Access it at `http://127.0.0.1:5002/audit`.
+
+### How to use
+
+1. Select the tax year
+2. Each row in the table corresponds to one line in the IRS report
+   (aggregated by day + exchange + exempt/taxable, same as Anexo G1/J)
+3. Click any row to expand and see every `sale_lot_match` in that group
+4. Each match shows two cards side by side:
+   - **SELL** — sale date, price, proceeds, fee, source CSV file, record hash, import timestamp
+   - **BUY (FIFO Lot)** — purchase date, price, cost basis, fee, source CSV file, record hash, import timestamp
+5. The calculation line shows: `Proceeds - Cost basis = Gain/Loss`
+
+### Printing as PDF
+
+Click **Print / PDF** (or `Cmd+P`). The print layout:
+- Hides the sidebar and navigation
+- Expands all detail rows automatically (no clicking needed)
+- Uses black-on-white for readability
+- Includes a header with year, totals, and generation timestamp
+
+This PDF serves as supporting documentation if the Autoridade Tributaria
+requests proof for any specific line in your declaration.
+
+### What the hash proves
+
+The `record_hash` (SHA-256) shown for each transaction is computed from:
+`source|date|type|exchange|crypto|amount|value|fee`
+
+If you still have the original CSV file, you can verify that the hash
+matches by recomputing it. This proves the database record was not
+altered after import.
+
+---
+
 ## What to present to tax authorities
 
 ### Basic documentation
@@ -202,7 +240,8 @@ For USD transactions, ECB rates are baked in at import time. They can be verifie
 ### In case of audit
 
 Additional documentation:
-1. **FIFO proof chain** — query showing each sale matched to its original purchase
+1. **Audit Trail PDF** — print the `/audit` page for the relevant year (shows full FIFO proof chain per IRS row)
+2. **FIFO proof chain** — query showing each sale matched to its original purchase
 2. **Account statements** from exchanges
 3. **Database hash** at the time of filing
 4. **Database schema** (`doc/schema.sql`)
