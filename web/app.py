@@ -31,6 +31,7 @@ import pytz
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, jsonify, send_file)
 from werkzeug.utils import secure_filename
+from flask_wtf.csrf import CSRFProtect
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ SQL_DIR = _custom_sql_dir if os.path.isdir(_custom_sql_dir) else os.path.join(PR
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
+csrf = CSRFProtect(app)
 
 # ── Helpers ─────────────────────────────────────────────────
 
