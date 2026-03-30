@@ -55,7 +55,7 @@
 
 ## Operativo / Infrastruttura
 
-- [ ] **Audit trail / tracciabilità fiscale**: pagina web (convertibile in PDF) che per ogni riga del report IRS (vendita, data vendita, acquisto, data acquisto, exchange, gain/loss) documenta la catena completa all'indietro: riga report → sale_lot_match → fifo_lot → transazione DB → record_hash → file CSV sorgente → riga nel file originale dell'exchange. L'obiettivo è rispondere all'Autoridade Tributária: "da dove viene questo numero?"
+- [x] ~~**Audit trail / tracciabilità fiscale**~~ — pagina /audit con drill-down per riga IRS, Print CSS (2026-03-30)
 - [ ] **Backup data/ su Google Drive**: rivedere o creare la procedura rclone per backup della directory `data/` (DB, CSV, report) su Google Drive
 - [ ] **Manuale importatori**: scrivere documentazione per ogni importatore con analisi dei campi del file sorgente e mapping verso il DB
 - [ ] **Semplificazione web UI**: rivedere le pagine web per semplificare il flow operativo (sessione dedicata)
