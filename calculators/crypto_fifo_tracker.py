@@ -5,10 +5,18 @@ Compatible with new database structure
 
 import sqlite3
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 import pandas as pd
-from typing import Optional, Dict
-import pytz
+from typing import Optional
+from zoneinfo import ZoneInfo
+
+
+DUST_THRESHOLD = Decimal('1e-8')  # Single threshold for all dust comparisons
+
+
+def _to_eur(value):
+    """Round a Decimal value to 2 decimal places for EUR storage."""
+    return float(value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 
 class CryptoFIFOTracker:
@@ -18,7 +26,7 @@ class CryptoFIFOTracker:
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
-        self.timezone = pytz.timezone('Europe/Lisbon')
+        self.timezone = ZoneInfo('Europe/Lisbon')
         
         # Performance optimizations
         self.cursor.execute("PRAGMA journal_mode=WAL")
@@ -128,14 +136,14 @@ class CryptoFIFOTracker:
                 price_per_unit = float(trans['price_per_unit']) if trans['price_per_unit'] else 0
 
                 if price_per_unit > 0:
-                    base_cost = amount * price_per_unit
+                    base_cost = Decimal(str(amount)) * Decimal(str(price_per_unit))
                 else:
-                    base_cost = float(trans['total_value'] or 0)
+                    base_cost = Decimal(str(trans['total_value'] or 0))
 
                 try:
-                    fee_amount = float(trans['fee_amount']) if trans['fee_amount'] else 0
+                    fee_amount = Decimal(str(trans['fee_amount'])) if trans['fee_amount'] else Decimal('0')
                 except (KeyError, TypeError):
-                    fee_amount = 0
+                    fee_amount = Decimal('0')
                 cost_basis = base_cost + fee_amount
 
                 mem_lots.append({
@@ -143,9 +151,9 @@ class CryptoFIFOTracker:
                     'purchase_transaction_id': trans['id'],
                     'cryptocurrency': cryptocurrency,
                     'purchase_date': trans['transaction_date'],
-                    'original_amount': amount,
-                    'remaining_amount': amount,
-                    'purchase_price_per_unit': price_per_unit,
+                    'original_amount': Decimal(str(amount)),
+                    'remaining_amount': Decimal(str(amount)),
+                    'purchase_price_per_unit': Decimal(str(price_per_unit)),
                     'cost_basis': cost_basis,
                     'purchase_fee_total': fee_amount,
                     'exchange_name': trans['exchange_name'],
@@ -153,25 +161,25 @@ class CryptoFIFOTracker:
                 buys += 1
 
             elif trans_type == 'SELL':
-                amount_to_sell = float(trans['amount'])
+                amount_to_sell = Decimal(str(trans['amount']))
                 sale_date = trans['transaction_date']
-                sale_price = float(trans['price_per_unit']) if trans['price_per_unit'] else 0
+                sale_price = Decimal(str(trans['price_per_unit'])) if trans['price_per_unit'] else Decimal('0')
 
                 if sale_price == 0 and trans['total_value']:
-                    sale_price = float(trans['total_value']) / amount_to_sell
+                    sale_price = Decimal(str(trans['total_value'])) / amount_to_sell
 
                 try:
-                    sale_fee_total = float(trans['fee_amount']) if trans['fee_amount'] else 0
+                    sale_fee_total = Decimal(str(trans['fee_amount'])) if trans['fee_amount'] else Decimal('0')
                 except (KeyError, TypeError):
-                    sale_fee_total = 0
-                sale_amount_total = float(trans['amount'])
+                    sale_fee_total = Decimal('0')
+                sale_amount_total = Decimal(str(trans['amount']))
 
                 sale_date_dt = datetime.fromisoformat(sale_date)
 
                 i = lot_ptr
-                while i < len(mem_lots) and amount_to_sell > 1e-10:
+                while i < len(mem_lots) and amount_to_sell > DUST_THRESHOLD:
                     lot = mem_lots[i]
-                    if lot['remaining_amount'] <= 0:
+                    if lot['remaining_amount'] <= Decimal('0'):
                         i += 1
                         continue
 
@@ -208,12 +216,12 @@ class CryptoFIFOTracker:
                         sale_date,
                         lot['purchase_date'],
                         cryptocurrency,
-                        amount_from_lot,
-                        purchase_price,
-                        sale_price,
-                        cost_basis,
-                        proceeds,
-                        gain_loss,
+                        float(amount_from_lot),
+                        _to_eur(purchase_price),
+                        _to_eur(sale_price),
+                        _to_eur(cost_basis),
+                        _to_eur(proceeds),
+                        _to_eur(gain_loss),
                         holding_days,
                     ))
 
@@ -222,12 +230,12 @@ class CryptoFIFOTracker:
                     amount_to_sell -= amount_from_lot
 
                     # Advance pointer past exhausted lots
-                    if lot['remaining_amount'] <= 0 and i == lot_ptr:
+                    if lot['remaining_amount'] <= Decimal('0') and i == lot_ptr:
                         lot_ptr = i + 1
 
                     i += 1
 
-                if amount_to_sell > 1e-8:
+                if amount_to_sell > DUST_THRESHOLD:
                     print(f"  ⚠️  Warning: Sale on {sale_date} has {amount_to_sell:.8f} "
                           f"{cryptocurrency} unmatched (no purchase found)")
                 sells += 1
@@ -246,9 +254,9 @@ class CryptoFIFOTracker:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 lot['purchase_transaction_id'], lot['cryptocurrency'],
-                lot['purchase_date'], lot['original_amount'],
-                lot['remaining_amount'], lot['purchase_price_per_unit'],
-                lot['cost_basis'], lot['purchase_fee_total'],
+                lot['purchase_date'], float(lot['original_amount']),
+                float(lot['remaining_amount']), _to_eur(lot['purchase_price_per_unit']),
+                _to_eur(lot['cost_basis']), _to_eur(lot['purchase_fee_total']),
                 lot['exchange_name'],
             ))
             lot_db_ids.append(self.cursor.lastrowid)
@@ -275,7 +283,7 @@ class CryptoFIFOTracker:
         print(f"  ✓ Processed {buys:,} purchases, {sells:,} sales")
 
         # Show summary
-        remaining_lots = [l for l in mem_lots if l['remaining_amount'] > 0]
+        remaining_lots = [l for l in mem_lots if l['remaining_amount'] > Decimal('0')]
         remaining_total = sum(l['remaining_amount'] for l in remaining_lots)
         if remaining_lots:
             print(f"  Remaining: {remaining_total:.8f} {cryptocurrency} in {len(remaining_lots)} lots")
