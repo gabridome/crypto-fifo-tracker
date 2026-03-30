@@ -481,6 +481,10 @@
       <span class="nav-step">✎</span>
       <span class="nav-label">Manual Entry</span>
     </a></li>
+    <li><a href="{{ url_for('audit') }}" class="{% if page == 'audit' %}active{% endif %}">
+      <span class="nav-step">⛓</span>
+      <span class="nav-label">Audit Trail</span>
+    </a></li>
   </ul>
 
   <div class="sidebar-footer">

@@ -1474,6 +1474,102 @@ def manual_delete(tx_id):
     return redirect(url_for('manual'))
 
 
+# ── Step 7: Audit Trail ──────────────────────────────────
+
+@app.route('/audit')
+def audit():
+    available_years = []
+    if db_exists():
+        conn = get_db()
+        try:
+            rows = conn.execute("""
+                SELECT DISTINCT strftime('%Y', sale_date) as year
+                FROM sale_lot_matches ORDER BY year
+            """).fetchall()
+            available_years = [r['year'] for r in rows]
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+    return render_template('audit.html', available_years=available_years, page='audit')
+
+
+@app.route('/api/audit/<int:year>')
+def api_audit(year):
+    if not db_exists():
+        return jsonify({'error': 'No database'})
+
+    conn = get_db()
+    try:
+        rows = conn.execute("""
+            SELECT
+                slm.id as match_id,
+                date(slm.sale_date) as sale_day,
+                t_sell.exchange_name,
+                (slm.holding_period_days >= 365) as is_exempt,
+                slm.cryptocurrency,
+                slm.amount_sold,
+                slm.purchase_price_per_unit,
+                slm.sale_price_per_unit,
+                slm.cost_basis,
+                slm.proceeds,
+                slm.gain_loss,
+                slm.holding_period_days,
+                slm.purchase_date,
+                slm.sale_date,
+                slm.sale_transaction_id,
+                t_sell.fee_amount as sell_tx_fee,
+                t_sell.source as sell_source,
+                t_sell.record_hash as sell_hash,
+                t_sell.imported_at as sell_imported_at,
+                slm.fifo_lot_id,
+                fl.purchase_transaction_id as buy_transaction_id,
+                t_buy.fee_amount as buy_tx_fee,
+                t_buy.source as buy_source,
+                t_buy.record_hash as buy_hash,
+                t_buy.imported_at as buy_imported_at,
+                fl.original_amount as lot_original,
+                fl.remaining_amount as lot_remaining
+            FROM sale_lot_matches slm
+            JOIN transactions t_sell ON slm.sale_transaction_id = t_sell.id
+            JOIN fifo_lots fl ON slm.fifo_lot_id = fl.id
+            JOIN transactions t_buy ON fl.purchase_transaction_id = t_buy.id
+            WHERE slm.sale_date >= ? AND slm.sale_date < ?
+            ORDER BY date(slm.sale_date), t_sell.exchange_name, slm.id
+        """, (f'{year}-01-01', f'{year + 1}-01-01')).fetchall()
+
+        matches = [dict(r) for r in rows]
+
+        # Summary
+        total_gain = sum(m['gain_loss'] for m in matches)
+        exempt = [m for m in matches if m['is_exempt']]
+        taxable = [m for m in matches if not m['is_exempt']]
+
+        # Count IRS rows (unique grouping keys)
+        row_keys = set()
+        for m in matches:
+            row_keys.add((m['sale_day'], m['exchange_name'], m['is_exempt']))
+
+        summary = {
+            'total_gain': round(total_gain, 2),
+            'exempt_gain': round(sum(m['gain_loss'] for m in exempt), 2),
+            'taxable_gain': round(sum(m['gain_loss'] for m in taxable), 2),
+            'total_proceeds': round(sum(m['proceeds'] for m in matches), 2),
+            'total_cost_basis': round(sum(m['cost_basis'] for m in matches), 2),
+            'exempt_count': len(set((m['sale_day'], m['exchange_name']) for m in exempt)),
+            'taxable_count': len(set((m['sale_day'], m['exchange_name']) for m in taxable)),
+            'row_count': len(row_keys),
+            'match_count': len(matches),
+        }
+
+        return jsonify({'year': year, 'matches': matches, 'summary': summary})
+
+    except sqlite3.OperationalError as e:
+        return jsonify({'error': str(e)})
+    finally:
+        conn.close()
+
+
 # ── API endpoints (for AJAX) ──────────────────────────────
 
 @app.route('/api/db-stats')

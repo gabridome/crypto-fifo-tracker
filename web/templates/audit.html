@@ -1,0 +1,261 @@
+{% extends "base.html" %}
+{% block title %}Audit Trail — FIFO Tracker{% endblock %}
+
+{% block content %}
+<style>
+  .print-only { display: none; }
+  .audit-row:hover { background: var(--surface2); }
+  .audit-detail > td > div { background: var(--surface2); }
+  .prov { font-size: 0.7rem; color: var(--text-dim); margin-top: 0.3rem; }
+  .prov .mono { word-break: break-all; }
+  .match-card {
+    background: var(--surface); padding: 0.6rem; border-radius: 6px;
+    border: 1px solid var(--border);
+  }
+  .match-label { font-weight: 600; margin-bottom: 0.35rem; }
+  .match-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.5rem; }
+  .calc-line {
+    margin-top: 0.4rem; font-size: 0.75rem; font-family: var(--mono); color: var(--text-dim);
+  }
+
+  @media print {
+    .sidebar, .loading-overlay, .no-print, .audit-year-btn,
+    .page-header .desc, .sidebar-footer { display: none !important; }
+    .main { margin-left: 0 !important; padding: 1rem !important; max-width: 100% !important; }
+    body { background: #fff !important; color: #000 !important; font-size: 9pt; }
+    .print-only { display: block !important; }
+    .cards { display: flex !important; gap: 1rem; margin-bottom: 1rem; }
+    .card { background: #f5f5f5 !important; border: 1px solid #ccc !important; color: #000 !important; break-inside: avoid; }
+    .card .value { color: #000 !important; font-size: 1.1rem; }
+    .card .label, .card .detail { color: #555 !important; }
+    .table-wrap { border: 1px solid #ccc !important; background: #fff !important; }
+    .table-wrap thead th { background: #eee !important; color: #000 !important; border-bottom: 2px solid #999 !important; }
+    .table-wrap tbody td { border-bottom: 1px solid #ddd !important; color: #000 !important; }
+    .audit-detail { display: table-row !important; }
+    .audit-row td:first-child { visibility: hidden; }
+    .audit-detail > td > div { background: #fafafa !important; page-break-inside: avoid; }
+    .match-card { background: #fff !important; border: 1px solid #ccc !important; }
+    .badge-green { background: #e8f5e9 !important; color: #2e7d32 !important; }
+    .badge-red { background: #fce4ec !important; color: #c62828 !important; }
+    .green { color: #2e7d32 !important; }
+    .red { color: #c62828 !important; }
+    .dim { color: #666 !important; }
+    .prov { color: #666 !important; }
+  }
+</style>
+
+<div class="page-header">
+  <h2>Audit Trail</h2>
+  <p class="desc">Tracciabilita: da ogni riga del report IRS al file CSV originale dell'exchange.</p>
+</div>
+
+{% if not db_exists %}
+<div class="flash flash-error">Database not found. Run setup.sh first.</div>
+{% else %}
+
+<!-- Year selector -->
+<div class="section">
+  <div style="display:flex; gap:0.75rem; flex-wrap:wrap; align-items:center;">
+    <label style="font-size:0.8rem; font-weight:600; color:var(--text-dim);">TAX YEAR</label>
+    {% for year in available_years %}
+    <button class="btn btn-sm audit-year-btn {% if loop.last %}btn-primary{% endif %}"
+            data-year="{{ year }}"
+            onclick="loadAudit({{ year }}, this)">{{ year }}</button>
+    {% endfor %}
+    {% if not available_years %}
+    <span class="dim" style="font-size:0.85rem">No FIFO data. Run FIFO calculation first.</span>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Print header -->
+<div id="print-header" class="print-only" style="margin-bottom:1rem;">
+  <h1 style="font-size:1.4rem; margin:0;">Crypto FIFO — Audit Trail</h1>
+  <p id="print-subtitle" style="margin:0.2rem 0; font-size:0.85rem;"></p>
+  <p style="margin:0; font-size:0.75rem; color:#666;">Generated: <span id="print-date"></span></p>
+</div>
+
+<!-- Summary cards -->
+<div id="audit-summary" class="cards" style="display:none;"></div>
+
+<!-- Content -->
+<div id="audit-content"></div>
+
+<!-- Loading -->
+<div id="audit-loading" style="display:none; text-align:center; padding:3rem; color:var(--text-dim);">
+  Loading audit data...
+</div>
+
+<div style="margin-top:2rem; padding-top:1.5rem; border-top:1px solid var(--border); display:flex; justify-content:space-between;">
+  <a href="{{ url_for('reports') }}" class="btn">Reports</a>
+  <button onclick="window.print()" class="btn no-print">Print / PDF</button>
+</div>
+
+{% endif %}
+
+<script>
+function loadAudit(year, btn) {
+  document.querySelectorAll('.audit-year-btn').forEach(function(b) { b.classList.remove('btn-primary'); });
+  if (btn) btn.classList.add('btn-primary');
+  var ld = document.getElementById('audit-loading');
+  var ct = document.getElementById('audit-content');
+  var sm = document.getElementById('audit-summary');
+  ld.style.display = ''; ct.innerHTML = ''; sm.style.display = 'none';
+
+  fetch('/api/audit/' + year)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      ld.style.display = 'none';
+      if (data.error) { ct.innerHTML = '<div class="flash flash-error">' + esc(data.error) + '</div>'; return; }
+      renderSummary(data.summary, year);
+      renderTable(data.matches, year);
+    })
+    .catch(function(e) {
+      ld.style.display = 'none';
+      ct.innerHTML = '<div class="flash flash-error">Request failed: ' + esc(String(e)) + '</div>';
+    });
+}
+
+function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function eur(n) { return n == null ? '\u2014' : '\u20ac' + Number(n).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}); }
+function amt(n) { return n == null ? '\u2014' : Number(n).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:8}); }
+
+function renderSummary(s, year) {
+  var el = document.getElementById('audit-summary');
+  el.style.display = '';
+  el.innerHTML =
+    '<div class="card"><div class="label">Year</div><div class="value accent">' + year + '</div>' +
+    '<div class="detail">' + s.row_count + ' IRS rows / ' + s.match_count + ' matches</div></div>' +
+    '<div class="card"><div class="label">Total gain/loss</div><div class="value ' +
+    (s.total_gain >= 0 ? 'green' : 'red') + '">' + eur(s.total_gain) + '</div></div>' +
+    '<div class="card"><div class="label">Exempt (\u2265365d)</div><div class="value green">' +
+    eur(s.exempt_gain) + '</div><div class="detail">' + s.exempt_count + ' rows</div></div>' +
+    '<div class="card"><div class="label">Taxable (&lt;365d)</div><div class="value red">' +
+    eur(s.taxable_gain) + '</div><div class="detail">' + s.taxable_count + ' rows</div></div>';
+
+  document.getElementById('print-subtitle').textContent =
+    'Tax Year ' + year + ' | Total: ' + eur(s.total_gain) +
+    ' | Exempt: ' + eur(s.exempt_gain) + ' | Taxable: ' + eur(s.taxable_gain);
+  document.getElementById('print-date').textContent = new Date().toISOString().slice(0, 16);
+}
+
+function groupMatches(matches) {
+  var groups = {};
+  matches.forEach(function(m) {
+    var key = m.sale_day + '|' + m.exchange_name + '|' + m.is_exempt;
+    if (!groups[key]) {
+      groups[key] = {
+        sale_day: m.sale_day, exchange_name: m.exchange_name, is_exempt: m.is_exempt,
+        matches: [], total_proceeds: 0, total_cost_basis: 0, total_gain: 0, total_amount: 0, cryptos: {}
+      };
+    }
+    var g = groups[key];
+    g.matches.push(m);
+    g.total_proceeds += m.proceeds;
+    g.total_cost_basis += m.cost_basis;
+    g.total_gain += m.gain_loss;
+    g.total_amount += m.amount_sold;
+    g.cryptos[m.cryptocurrency] = true;
+  });
+  return Object.keys(groups).sort().map(function(k) { return groups[k]; });
+}
+
+function renderTable(matches, year) {
+  var ct = document.getElementById('audit-content');
+  var rows = groupMatches(matches);
+  if (!rows.length) { ct.innerHTML = '<div style="text-align:center;padding:3rem;color:var(--text-dim)">No sale data for ' + year + '</div>'; return; }
+
+  var h = '<div class="section"><div class="section-title">IRS Report Rows &mdash; ' + year + '</div></div>' +
+    '<div class="table-wrap"><table><thead><tr>' +
+    '<th style="width:28px"></th><th>Date</th><th>Exchange</th><th>Crypto</th><th>Status</th>' +
+    '<th class="right">Amount</th><th class="right">Proceeds</th><th class="right">Cost</th>' +
+    '<th class="right">Gain/Loss</th><th class="right">#</th></tr></thead><tbody>';
+
+  rows.forEach(function(row, i) {
+    var gc = row.total_gain >= 0 ? 'green' : 'red';
+    var badge = row.is_exempt ? '<span class="badge badge-green">EXEMPT</span>' : '<span class="badge badge-red">TAXABLE</span>';
+    var cryptos = Object.keys(row.cryptos).join(', ');
+
+    h += '<tr class="audit-row" onclick="toggle(' + i + ')" style="cursor:pointer">' +
+      '<td class="mono dim" style="text-align:center" id="arrow-' + i + '">&#9654;</td>' +
+      '<td class="mono">' + row.sale_day + '</td>' +
+      '<td>' + esc(row.exchange_name) + '</td>' +
+      '<td class="mono">' + esc(cryptos) + '</td>' +
+      '<td>' + badge + '</td>' +
+      '<td class="mono right">' + amt(row.total_amount) + '</td>' +
+      '<td class="mono right">' + eur(row.total_proceeds) + '</td>' +
+      '<td class="mono right">' + eur(row.total_cost_basis) + '</td>' +
+      '<td class="mono right ' + gc + '">' + eur(row.total_gain) + '</td>' +
+      '<td class="mono right dim">' + row.matches.length + '</td></tr>';
+
+    h += '<tr class="audit-detail" id="det-' + i + '" style="display:none"><td colspan="10" style="padding:0">' +
+      detailPanel(row) + '</td></tr>';
+  });
+
+  h += '</tbody></table></div>';
+  ct.innerHTML = h;
+}
+
+function toggle(i) {
+  var d = document.getElementById('det-' + i);
+  var a = document.getElementById('arrow-' + i);
+  if (d.style.display === 'none') { d.style.display = ''; a.innerHTML = '&#9660;'; }
+  else { d.style.display = 'none'; a.innerHTML = '&#9654;'; }
+}
+
+function detailPanel(row) {
+  var h = '<div style="padding:0.75rem 1rem 1rem 2.5rem">';
+  row.matches.forEach(function(m, i) {
+    if (i > 0) h += '<div style="border-top:1px solid var(--border); margin-top:0.75rem; padding-top:0.75rem"></div>';
+
+    h += '<div style="font-size:0.8rem; display:flex; gap:2rem; flex-wrap:wrap">' +
+      '<div><strong>Match #' + (i+1) + '</strong> ' + esc(m.cryptocurrency) + ' &mdash; ' + amt(m.amount_sold) + '</div>' +
+      '<div>Holding: <span class="mono">' + m.holding_period_days + 'd</span> ' +
+      (m.is_exempt ? '<span class="badge badge-green" style="font-size:0.65rem">EXEMPT</span>' :
+                     '<span class="badge badge-red" style="font-size:0.65rem">TAXABLE</span>') + '</div></div>';
+
+    h += '<div class="match-grid">';
+
+    // SELL
+    h += '<div class="match-card">' +
+      '<div class="match-label" style="color:var(--red)">SELL</div>' +
+      '<div>Date: <span class="mono">' + (m.sale_date || '').slice(0,10) + '</span></div>' +
+      '<div>Price: <span class="mono">' + eur(m.sale_price_per_unit) + '/unit</span></div>' +
+      '<div>Proceeds: <span class="mono">' + eur(m.proceeds) + '</span></div>';
+    if (m.sell_tx_fee) h += '<div>Fee: <span class="mono dim">' + eur(m.sell_tx_fee) + ' (full tx)</span></div>';
+    h += '<div class="prov">Source: <span class="mono">' + esc(m.sell_source || 'unknown') + '</span></div>' +
+      '<div class="prov">Hash: <span class="mono">' + (m.sell_hash ? m.sell_hash.slice(0,20) + '...' : 'n/a') + '</span></div>' +
+      '<div class="prov">Imported: <span class="mono">' + esc(m.sell_imported_at || 'n/a') + '</span></div>' +
+      '</div>';
+
+    // BUY
+    h += '<div class="match-card">' +
+      '<div class="match-label" style="color:var(--green)">BUY (FIFO Lot)</div>' +
+      '<div>Date: <span class="mono">' + (m.purchase_date || '').slice(0,10) + '</span></div>' +
+      '<div>Price: <span class="mono">' + eur(m.purchase_price_per_unit) + '/unit</span></div>' +
+      '<div>Cost basis: <span class="mono">' + eur(m.cost_basis) + '</span></div>';
+    if (m.buy_tx_fee) h += '<div>Fee: <span class="mono dim">' + eur(m.buy_tx_fee) + ' (full tx)</span></div>';
+    h += '<div class="prov">Source: <span class="mono">' + esc(m.buy_source || 'unknown') + '</span></div>' +
+      '<div class="prov">Hash: <span class="mono">' + (m.buy_hash ? m.buy_hash.slice(0,20) + '...' : 'n/a') + '</span></div>' +
+      '<div class="prov">Imported: <span class="mono">' + esc(m.buy_imported_at || 'n/a') + '</span></div>' +
+      '</div>';
+
+    h += '</div>'; // match-grid
+
+    h += '<div class="calc-line">Gain/Loss: ' + eur(m.proceeds) + ' &minus; ' + eur(m.cost_basis) +
+      ' = <span class="' + (m.gain_loss >= 0 ? 'green' : 'red') + '">' + eur(m.gain_loss) + '</span></div>';
+  });
+  h += '</div>';
+  return h;
+}
+
+// Auto-load latest year
+{% if available_years %}
+document.addEventListener('DOMContentLoaded', function() {
+  var btns = document.querySelectorAll('.audit-year-btn');
+  var last = btns[btns.length - 1];
+  if (last) loadAudit({{ available_years[-1] }}, last);
+});
+{% endif %}
+</script>
+{% endblock %}
