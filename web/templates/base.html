@@ -576,5 +576,17 @@
   });
 })();
 </script>
+<script>
+// Inject CSRF token into all POST forms
+document.querySelectorAll('form[method="post"]').forEach(function(form) {
+  if (!form.querySelector('input[name="csrf_token"]')) {
+    var input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'csrf_token';
+    input.value = '{{ csrf_token() }}';
+    form.appendChild(input);
+  }
+});
+</script>
 </body>
 </html>
