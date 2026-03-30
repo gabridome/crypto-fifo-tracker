@@ -9,26 +9,26 @@
 
 - [x] ~~**Atomicità DB negli importers**~~ — `import_and_verify()` in tutti i 13 importers (2026-03-30)
 - [x] ~~**Atomicità DB nel FIFO engine**~~ — rimosso `conn.commit()` intermedio (2026-03-30)
-- [ ] **Migrare a Decimal** per valori EUR in `crypto_fifo_tracker.py` (gain_loss, cost_basis, proceeds, fees)
-- [ ] **Round esplicito** su tutti i valori EUR prima di INSERT (minimo `round(..., 2)` ovunque)
-- [ ] **Path traversal fix**: implementare `safe_path()` e applicare a upload/delete/download in `web/app.py`
-- [ ] **Validazione input** nel manual entry (`web/app.py`): tipo, importo, data, exchange
-- [ ] **Manual delete**: limitare a `WHERE source = 'web_manual_entry'`
+- [x] ~~**Migrare a Decimal**~~ — Decimal per cost_basis/proceeds/gain_loss + _to_eur() rounding (2026-03-30)
+- [x] ~~**Round esplicito**~~ — incluso nella migrazione Decimal (2026-03-30)
+- [x] ~~**Path traversal fix**~~ — safe_path() + secure_filename su tutte le route (2026-03-30)
+- [x] ~~**Validazione input**~~ — tipo, importo, data, exchange nel manual entry (2026-03-30)
+- [x] ~~**Manual delete**~~ — `WHERE source = 'web_manual_entry'` (2026-03-30)
 - [x] ~~**Rimuovere `import_bitfinex.py`**~~ — rimosso (2026-03-30)
 - [x] ~~**Fix USD→EUR fallback**~~ — abort se ECB non disponibile (2026-03-30)
 
 ## Priorità MEDIA — Qualità codice
 
-- [ ] **Eliminare `except Exception: pass`**: tutti i 12+ punti in `web/app.py` + bare `except:` negli importers
-- [ ] **Connection lifecycle**: aggiungere `try/finally` o context manager a tutte le connessioni DB
+- [x] ~~**Eliminare `except Exception: pass`**~~ — 15 blocchi con logging (2026-03-30)
+- [x] ~~**Connection lifecycle**~~ — try/finally su tutte le connessioni (2026-03-30)
 - [x] ~~**Config path assoluti**~~ — `PROJECT_ROOT` + path assoluti (2026-03-30)
 - [x] ~~**Config safe import**~~ — fallback a PT con warning (2026-03-30)
 - [ ] **DB path da config**: `generate_irs_report.py` e `generate_annual_summary.py` usino `config.DATABASE_PATH`
 - [ ] **Exchange country unificato**: una sola mappa in `config.py` (ISO + codici numerici AT)
 - [x] ~~**Import path consistenti**~~ — `from importers.ecb_rates` in tutti i file (2026-03-30)
 - [ ] **Colonne mancanti**: aggiungere `fee_currency`/`currency` a Bitstamp, Kraken, Mt.Gox, TRT, Binance
-- [ ] **Epsilon consistente**: un solo `DUST_THRESHOLD` in `crypto_fifo_tracker.py`
-- [ ] **Unused imports**: rimuovere `Decimal`, `Dict` non usati; usare `zoneinfo` al posto di `pytz`
+- [x] ~~**Epsilon consistente**~~ — `DUST_THRESHOLD = Decimal('1e-8')` (2026-03-30)
+- [x] ~~**Unused imports**~~ — rimossi Dict, usato zoneinfo al posto di pytz (2026-03-30)
 
 ## Priorità MEDIA — Testing
 
