@@ -29,6 +29,7 @@ from collections import defaultdict
 import pytz
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, jsonify, send_file)
+from werkzeug.utils import secure_filename
 
 # ── Project root detection ──────────────────────────────────
 # web/app.py lives inside web/, so project root is one level up
@@ -56,6 +57,17 @@ app = Flask(__name__)
 app.secret_key = 'crypto-fifo-local-dev'  # local only, no real security needed
 
 # ── Helpers ─────────────────────────────────────────────────
+
+def safe_path(base_dir, filename):
+    """Return a safe path within base_dir, or raise ValueError on traversal attempt."""
+    safe_name = secure_filename(filename)
+    if not safe_name:
+        raise ValueError(f"Invalid filename: {filename}")
+    full_path = os.path.join(base_dir, safe_name)
+    if not os.path.realpath(full_path).startswith(os.path.realpath(base_dir)):
+        raise ValueError(f"Path traversal attempt: {filename}")
+    return full_path
+
 
 def get_db():
     """Get a database connection with Row factory."""
@@ -1756,19 +1768,28 @@ def upload_csv():
         return redirect(url_for('collect'))
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    dest = os.path.join(DATA_DIR, file.filename)
+    try:
+        dest = safe_path(DATA_DIR, file.filename)
+    except ValueError:
+        flash(f'Invalid filename: {file.filename}', 'error')
+        return redirect(url_for('collect'))
     file.save(dest)
-    exchange, _ = detect_exchange(file.filename)
-    flash(f'Uploaded {file.filename} → detected as {exchange}', 'success')
+    saved_name = os.path.basename(dest)
+    exchange, _ = detect_exchange(saved_name)
+    flash(f'Uploaded {saved_name} → detected as {exchange}', 'success')
     return redirect(url_for('collect'))
 
 
 @app.route('/collect/delete/<filename>', methods=['POST'])
 def delete_csv(filename):
-    filepath = os.path.join(DATA_DIR, filename)
+    try:
+        filepath = safe_path(DATA_DIR, filename)
+    except ValueError:
+        flash(f'Invalid filename: {filename}', 'error')
+        return redirect(url_for('collect'))
     if os.path.exists(filepath) and filepath.endswith('.csv'):
         os.remove(filepath)
-        flash(f'Deleted {filename}', 'success')
+        flash(f'Deleted {os.path.basename(filepath)}', 'success')
     return redirect(url_for('collect'))
 
 
@@ -1843,12 +1864,16 @@ def run_import_file(filename):
     All importers now accept: python3 importer.py <filepath> [exchange_name]
     Each importer handles DELETE by source and sets source/imported_at/record_hash.
     """
-    filepath = os.path.join(DATA_DIR, filename)
+    try:
+        filepath = safe_path(DATA_DIR, filename)
+    except ValueError:
+        flash(f'Invalid filename: {filename}', 'error')
+        return redirect(url_for('import_page'))
     if not os.path.isfile(filepath):
         flash(f'File not found: {filename}', 'error')
         return redirect(url_for('import_page'))
 
-    exchange_name, importer_script = detect_exchange(filename)
+    exchange_name, importer_script = detect_exchange(os.path.basename(filepath))
     if not importer_script:
         flash(f'No importer available for {filename}', 'error')
         return redirect(url_for('import_page'))
@@ -2323,7 +2348,11 @@ def generate_report(year):
 
 @app.route('/reports/download/<filename>')
 def download_report(filename):
-    filepath = os.path.join(REPORTS_DIR, filename)
+    try:
+        filepath = safe_path(REPORTS_DIR, filename)
+    except ValueError:
+        flash('Invalid filename', 'error')
+        return redirect(url_for('reports'))
     if os.path.exists(filepath):
         return send_file(filepath, as_attachment=True)
     flash('Report not found', 'error')
