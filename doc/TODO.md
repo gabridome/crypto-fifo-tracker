@@ -40,15 +40,15 @@
 
 ## Priorità MEDIA — Refactoring
 
-- [ ] **Estrarre CSV parser**: `parse_csv_deep` / `parse_csv_rows` in `web/csv_parser.py` (eliminare ~500 righe duplicate)
+- [x] ~~**Estrarre CSV parser**~~ — web/csv_parser.py, app.py da 2574 a 1542 righe (2026-03-30)
 - [x] ~~**Estrarre boilerplate importers**~~ — `import_and_verify()` in `import_utils.py` (2026-03-30)
 - [x] ~~**Context processor caching**~~ — TTL 5s su inject_globals() (2026-03-30)
 
 ## Priorità BASSA — Miglioramenti
 
-- [ ] **CSRF protection**: aggiungere `flask-wtf` CSRFProtect
+- [x] ~~**CSRF protection**~~ — flask-wtf CSRFProtect + auto-inject token (2026-03-30)
 - [x] ~~**Secret key**~~ — os.urandom(24) (2026-03-30)
-- [ ] **Logging**: migrare da `print()` a `logging` module negli importers
+- [x] ~~**Logging**~~ — logging module in import_utils.py (2026-03-30)
 - [x] ~~**`fmt_eur_filter`**~~ — mostra €0.00 per zero, '—' solo per None (2026-03-30)
 
 ---
