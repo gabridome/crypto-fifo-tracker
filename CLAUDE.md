@@ -2,7 +2,7 @@
 
 > This file is written by Claude for Claude. It contains everything needed
 > to understand, maintain, and reconstruct this project from scratch.
-> Last updated: 2026-03-03.
+> Last updated: 2026-03-30.
 
 ## What this project is
 
@@ -395,3 +395,25 @@ python3 tests/test_fifo_workflow.py
 # Merge
 git checkout main && git merge --no-ff feature/NAME
 ```
+
+## Code guidelines e TODO
+
+**Regole di progetto**: `doc/code_guidelines.md` — vincolanti per ogni sessione di sviluppo.
+Coprono: integrità dati (atomicità DB, Decimal per EUR), gestione errori (no silent except),
+sicurezza (path traversal, SQL parametrizzato, validazione input), architettura (path assoluti,
+no side effect a import time, no duplicazione), testing (testare codice reale, pianificare test),
+workflow (branch, LINT, documentazione aggiornata, commit frequenti).
+
+**TODO di progetto**: `doc/TODO.md` — lista prioritizzata delle cose da fare.
+Aggiornare ad ogni sessione. Include: fix di integrità, refactoring, testing, infrastruttura.
+
+### Workflow di sviluppo (checklist)
+
+1. Valutare se creare un branch (`feature/descrizione`)
+2. Pianificare: cosa fare, quali test scrivere/eseguire, documentazione da aggiornare
+3. Sviluppare seguendo `doc/code_guidelines.md`
+4. Aggiornare la documentazione (CLAUDE.md, guide) durante lo sviluppo
+5. Eseguire test rilevanti e documentare l'esito
+6. Analisi statica: `ruff check .` (o equivalente)
+7. Committare con messaggio descrittivo
+8. Aggiornare `doc/TODO.md` se task completate o nuove emerse
