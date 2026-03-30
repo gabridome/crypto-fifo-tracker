@@ -2316,10 +2316,10 @@ def run_sql_query(filename):
     if not db_exists():
         return jsonify(error='Database not found'), 500
 
+    # Open DB in read-only mode
+    db_uri = f'file:{DATABASE_PATH}?mode=ro'
+    conn = sqlite3.connect(db_uri, uri=True)
     try:
-        # Open DB in read-only mode
-        db_uri = f'file:{DATABASE_PATH}?mode=ro'
-        conn = sqlite3.connect(db_uri, uri=True)
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(sql)
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
@@ -2327,10 +2327,11 @@ def run_sql_query(filename):
         total = len(rows)
         if cursor.fetchone() is not None:
             total = f'{total}+'  # indicate truncation
-        conn.close()
         return jsonify(columns=columns, rows=rows, total=total, query=sql)
     except Exception as e:
         return jsonify(error=str(e)), 500
+    finally:
+        conn.close()
 
 
 @app.route('/reports/generate/<int:year>', methods=['POST'])
