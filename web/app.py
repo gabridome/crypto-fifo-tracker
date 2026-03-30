@@ -2386,16 +2386,57 @@ def manual_add():
         flash('Database not found. Run setup.sh first.', 'error')
         return redirect(url_for('manual'))
 
+    # ── Validate inputs ──
+    tx_type = request.form.get('type', '').strip()
+    if tx_type not in ('BUY', 'SELL', 'DEPOSIT', 'WITHDRAWAL'):
+        flash(f'Invalid transaction type: {tx_type}', 'error')
+        return redirect(url_for('manual'))
+
+    exchange = request.form.get('exchange', '').strip()
+    if not exchange:
+        flash('Exchange name is required', 'error')
+        return redirect(url_for('manual'))
+
+    crypto = request.form.get('crypto', '').strip().upper()
+    if not crypto:
+        flash('Cryptocurrency is required', 'error')
+        return redirect(url_for('manual'))
+
+    tx_date = request.form.get('date', '').strip()
     try:
-        conn = get_db()
-        tx_date = request.form['date']
-        tx_type = request.form['type']
-        exchange = request.form['exchange']
-        crypto = request.form['crypto'].upper()
+        datetime.fromisoformat(tx_date.replace('Z', '+00:00').split('T')[0])
+    except (ValueError, AttributeError):
+        flash(f'Invalid date format: {tx_date}', 'error')
+        return redirect(url_for('manual'))
+
+    try:
         amount = float(request.form['amount'])
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+    except (ValueError, KeyError) as e:
+        flash(f'Invalid amount: {e}', 'error')
+        return redirect(url_for('manual'))
+
+    try:
         price = float(request.form['price'])
-        total_value = amount * price
+        if price < 0:
+            raise ValueError("Price cannot be negative")
+    except (ValueError, KeyError) as e:
+        flash(f'Invalid price: {e}', 'error')
+        return redirect(url_for('manual'))
+
+    try:
         fee = float(request.form.get('fee', 0) or 0)
+        if fee < 0:
+            raise ValueError("Fee cannot be negative")
+    except ValueError as e:
+        flash(f'Invalid fee: {e}', 'error')
+        return redirect(url_for('manual'))
+
+    # ── Insert ──
+    conn = get_db()
+    try:
+        total_value = amount * price
         notes = request.form.get('notes', '')
         now = datetime.now().isoformat()
 
@@ -2416,10 +2457,12 @@ def manual_add():
             'web_manual_entry', now, record_hash,
         ))
         conn.commit()
-        conn.close()
         flash(f"Added {tx_type} {amount} {crypto} @ €{price}", 'success')
     except Exception as e:
+        conn.rollback()
         flash(f'Error: {str(e)}', 'error')
+    finally:
+        conn.close()
 
     return redirect(url_for('manual'))
 
@@ -2428,10 +2471,17 @@ def manual_add():
 def manual_delete(tx_id):
     if db_exists():
         conn = get_db()
-        conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
-        conn.commit()
-        conn.close()
-        flash(f'Deleted transaction #{tx_id}', 'success')
+        try:
+            result = conn.execute(
+                "DELETE FROM transactions WHERE id = ? AND source = 'web_manual_entry'",
+                (tx_id,))
+            if result.rowcount > 0:
+                conn.commit()
+                flash(f'Deleted manual transaction #{tx_id}', 'success')
+            else:
+                flash(f'Transaction #{tx_id} is not a manual entry or does not exist', 'error')
+        finally:
+            conn.close()
     return redirect(url_for('manual'))
 
 
