@@ -24,11 +24,15 @@ import json
 import subprocess
 import shutil
 import hashlib
+import logging
 from datetime import datetime
 from collections import defaultdict
 import pytz
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, jsonify, send_file)
+from werkzeug.utils import secure_filename
+
+logger = logging.getLogger(__name__)
 
 # ── Project root detection ──────────────────────────────────
 # web/app.py lives inside web/, so project root is one level up
@@ -57,6 +61,17 @@ app.secret_key = 'crypto-fifo-local-dev'  # local only, no real security needed
 
 # ── Helpers ─────────────────────────────────────────────────
 
+def safe_path(base_dir, filename):
+    """Return a safe path within base_dir, or raise ValueError on traversal attempt."""
+    safe_name = secure_filename(filename)
+    if not safe_name:
+        raise ValueError(f"Invalid filename: {filename}")
+    full_path = os.path.join(base_dir, safe_name)
+    if not os.path.realpath(full_path).startswith(os.path.realpath(base_dir)):
+        raise ValueError(f"Path traversal attempt: {filename}")
+    return full_path
+
+
 def get_db():
     """Get a database connection with Row factory."""
     conn = sqlite3.connect(DATABASE_PATH)
@@ -82,6 +97,7 @@ def _get_crypto_prices():
                 from importers.crypto_prices import CryptoPrices
                 _crypto_prices_cache = CryptoPrices(prices_path)
             except Exception:
+                logger.warning("Failed to load CryptoPrices from %s", prices_path, exc_info=True)
                 _crypto_prices_cache = False  # mark as attempted
     return _crypto_prices_cache if _crypto_prices_cache is not False else None
 
@@ -145,7 +161,7 @@ def check_eurusd():
             result['needs_update'] = result['age_days'] > 30
 
     except Exception:
-        pass
+        logger.warning("Failed to parse eurusd.csv at %s", eurusd_path, exc_info=True)
 
     # Cross-reference with USD exchange CSVs
     for fp in sorted(glob.glob(os.path.join(DATA_DIR, '*.csv'))):
@@ -650,6 +666,7 @@ def _scan_csv_date_range(filepath):
                     dates.append(d)
 
     except Exception:
+        logger.warning("Failed to parse date range from CSV %s", filepath, exc_info=True)
         return None, None
 
     if dates:
@@ -755,7 +772,7 @@ def _parse_paired_ledger_deep(filepath, rules, result):
                 result['min_date'] = min(dates).strftime('%Y-%m-%d')
                 result['max_date'] = max(dates).strftime('%Y-%m-%d')
     except Exception:
-        pass
+        logger.warning("Failed to parse paired ledger (deep) from %s", filepath, exc_info=True)
     return result
 
 
@@ -824,6 +841,7 @@ def _parse_paired_ledger_rows(filepath, rules):
                 })
             return sorted(rows, key=lambda r: r['date_str'])
     except Exception:
+        logger.warning("Failed to parse paired ledger rows from %s", filepath, exc_info=True)
         return []
 
 
@@ -894,7 +912,7 @@ def _parse_trt_grouped_deep(filepath, rules, result):
                 result['min_date'] = min(dates).strftime('%Y-%m-%d')
                 result['max_date'] = max(dates).strftime('%Y-%m-%d')
     except Exception:
-        pass
+        logger.warning("Failed to parse TRT grouped trades (deep) from %s", filepath, exc_info=True)
     return result
 
 
@@ -967,6 +985,7 @@ def _parse_trt_grouped_rows(filepath, rules):
                     })
             return sorted(result_rows, key=lambda r: r['date_str'])
     except Exception:
+        logger.warning("Failed to parse TRT grouped rows from %s", filepath, exc_info=True)
         return []
 
 
@@ -988,7 +1007,7 @@ def parse_csv_deep(filepath, exchange):
             with open(filepath, 'r', encoding='utf-8-sig') as f:
                 result['total_rows'] = sum(1 for _ in f) - 1
         except Exception:
-            pass
+            logger.warning("Failed to count rows in %s", filepath, exc_info=True)
         return result
 
     # --- Paired ledger mode (Kraken: each trade = 2 rows joined by refid) ---
@@ -1011,7 +1030,7 @@ def parse_csv_deep(filepath, exchange):
             from importers.ecb_rates import ECBRates
             ecb = ECBRates(os.path.join(DATA_DIR, 'eurusd.csv'))
         except Exception:
-            pass
+            logger.warning("Failed to load ECB rates for parse_csv_deep (exchange=%s)", exchange, exc_info=True)
 
     def _to_eur(raw_val, date, is_usd_row, fee_currency=None):
         """Convert a value to EUR. Handles BTC fees via price lookup."""
@@ -1202,6 +1221,7 @@ def parse_csv_deep(filepath, exchange):
                         result['total_fees'] += fee_eur
 
                 except Exception:
+                    logger.debug("Parse error in CSV deep parse at %s", filepath, exc_info=True)
                     result['parse_errors'] += 1
 
             # Aggregate counts by unique timestamp (Bybit: fills → trades)
@@ -1214,7 +1234,7 @@ def parse_csv_deep(filepath, exchange):
                 result['max_date'] = max(dates).strftime('%Y-%m-%d')
 
     except Exception:
-        pass
+        logger.warning("Failed to parse CSV deep for %s", filepath, exc_info=True)
 
     return result
 
@@ -1245,7 +1265,7 @@ def parse_csv_rows(filepath, exchange):
             from importers.ecb_rates import ECBRates
             ecb = ECBRates(os.path.join(DATA_DIR, 'eurusd.csv'))
         except Exception:
-            pass
+            logger.warning("Failed to load ECB rates for parse_csv_rows (exchange=%s)", exchange, exc_info=True)
 
     rows = []
     try:
@@ -1432,6 +1452,7 @@ def parse_csv_rows(filepath, exchange):
                             'fee': 0,
                         })
                 except Exception:
+                    logger.debug("Parse error at line %d in %s", line_num, filepath, exc_info=True)
                     rows.append({
                         'line': line_num,
                         'date_str': '', 'date': None, 'date_day': None,
@@ -1440,7 +1461,7 @@ def parse_csv_rows(filepath, exchange):
                         'amount': 0, 'value': 0, 'fee': 0,
                     })
     except Exception:
-        pass
+        logger.warning("Failed to parse CSV rows from %s", filepath, exc_info=True)
 
     # Aggregate fills by timestamp (Bybit: multiple fills → one trade per timestamp)
     if rules.get('aggregate_by_time') and rows:
@@ -1619,6 +1640,7 @@ def scan_csv_files():
             with open(filepath, 'r', encoding='utf-8-sig') as f:
                 row_count = sum(1 for _ in f) - 1  # minus header
         except Exception:
+            logger.warning("Failed to count rows in %s", filepath, exc_info=True)
             row_count = -1
 
         files.append({
@@ -1756,19 +1778,28 @@ def upload_csv():
         return redirect(url_for('collect'))
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    dest = os.path.join(DATA_DIR, file.filename)
+    try:
+        dest = safe_path(DATA_DIR, file.filename)
+    except ValueError:
+        flash(f'Invalid filename: {file.filename}', 'error')
+        return redirect(url_for('collect'))
     file.save(dest)
-    exchange, _ = detect_exchange(file.filename)
-    flash(f'Uploaded {file.filename} → detected as {exchange}', 'success')
+    saved_name = os.path.basename(dest)
+    exchange, _ = detect_exchange(saved_name)
+    flash(f'Uploaded {saved_name} → detected as {exchange}', 'success')
     return redirect(url_for('collect'))
 
 
 @app.route('/collect/delete/<filename>', methods=['POST'])
 def delete_csv(filename):
-    filepath = os.path.join(DATA_DIR, filename)
+    try:
+        filepath = safe_path(DATA_DIR, filename)
+    except ValueError:
+        flash(f'Invalid filename: {filename}', 'error')
+        return redirect(url_for('collect'))
     if os.path.exists(filepath) and filepath.endswith('.csv'):
         os.remove(filepath)
-        flash(f'Deleted {filename}', 'success')
+        flash(f'Deleted {os.path.basename(filepath)}', 'success')
     return redirect(url_for('collect'))
 
 
@@ -1843,12 +1874,16 @@ def run_import_file(filename):
     All importers now accept: python3 importer.py <filepath> [exchange_name]
     Each importer handles DELETE by source and sets source/imported_at/record_hash.
     """
-    filepath = os.path.join(DATA_DIR, filename)
+    try:
+        filepath = safe_path(DATA_DIR, filename)
+    except ValueError:
+        flash(f'Invalid filename: {filename}', 'error')
+        return redirect(url_for('import_page'))
     if not os.path.isfile(filepath):
         flash(f'File not found: {filename}', 'error')
         return redirect(url_for('import_page'))
 
-    exchange_name, importer_script = detect_exchange(filename)
+    exchange_name, importer_script = detect_exchange(os.path.basename(filepath))
     if not importer_script:
         flash(f'No importer available for {filename}', 'error')
         return redirect(url_for('import_page'))
@@ -2281,10 +2316,10 @@ def run_sql_query(filename):
     if not db_exists():
         return jsonify(error='Database not found'), 500
 
+    # Open DB in read-only mode
+    db_uri = f'file:{DATABASE_PATH}?mode=ro'
+    conn = sqlite3.connect(db_uri, uri=True)
     try:
-        # Open DB in read-only mode
-        db_uri = f'file:{DATABASE_PATH}?mode=ro'
-        conn = sqlite3.connect(db_uri, uri=True)
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(sql)
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
@@ -2292,10 +2327,11 @@ def run_sql_query(filename):
         total = len(rows)
         if cursor.fetchone() is not None:
             total = f'{total}+'  # indicate truncation
-        conn.close()
         return jsonify(columns=columns, rows=rows, total=total, query=sql)
     except Exception as e:
         return jsonify(error=str(e)), 500
+    finally:
+        conn.close()
 
 
 @app.route('/reports/generate/<int:year>', methods=['POST'])
@@ -2323,7 +2359,11 @@ def generate_report(year):
 
 @app.route('/reports/download/<filename>')
 def download_report(filename):
-    filepath = os.path.join(REPORTS_DIR, filename)
+    try:
+        filepath = safe_path(REPORTS_DIR, filename)
+    except ValueError:
+        flash('Invalid filename', 'error')
+        return redirect(url_for('reports'))
     if os.path.exists(filepath):
         return send_file(filepath, as_attachment=True)
     flash('Report not found', 'error')
@@ -2357,16 +2397,57 @@ def manual_add():
         flash('Database not found. Run setup.sh first.', 'error')
         return redirect(url_for('manual'))
 
+    # ── Validate inputs ──
+    tx_type = request.form.get('type', '').strip()
+    if tx_type not in ('BUY', 'SELL', 'DEPOSIT', 'WITHDRAWAL'):
+        flash(f'Invalid transaction type: {tx_type}', 'error')
+        return redirect(url_for('manual'))
+
+    exchange = request.form.get('exchange', '').strip()
+    if not exchange:
+        flash('Exchange name is required', 'error')
+        return redirect(url_for('manual'))
+
+    crypto = request.form.get('crypto', '').strip().upper()
+    if not crypto:
+        flash('Cryptocurrency is required', 'error')
+        return redirect(url_for('manual'))
+
+    tx_date = request.form.get('date', '').strip()
     try:
-        conn = get_db()
-        tx_date = request.form['date']
-        tx_type = request.form['type']
-        exchange = request.form['exchange']
-        crypto = request.form['crypto'].upper()
+        datetime.fromisoformat(tx_date.replace('Z', '+00:00').split('T')[0])
+    except (ValueError, AttributeError):
+        flash(f'Invalid date format: {tx_date}', 'error')
+        return redirect(url_for('manual'))
+
+    try:
         amount = float(request.form['amount'])
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+    except (ValueError, KeyError) as e:
+        flash(f'Invalid amount: {e}', 'error')
+        return redirect(url_for('manual'))
+
+    try:
         price = float(request.form['price'])
-        total_value = amount * price
+        if price < 0:
+            raise ValueError("Price cannot be negative")
+    except (ValueError, KeyError) as e:
+        flash(f'Invalid price: {e}', 'error')
+        return redirect(url_for('manual'))
+
+    try:
         fee = float(request.form.get('fee', 0) or 0)
+        if fee < 0:
+            raise ValueError("Fee cannot be negative")
+    except ValueError as e:
+        flash(f'Invalid fee: {e}', 'error')
+        return redirect(url_for('manual'))
+
+    # ── Insert ──
+    conn = get_db()
+    try:
+        total_value = amount * price
         notes = request.form.get('notes', '')
         now = datetime.now().isoformat()
 
@@ -2387,10 +2468,12 @@ def manual_add():
             'web_manual_entry', now, record_hash,
         ))
         conn.commit()
-        conn.close()
         flash(f"Added {tx_type} {amount} {crypto} @ €{price}", 'success')
     except Exception as e:
+        conn.rollback()
         flash(f'Error: {str(e)}', 'error')
+    finally:
+        conn.close()
 
     return redirect(url_for('manual'))
 
@@ -2399,10 +2482,17 @@ def manual_add():
 def manual_delete(tx_id):
     if db_exists():
         conn = get_db()
-        conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
-        conn.commit()
-        conn.close()
-        flash(f'Deleted transaction #{tx_id}', 'success')
+        try:
+            result = conn.execute(
+                "DELETE FROM transactions WHERE id = ? AND source = 'web_manual_entry'",
+                (tx_id,))
+            if result.rowcount > 0:
+                conn.commit()
+                flash(f'Deleted manual transaction #{tx_id}', 'success')
+            else:
+                flash(f'Transaction #{tx_id} is not a manual entry or does not exist', 'error')
+        finally:
+            conn.close()
     return redirect(url_for('manual'))
 
 
