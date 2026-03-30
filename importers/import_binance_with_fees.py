@@ -12,14 +12,13 @@ Supports BTCEUR (native EUR) and BTCUSDT/BTCBUSD (converted via ECB rates).
 import sys
 import os
 import pandas as pd
-import sqlite3
 from datetime import datetime
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from config import DATABASE_PATH
-from importers.import_utils import compute_record_hash, delete_by_source
+from importers.import_utils import compute_record_hash, delete_by_source, import_and_verify
 from importers.ecb_rates import ECBRates
 
 # Pairs whose quote currency is USD-equivalent and needs ECB conversion
@@ -166,72 +165,33 @@ def import_binance(filepath, exchange_name='Binance'):
 
     print(f"\nPrepared {len(transactions_to_insert):,} transactions for import")
 
-    # Connect to database
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
+    # Database insert function
+    def do_inserts(conn):
+        cursor = conn.cursor()
+        inserted = 0
 
-    # Delete previous records for this source file
-    deleted = delete_by_source(conn, source)
-    print(f"\n  Deleted {deleted} previous records for {source}")
+        for tx in transactions_to_insert:
+            record_hash = compute_record_hash(
+                source, tx['date'], tx['type'], tx['exchange'],
+                tx['crypto'], tx['amount'], tx['total'], tx['fee']
+            )
 
-    # Insert new data
-    print("\nInserting new data with fees...")
-    inserted = 0
-    for tx in transactions_to_insert:
-        record_hash = compute_record_hash(
-            source, tx['date'], tx['type'], tx['exchange'],
-            tx['crypto'], tx['amount'], tx['total'], tx['fee']
-        )
-
-        cursor.execute("""
-            INSERT INTO transactions (
-                transaction_date, transaction_type, exchange_name, cryptocurrency,
-                amount, price_per_unit, total_value, fee_amount,
+            cursor.execute("""
+                INSERT INTO transactions (
+                    transaction_date, transaction_type, exchange_name, cryptocurrency,
+                    amount, price_per_unit, total_value, fee_amount,
+                    source, imported_at, record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                tx['date'], tx['type'], tx['exchange'], tx['crypto'],
+                tx['amount'], tx['price'], tx['total'], tx['fee'],
                 source, imported_at, record_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            tx['date'], tx['type'], tx['exchange'], tx['crypto'],
-            tx['amount'], tx['price'], tx['total'], tx['fee'],
-            source, imported_at, record_hash
-        ))
-        inserted += 1
+            ))
+            inserted += 1
 
-    conn.commit()
-    print(f"  Inserted: {inserted:,} transactions")
+        return inserted
 
-    # Verify
-    cursor.execute("""
-        SELECT
-            transaction_type,
-            COUNT(*) as count,
-            SUM(amount) as total_btc,
-            SUM(total_value) as total_eur,
-            SUM(fee_amount) as total_fees
-        FROM transactions
-        WHERE source = ?
-        GROUP BY transaction_type
-    """, (source,))
-
-    print("\n" + "=" * 80)
-    print("VERIFICATION")
-    print("=" * 80)
-
-    for row in cursor.fetchall():
-        tx_type, count, btc, eur, fees = row
-        print(f"\n{tx_type}:")
-        print(f"  Transactions: {count:,}")
-        print(f"  BTC: {btc:.8f}")
-        print(f"  EUR: {eur:,.2f} EUR")
-        print(f"  Fees: {fees:,.2f} EUR")
-
-    conn.close()
-
-    print("\n" + "=" * 80)
-    print("SUCCESS!")
-    print("=" * 80)
-    print(f"\nBinance data imported with fees from {source}")
-    print(f"  Source tracking: source={source}, imported_at={imported_at}")
-    print("\n" + "=" * 80)
+    import_and_verify(DATABASE_PATH, source, do_inserts)
 
 
 if __name__ == '__main__':

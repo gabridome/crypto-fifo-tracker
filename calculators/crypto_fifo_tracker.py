@@ -91,10 +91,9 @@ class CryptoFIFOTracker:
 
         print(f"\nCalculating FIFO for {cryptocurrency}...")
 
-        # Clear existing FIFO data for this crypto
+        # Clear existing FIFO data for this crypto (atomic with subsequent inserts)
         self.cursor.execute('DELETE FROM sale_lot_matches WHERE cryptocurrency = ?', (cryptocurrency,))
         self.cursor.execute('DELETE FROM fifo_lots WHERE cryptocurrency = ?', (cryptocurrency,))
-        self.conn.commit()
 
         # Get all transactions for this crypto, ordered by date
         query = '''

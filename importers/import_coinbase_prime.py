@@ -9,15 +9,14 @@ Usage:
 import sys
 import os
 import pandas as pd
-import sqlite3
 from datetime import datetime
 import pytz
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from ecb_rates import ECBRates
-from importers.import_utils import compute_record_hash, delete_by_source
+from importers.ecb_rates import ECBRates
+from importers.import_utils import compute_record_hash, import_and_verify
 from config import DATABASE_PATH
 DB_PATH = DATABASE_PATH
 
@@ -93,95 +92,51 @@ def import_coinbase_prime(filepath, exchange_name='Coinbase Prime'):
         print(f"   Fee:    EUR{row['fee_amount']:.2f}")
         print(f"   ID:     {row['order id']}")
 
-    # Connect to database
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    # Insert via import_and_verify
+    def do_inserts(conn):
+        cursor = conn.cursor()
+        inserted = 0
 
-    # Delete by source
-    deleted = delete_by_source(conn, source)
-    print(f"\n  Deleted {deleted} previous records for {source}")
+        for _, row in df.iterrows():
+            dt = row['date_parsed']
+            if dt.tzinfo is None:
+                dt = pytz.UTC.localize(dt)
 
-    # Insert new data
-    print("\nInserting new data...")
-    inserted = 0
+            notes = f"USD: ${row['price_usd']:.2f}/BTC, Total: ${row['total_usd']:.2f}, Fee: ${row['fee_usd']:.2f}, ECB Rate: {row['usd_eur_rate']:.4f}"
 
-    for _, row in df.iterrows():
-        dt = row['date_parsed']
-        if dt.tzinfo is None:
-            dt = pytz.UTC.localize(dt)
+            record_hash = compute_record_hash(
+                source, dt.isoformat(), row['transaction_type'],
+                exchange_name, 'BTC', row['amount'], row['total_value'], row['fee_amount']
+            )
 
-        notes = f"USD: ${row['price_usd']:.2f}/BTC, Total: ${row['total_usd']:.2f}, Fee: ${row['fee_usd']:.2f}, ECB Rate: {row['usd_eur_rate']:.4f}"
+            cursor.execute("""
+                INSERT INTO transactions (
+                    transaction_date, transaction_type, exchange_name, cryptocurrency,
+                    amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
+                    transaction_id, notes, source, imported_at, record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                dt.isoformat(),
+                row['transaction_type'],
+                exchange_name,
+                'BTC',
+                row['amount'],
+                row['price_per_unit'],
+                row['total_value'],
+                row['fee_amount'],
+                'EUR',
+                'EUR',
+                row['order id'],
+                notes,
+                source,
+                imported_at,
+                record_hash
+            ))
+            inserted += 1
+        return inserted
 
-        record_hash = compute_record_hash(
-            source, dt.isoformat(), row['transaction_type'],
-            exchange_name, 'BTC', row['amount'], row['total_value'], row['fee_amount']
-        )
-
-        cursor.execute("""
-            INSERT INTO transactions (
-                transaction_date, transaction_type, exchange_name, cryptocurrency,
-                amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
-                transaction_id, notes, source, imported_at, record_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            dt.isoformat(),
-            row['transaction_type'],
-            exchange_name,
-            'BTC',
-            row['amount'],
-            row['price_per_unit'],
-            row['total_value'],
-            row['fee_amount'],
-            'EUR',
-            'EUR',
-            row['order id'],
-            notes,
-            source,
-            imported_at,
-            record_hash
-        ))
-        inserted += 1
-
-    conn.commit()
-    print(f"  Inserted: {inserted:,} transactions")
-
-    # Verify
-    cursor.execute("""
-        SELECT
-            transaction_type,
-            COUNT(*) as count,
-            SUM(amount) as total_btc,
-            SUM(total_value) as total_eur,
-            SUM(fee_amount) as total_fees
-        FROM transactions
-        WHERE exchange_name = ?
-        AND cryptocurrency = 'BTC'
-        GROUP BY transaction_type
-    """, (exchange_name,))
-
-    print("\n" + "="*80)
-    print("VERIFICATION")
-    print("="*80)
-
-    for row in cursor.fetchall():
-        tx_type, count, btc, eur, fees = row
-        print(f"\n{tx_type}:")
-        print(f"  Transactions: {count:,}")
-        print(f"  BTC: {btc:.8f}")
-        print(f"  EUR: EUR{eur:,.2f}")
-        print(f"  Fees: EUR{fees:.2f}")
-
+    inserted = import_and_verify(DB_PATH, source, do_inserts)
     ecb.print_summary()
-    conn.close()
-
-    print("\n" + "="*80)
-    print("SUCCESS!")
-    print("="*80)
-    print(f"\n  Coinbase Prime data imported with ECB historical USD/EUR rates")
-    print(f"  Source: {source}")
-    print(f"  Records: {inserted}")
-    print(f"  Rates ranged from {df['usd_eur_rate'].min():.4f} to {df['usd_eur_rate'].max():.4f}")
-    print("\n" + "="*80)
 
     return inserted
 

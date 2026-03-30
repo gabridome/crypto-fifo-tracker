@@ -14,7 +14,6 @@ Source tracking:
 """
 
 import pandas as pd
-import sqlite3
 import sys
 import os
 from datetime import datetime
@@ -28,7 +27,7 @@ try:
 except ImportError:
     DATABASE_PATH = os.path.join(PROJECT_ROOT, 'data', 'crypto_fifo.db')
 
-from importers.import_utils import compute_record_hash, delete_by_source
+from importers.import_utils import compute_record_hash, import_and_verify
 from importers.crypto_prices import CryptoPrices
 
 DB_PATH = DATABASE_PATH
@@ -147,7 +146,10 @@ def import_standard_csv(filepath, exchange_name_override=None):
         if ecb:
             print(f"\n  ✓ ECB rates loaded for USD→EUR conversion")
         else:
-            print(f"\n  ⚠️  USD transactions found but ECB rates not available!")
+            raise ValueError(
+                "USD transactions found but ECB rates not available! "
+                "Ensure data/eurusd.csv exists. Import aborted."
+            )
 
     # Detect crypto-to-crypto trades and load crypto prices
     crypto_currencies = currencies - FIAT_CURRENCIES
@@ -161,211 +163,170 @@ def import_standard_csv(filepath, exchange_name_override=None):
         else:
             print(f"  ⚠️  Crypto prices not available — EUR values will be 0")
 
-    # Connect to database
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    # Insert function for import_and_verify
+    def do_inserts(conn):
+        cursor = conn.cursor()
+        inserted = 0
 
-    # Delete previous records for this source file
-    deleted = delete_by_source(conn, source_filename)
-    if deleted == 0:
         # Fallback: clean legacy records with NULL source for this exchange
         cursor.execute("DELETE FROM transactions WHERE exchange_name = ? AND source IS NULL",
                      (exchange_name,))
         legacy = cursor.rowcount
         if legacy > 0:
             print(f"\n  Deleted {legacy:,} legacy records (no source) for {exchange_name}")
-    else:
-        print(f"\n  Deleted {deleted:,} previous records for {source_filename}")
 
-    # Insert transactions
-    print("\nInserting transactions...")
-    inserted = 0
+        def _insert_tx(dt, tx_type, exch, crypto, amount, price, total, fee,
+                       fee_cur, currency, tx_id, notes_str, suffix=''):
+            """Insert a single transaction record."""
+            nonlocal inserted
+            hash_source = f"{source_filename}{suffix}"
+            record_hash = compute_record_hash(
+                hash_source, dt.isoformat(), tx_type,
+                exch, crypto, amount, total, fee
+            )
+            cursor.execute("""
+                INSERT INTO transactions (
+                    transaction_date, transaction_type, exchange_name, cryptocurrency,
+                    amount, price_per_unit, total_value, fee_amount, fee_currency,
+                    currency, transaction_id, notes,
+                    source, imported_at, record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                dt.isoformat(), tx_type, exch, crypto,
+                amount, price, total, fee,
+                fee_cur, currency,
+                tx_id, notes_str,
+                source_filename, import_timestamp, record_hash,
+            ))
+            inserted += 1
 
-    def _insert_tx(dt, tx_type, exch, crypto, amount, price, total, fee,
-                   fee_cur, currency, tx_id, notes_str, suffix=''):
-        """Insert a single transaction record."""
-        nonlocal inserted
-        hash_source = f"{source_filename}{suffix}"
-        record_hash = compute_record_hash(
-            hash_source, dt.isoformat(), tx_type,
-            exch, crypto, amount, total, fee
-        )
-        cursor.execute("""
-            INSERT INTO transactions (
-                transaction_date, transaction_type, exchange_name, cryptocurrency,
-                amount, price_per_unit, total_value, fee_amount, fee_currency,
-                currency, transaction_id, notes,
-                source, imported_at, record_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            dt.isoformat(), tx_type, exch, crypto,
-            amount, price, total, fee,
-            fee_cur, currency,
-            tx_id, notes_str,
-            source_filename, import_timestamp, record_hash,
-        ))
-        inserted += 1
+        for _, row in df.iterrows():
+            # Parse date with timezone
+            dt = row['transaction_date']
+            if dt.tzinfo is None:
+                dt = pytz.UTC.localize(dt)
 
-    for _, row in df.iterrows():
-        # Parse date with timezone
-        dt = row['transaction_date']
-        if dt.tzinfo is None:
-            dt = pytz.UTC.localize(dt)
+            # Get values with defaults
+            fee_amount = row.get('fee_amount', 0)
+            fee_currency_raw = row.get('fee_currency', 'EUR')
+            price_per_unit = row.get('price_per_unit', 0)
+            notes = row.get('notes', '')
+            transaction_id = row.get('transaction_id', f"{exchange_name}_{dt.isoformat()}")
+            csv_currency = str(row.get('currency', 'EUR')).strip().upper() if pd.notna(row.get('currency')) else 'EUR'
 
-        # Get values with defaults
-        fee_amount = row.get('fee_amount', 0)
-        fee_currency_raw = row.get('fee_currency', 'EUR')
-        price_per_unit = row.get('price_per_unit', 0)
-        notes = row.get('notes', '')
-        transaction_id = row.get('transaction_id', f"{exchange_name}_{dt.isoformat()}")
-        csv_currency = str(row.get('currency', 'EUR')).strip().upper() if pd.notna(row.get('currency')) else 'EUR'
+            amount_val = parse_numeric(row['amount'])
+            total_val = parse_numeric(row['total_value'])
+            fee_val = parse_numeric(fee_amount) if pd.notna(fee_amount) else 0
+            price_val = parse_numeric(price_per_unit) if pd.notna(price_per_unit) else 0
 
-        amount_val = parse_numeric(row['amount'])
-        total_val = parse_numeric(row['total_value'])
-        fee_val = parse_numeric(fee_amount) if pd.notna(fee_amount) else 0
-        price_val = parse_numeric(price_per_unit) if pd.notna(price_per_unit) else 0
+            fee_cur = str(fee_currency_raw).strip() if pd.notna(fee_currency_raw) else 'EUR'
+            notes_str = notes if pd.notna(notes) else ''
 
-        fee_cur = str(fee_currency_raw).strip() if pd.notna(fee_currency_raw) else 'EUR'
-        notes_str = notes if pd.notna(notes) else ''
+            tx_type = str(row['transaction_type']).strip().upper()
+            crypto = str(row['cryptocurrency']).strip()
 
-        tx_type = str(row['transaction_type']).strip().upper()
-        crypto = str(row['cryptocurrency']).strip()
+            # Per-row exchange_name: use CSV column if present, fallback to global
+            row_exch_val = str(row.get('exchange_name', '')).strip() if pd.notna(row.get('exchange_name')) else ''
+            row_exchange = row_exch_val if row_exch_val else exchange_name
 
-        # Per-row exchange_name: use CSV column if present, fallback to global
-        row_exch_val = str(row.get('exchange_name', '')).strip() if pd.notna(row.get('exchange_name')) else ''
-        row_exchange = row_exch_val if row_exch_val else exchange_name
+            # ── Case 1: EUR — direct import ──
+            if csv_currency == 'EUR':
+                _insert_tx(dt, tx_type, row_exchange, crypto,
+                           amount_val, price_val, total_val, fee_val,
+                           fee_cur, 'EUR', transaction_id, notes_str)
 
-        # ── Case 1: EUR — direct import ──
-        if csv_currency == 'EUR':
-            _insert_tx(dt, tx_type, row_exchange, crypto,
-                       amount_val, price_val, total_val, fee_val,
-                       fee_cur, 'EUR', transaction_id, notes_str)
+            # ── Case 2: USD — convert to EUR via ECB ──
+            elif csv_currency == 'USD':
+                if ecb:
+                    total_eur = ecb.usd_to_eur(total_val, dt)
+                    fee_eur = ecb.usd_to_eur(fee_val, dt) if fee_val > 0 else 0
+                    price_eur = total_eur / amount_val if amount_val > 0 else 0
+                    print(f"    USD→EUR: {crypto} {tx_type} ${total_val:.2f} → €{total_eur:.2f}")
+                else:
+                    # No ECB rates — abort, do NOT store USD as EUR
+                    raise ValueError(
+                        f"ECB rates not available: cannot convert USD→EUR for "
+                        f"{crypto} {tx_type} on {dt} (${total_val:.2f}). "
+                        f"Ensure data/eurusd.csv exists and covers this date."
+                    )
 
-        # ── Case 2: USD — convert to EUR via ECB ──
-        elif csv_currency == 'USD':
-            if ecb:
-                total_eur = ecb.usd_to_eur(total_val, dt)
-                fee_eur = ecb.usd_to_eur(fee_val, dt) if fee_val > 0 else 0
-                price_eur = total_eur / amount_val if amount_val > 0 else 0
-                print(f"    USD→EUR: {crypto} {tx_type} ${total_val:.2f} → €{total_eur:.2f}")
+                _insert_tx(dt, tx_type, row_exchange, crypto,
+                           amount_val, price_eur, total_eur, fee_eur,
+                           'EUR', 'EUR', transaction_id,
+                           f"{notes_str} [converted from USD]".strip())
+
+            # ── Case 3: Crypto currency — crypto-to-crypto trade ──
             else:
-                # No ECB rates — store USD values with warning
-                total_eur = total_val
-                fee_eur = fee_val
-                price_eur = price_val
-                print(f"    ⚠️  No ECB rates: storing USD value as-is for {crypto} {tx_type}")
+                # The "currency" is another crypto (e.g. BTC, BCH)
+                # This means: traded `cryptocurrency` for `currency`
+                # We need to record BOTH sides:
+                #   Side A: the original row (e.g. SELL BCH, amount=10)
+                #   Side B: the counterpart (e.g. BUY BTC, amount=total_value)
 
-            _insert_tx(dt, tx_type, row_exchange, crypto,
-                       amount_val, price_eur, total_eur, fee_eur,
-                       'EUR', 'EUR', transaction_id,
-                       f"{notes_str} [converted from USD]".strip())
+                counter_crypto = csv_currency  # e.g. BTC
+                counter_amount = total_val     # e.g. 0.604 BTC received
+                counter_type = 'BUY' if tx_type == 'SELL' else 'SELL'
 
-        # ── Case 3: Crypto currency — crypto-to-crypto trade ──
-        else:
-            # The "currency" is another crypto (e.g. BTC, BCH)
-            # This means: traded `cryptocurrency` for `currency`
-            # We need to record BOTH sides:
-            #   Side A: the original row (e.g. SELL BCH, amount=10)
-            #   Side B: the counterpart (e.g. BUY BTC, amount=total_value)
+                # Compute EUR values using crypto prices
+                side_a_eur = 0.0
+                side_a_price = 0.0
+                side_b_eur = 0.0
+                side_b_price = 0.0
+                eur_source = 'EUR value pending'
 
-            counter_crypto = csv_currency  # e.g. BTC
-            counter_amount = total_val     # e.g. 0.604 BTC received
-            counter_type = 'BUY' if tx_type == 'SELL' else 'SELL'
-
-            # Compute EUR values using crypto prices
-            side_a_eur = 0.0
-            side_a_price = 0.0
-            side_b_eur = 0.0
-            side_b_price = 0.0
-            eur_source = 'EUR value pending'
-
-            if crypto_prices:
-                # Side A: EUR value of the crypto being traded
-                a_eur = crypto_prices.crypto_to_eur(crypto, amount_val, dt)
-                if a_eur is not None:
-                    side_a_eur = a_eur
-                    side_a_price = a_eur / amount_val if amount_val > 0 else 0
-                    eur_source = 'EUR from CryptoCompare'
-
-                # Side B: EUR value of the counter crypto received
-                b_eur = crypto_prices.crypto_to_eur(counter_crypto, counter_amount, dt)
-                if b_eur is not None:
-                    side_b_eur = b_eur
-                    side_b_price = b_eur / counter_amount if counter_amount > 0 else 0
-
-                    # If side A had no price, use side B value (same trade)
-                    if side_a_eur == 0.0 and side_b_eur > 0:
-                        side_a_eur = side_b_eur
-                        side_a_price = side_a_eur / amount_val if amount_val > 0 else 0
-                    # Vice versa
-                    elif side_b_eur == 0.0 and side_a_eur > 0:
-                        side_b_eur = side_a_eur
-                        side_b_price = side_b_eur / counter_amount if counter_amount > 0 else 0
-
-            # Side A: original transaction
-            _insert_tx(dt, tx_type, row_exchange, crypto,
-                       amount_val, side_a_price, side_a_eur, 0,
-                       'EUR', 'EUR', transaction_id,
-                       f"{notes_str} [crypto-to-crypto: {amount_val:.8f} {crypto} → {counter_amount:.8f} {counter_crypto}, {eur_source}]".strip(),
-                       suffix='|sideA')
-
-            # Side B: counterpart transaction
-            # Fee goes on the counterpart (the crypto received) if fee is in counter_crypto
-            fee_eur_counter = 0.0
-            fee_note = ''
-            if fee_val > 0 and fee_cur.upper() == counter_crypto:
                 if crypto_prices:
-                    f_eur = crypto_prices.crypto_to_eur(counter_crypto, fee_val, dt)
-                    if f_eur is not None:
-                        fee_eur_counter = f_eur
-                fee_note = f", fee: {fee_val:.8f} {counter_crypto}"
+                    # Side A: EUR value of the crypto being traded
+                    a_eur = crypto_prices.crypto_to_eur(crypto, amount_val, dt)
+                    if a_eur is not None:
+                        side_a_eur = a_eur
+                        side_a_price = a_eur / amount_val if amount_val > 0 else 0
+                        eur_source = 'EUR from CryptoCompare'
 
-            _insert_tx(dt, counter_type, row_exchange, counter_crypto,
-                       counter_amount, side_b_price, side_b_eur, fee_eur_counter,
-                       'EUR', 'EUR', f"{transaction_id}_counter",
-                       f"Counterpart of {tx_type} {amount_val:.8f} {crypto}{fee_note} [{eur_source}]",
-                       suffix='|sideB')
+                    # Side B: EUR value of the counter crypto received
+                    b_eur = crypto_prices.crypto_to_eur(counter_crypto, counter_amount, dt)
+                    if b_eur is not None:
+                        side_b_eur = b_eur
+                        side_b_price = b_eur / counter_amount if counter_amount > 0 else 0
 
-            eur_label = f"€{side_a_eur:,.2f}" if side_a_eur > 0 else "no EUR price"
-            print(f"    Crypto-to-crypto: {tx_type} {amount_val:.8f} {crypto} → {counter_type} {counter_amount:.8f} {counter_crypto} ({eur_label})")
+                        # If side A had no price, use side B value (same trade)
+                        if side_a_eur == 0.0 and side_b_eur > 0:
+                            side_a_eur = side_b_eur
+                            side_a_price = side_a_eur / amount_val if amount_val > 0 else 0
+                        # Vice versa
+                        elif side_b_eur == 0.0 and side_a_eur > 0:
+                            side_b_eur = side_a_eur
+                            side_b_price = side_b_eur / counter_amount if counter_amount > 0 else 0
 
-    conn.commit()
-    print(f"\n  Inserted: {inserted:,} transactions")
+                # Side A: original transaction
+                _insert_tx(dt, tx_type, row_exchange, crypto,
+                           amount_val, side_a_price, side_a_eur, 0,
+                           'EUR', 'EUR', transaction_id,
+                           f"{notes_str} [crypto-to-crypto: {amount_val:.8f} {crypto} → {counter_amount:.8f} {counter_crypto}, {eur_source}]".strip(),
+                           suffix='|sideA')
 
-    # Verify
-    cursor.execute("""
-        SELECT
-            transaction_type,
-            cryptocurrency,
-            COUNT(*) as count,
-            SUM(amount) as total_amount,
-            SUM(total_value) as total_value,
-            SUM(fee_amount) as total_fees
-        FROM transactions
-        WHERE source = ?
-        GROUP BY transaction_type, cryptocurrency
-    """, (source_filename,))
+                # Side B: counterpart transaction
+                # Fee goes on the counterpart (the crypto received) if fee is in counter_crypto
+                fee_eur_counter = 0.0
+                fee_note = ''
+                if fee_val > 0 and fee_cur.upper() == counter_crypto:
+                    if crypto_prices:
+                        f_eur = crypto_prices.crypto_to_eur(counter_crypto, fee_val, dt)
+                        if f_eur is not None:
+                            fee_eur_counter = f_eur
+                    fee_note = f", fee: {fee_val:.8f} {counter_crypto}"
 
-    print("\n" + "="*80)
-    print("VERIFICATION")
-    print("="*80)
+                _insert_tx(dt, counter_type, row_exchange, counter_crypto,
+                           counter_amount, side_b_price, side_b_eur, fee_eur_counter,
+                           'EUR', 'EUR', f"{transaction_id}_counter",
+                           f"Counterpart of {tx_type} {amount_val:.8f} {crypto}{fee_note} [{eur_source}]",
+                           suffix='|sideB')
 
-    for row in cursor.fetchall():
-        tx_type, crypto, count, amount, value, fees = row
-        print(f"\n{crypto} {tx_type}:")
-        print(f"  Transactions: {count:,}")
-        print(f"  Amount: {amount:.8f}")
-        print(f"  Value: €{value:,.2f}")
-        print(f"  Fees: €{fees:,.2f}")
+                eur_label = f"€{side_a_eur:,.2f}" if side_a_eur > 0 else "no EUR price"
+                print(f"    Crypto-to-crypto: {tx_type} {amount_val:.8f} {crypto} → {counter_type} {counter_amount:.8f} {counter_crypto} ({eur_label})")
 
-    conn.close()
+        return inserted
 
-    print("\n" + "="*80)
-    print("SUCCESS!")
-    print("="*80)
-    print(f"\n✓ {exchange_name} data imported from '{source_filename}'")
-
-    return inserted
+    return import_and_verify(DB_PATH, source_filename, do_inserts, group_by_crypto=True)
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
