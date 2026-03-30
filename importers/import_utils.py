@@ -8,7 +8,10 @@ Provides:
 """
 
 import hashlib
+import logging
 import sqlite3
+
+logger = logging.getLogger(__name__)
 
 
 def compute_record_hash(source, date, tx_type, exchange, crypto, amount, value, fee):
@@ -66,11 +69,13 @@ def import_and_verify(db_path, source, insert_fn, group_by_crypto=False):
         conn.execute("BEGIN")
 
         deleted = delete_by_source(conn, source)
+        logger.info("Deleted %d previous records for %s", deleted, source)
         print(f"\n  Deleted {deleted} previous records for {source}")
 
         inserted = insert_fn(conn)
 
         conn.commit()
+        logger.info("Inserted %d transactions from %s", inserted, source)
         print(f"  Inserted: {inserted:,} transactions")
 
         # Verification query (read-only, after commit)
@@ -110,6 +115,7 @@ def import_and_verify(db_path, source, insert_fn, group_by_crypto=False):
 
     except Exception:
         conn.rollback()
+        logger.error("Import failed for %s, rolled back", source, exc_info=True)
         raise
     finally:
         conn.close()
