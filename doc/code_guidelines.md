@@ -202,21 +202,41 @@ I test devono importare e chiamare il codice di produzione, non reimplementazion
 embedded nel file di test. Se il test contiene la sua versione di una funzione,
 quel test non protegge da regressioni nel codice reale.
 
-### 5.2 Pianificare i test in fase di planning
+### 5.2 Test-Driven Development (TDD)
+
+Per nuove funzionalità e bug fix, seguire il ciclo **Red-Green-Refactor**:
+
+1. **Red**: scrivere un test che fallisce per il comportamento desiderato
+2. **Green**: scrivere il codice minimo per far passare il test
+3. **Refactor**: migliorare il codice mantenendo i test verdi
+
+Ogni step di verifica è obbligatorio — il test deve essere eseguito e il risultato
+osservato prima di procedere. Per i bug fix: **sempre** partire da un test che
+riproduce il bug.
+
+### 5.3 Anti-pattern da evitare nei test
+
+- **Testare i mock, non il codice**: mai asserire su elementi mockati. Testare il comportamento reale.
+- **Metodi test-only nel codice di produzione**: helper e cleanup vanno nelle test utilities.
+- **Mock eccessivi**: se il setup del mock è più lungo della logica del test, considerare un test di integrazione.
+- **Mock incompleti**: mockare la struttura dati completa, non solo i campi usati dal test.
+- **Test come afterthought**: i test sono parte dell'implementazione, non un follow-up opzionale.
+
+### 5.4 Pianificare i test in fase di planning
 
 Ogni task di sviluppo deve includere nella pianificazione:
 - Quali test esistenti vanno eseguiti dopo la modifica
 - Se servono nuovi test
 - Quali edge case coprire
 
-### 5.3 Eseguire e documentare i test
+### 5.5 Eseguire e documentare i test
 
 Al termine dello sviluppo:
 1. Eseguire tutti i test rilevanti
 2. Documentare l'esito nella PR o nel commit message
 3. Se un test fallisce, **non** ignorarlo — correggerlo o spiegare perché
 
-### 5.4 Test di esistenza
+### 5.6 Test di esistenza
 
 Verificare che i file e le risorse critiche esistano (DB, config, schema.sql).
 Un test che fallisce subito con "file not found" è meglio di un errore criptico
@@ -224,9 +244,59 @@ a runtime.
 
 ---
 
-## 6. Workflow di sviluppo
+## 6. Debugging sistematico
 
-### 6.1 Branch prima di sviluppare
+Quando si incontra un bug, **mai** procedere a tentativi. Seguire questo processo:
+
+### 6.1 Investigare la causa radice
+
+1. Leggere il messaggio di errore **completamente** (stack trace, line number, codice errore)
+2. Riprodurre il problema in modo consistente prima di investigare
+3. Controllare i cambiamenti recenti (`git diff`, nuove dipendenze, config)
+4. Tracciare il flusso dei dati all'indietro dal sintomo alla sorgente
+
+### 6.2 Una ipotesi alla volta
+
+1. Formulare una singola ipotesi specifica e scriverla
+2. Testare con il cambiamento più piccolo possibile
+3. Se non funziona, formulare una **nuova** ipotesi — non accumulare fix
+4. Se 3+ tentativi falliscono: **fermarsi**. Probabilmente è un problema architetturale,
+   non un bug. Discutere prima di continuare.
+
+### 6.3 Implementare il fix
+
+1. Creare un test che riproduce il bug (deve fallire)
+2. Implementare un singolo fix per la causa radice
+3. Verificare che il test passa
+4. Nessun miglioramento "already here" — solo il fix
+
+**Red flag**: "fix veloce per ora", "provo a cambiare X", cambiamenti multipli
+contemporanei, proporre soluzioni prima di tracciare il flusso dati.
+
+---
+
+## 7. Verifica prima di dichiarare completato
+
+Nessuna affermazione di completamento senza **evidenza fresca di verifica**.
+
+| Affermazione | Richiede |
+|---|---|
+| "I test passano" | Output del comando test con 0 failure |
+| "Il build compila" | Comando build con exit code 0 |
+| "Il bug è risolto" | Test del sintomo originale che passa |
+| "I requisiti sono soddisfatti" | Checklist punto per punto contro la specifica |
+
+**Mai** usare "dovrebbe funzionare", "probabilmente", "sembra ok".
+**Mai** esprimere soddisfazione ("Fatto!", "Perfetto!") prima della verifica.
+**Mai** fidarsi del report di successo di un agent senza verifica indipendente.
+
+Linter ok ≠ build ok. Build ok ≠ test ok. Test ok ≠ requisiti soddisfatti.
+
+---
+
+## 8. Workflow di sviluppo
+
+### 8.1 Branch prima di sviluppare
 
 Prima di iniziare qualsiasi sviluppo non banale, valutare se creare un branch:
 
@@ -236,7 +306,7 @@ git checkout -b feature/descrizione-breve
 
 Il branch protegge main, permette review, e rende facile tornare indietro.
 
-### 6.2 Analisi statica (LINT)
+### 8.2 Analisi statica (LINT)
 
 Al termine dello sviluppo, eseguire un'analisi statica del codice.
 Tool consigliati: `ruff` (fast, all-in-one per Python), `flake8`, `mypy` per type checking.
@@ -250,7 +320,7 @@ ruff format --check .
 Risolvere i problemi critici prima di committare. Problemi stilistici possono
 essere affrontati in un commit separato.
 
-### 6.3 Aggiornare la documentazione
+### 8.3 Aggiornare la documentazione
 
 La documentazione (CLAUDE.md, README, guide) deve essere aggiornata:
 - **In fase di pianificazione**: annotare cosa si intende fare e perché
@@ -260,14 +330,67 @@ La documentazione (CLAUDE.md, README, guide) deve essere aggiornata:
 La documentazione è la rete di sicurezza per la perdita di contesto.
 Se perdi la sessione, CLAUDE.md e le guidelines devono bastare per riprendere.
 
-### 6.4 Commit frequenti
+### 8.4 Commit frequenti
 
 Committare spesso. Il commit è la protezione principale del codice.
 Un commit ogni task completato, non un mega-commit a fine giornata.
 
 ---
 
-## 7. Checklist pre-commit
+### 8.5 Pianificazione prima dell'implementazione
+
+Per task non banali, progettare prima di implementare:
+- Proporre 2-3 approcci con trade-off e raccomandazione
+- Decomporre in step piccoli (2-5 minuti ciascuno)
+- Nessun placeholder: ogni step deve contenere il codice/comandi effettivi
+- Applicare YAGNI: rimuovere funzionalità non necessarie dal design
+- In codebase esistenti, seguire i pattern stabiliti — non ristrutturare unilateralmente
+
+---
+
+## 9. Uso di Superpowers (plugin Claude Code)
+
+Il progetto utilizza il plugin **superpowers** (`superpowers@superpowers-marketplace`)
+che fornisce skill strutturate per lo sviluppo. Le skill sono vincolanti quando applicabili.
+
+### 9.1 Quando usare le skill
+
+Se una skill potrebbe applicarsi al task corrente, **deve** essere invocata prima
+di qualsiasi risposta o azione. Le skill determinano il *come*, non il *cosa*.
+
+| Situazione | Skill da invocare |
+|---|---|
+| Nuova feature o design | `brainstorming` → poi `write-plan` |
+| Bug da risolvere | `systematic-debugging` |
+| Implementazione da piano | `executing-plans` o `subagent-driven-development` |
+| Code review richiesta | `requesting-code-review` |
+| Fine sviluppo su branch | `finishing-a-development-branch` |
+| Verifica completamento | `verification-before-completion` |
+| Nuovo codice | `test-driven-development` |
+
+### 9.2 Ordine di priorità
+
+1. **Skill di processo** prima (brainstorming, debugging) — determinano l'approccio
+2. **Skill di implementazione** dopo (TDD, executing-plans) — guidano l'esecuzione
+
+"Facciamo X" → brainstorming prima, poi skill di implementazione.
+"Fixiamo questo bug" → debugging prima, poi TDD per il fix.
+
+### 9.3 Regole dalle skill incorporate nelle guidelines
+
+Le sezioni 5 (Testing/TDD), 6 (Debugging sistematico) e 7 (Verifica prima di completare)
+di queste guidelines incorporano le regole delle skill superpowers corrispondenti.
+Le skill vanno comunque invocate — forniscono workflow dettagliati oltre le regole base.
+
+### 9.4 Istruzioni utente prevalenti
+
+Le istruzioni in CLAUDE.md e in queste guidelines hanno **priorità superiore** alle skill
+superpowers. Se queste guidelines dicono "usa Decimal" e una skill non lo menziona,
+si usa comunque Decimal.
+
+---
+
+## 10. Checklist pre-commit
 
 Prima di ogni commit, verificare:
 
@@ -276,6 +399,8 @@ Prima di ogni commit, verificare:
 - [ ] Path da input utente validati con `safe_path()`
 - [ ] Valori EUR arrotondati a 2 decimali o in Decimal
 - [ ] Connessioni DB chiuse in `finally`
-- [ ] Test rilevanti eseguiti e passati
+- [ ] Test rilevanti eseguiti e passati — con evidenza (output)
+- [ ] Verifiche di completamento fatte (non "dovrebbe funzionare")
 - [ ] Documentazione aggiornata se necessario
 - [ ] Nessun path relativo hardcodato in nuovi file
+- [ ] Skill superpowers invocate dove applicabili
