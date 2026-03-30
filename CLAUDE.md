@@ -398,11 +398,12 @@ git checkout main && git merge --no-ff feature/NAME
 
 ## Code guidelines e TODO
 
-**Regole di progetto**: `doc/code_guidelines.md` — vincolanti per ogni sessione di sviluppo.
-Coprono: integrità dati (atomicità DB, Decimal per EUR), gestione errori (no silent except),
-sicurezza (path traversal, SQL parametrizzato, validazione input), architettura (path assoluti,
-no side effect a import time, no duplicazione), testing (testare codice reale, pianificare test),
-workflow (branch, LINT, documentazione aggiornata, commit frequenti).
+**Regole universali**: `doc/code_guidelines.md` — vincolanti per tutti i progetti.
+Coprono: integrità dati, gestione errori, sicurezza, architettura, testing/TDD,
+debugging sistematico, verifica completamento, workflow, uso Superpowers.
+
+**Regole specifiche progetto**: `doc/project_guidelines.md` — precisione numerica (Decimal per EUR),
+validazione input (BUY/SELL/...), pattern importers, conversione valute, schema DB, deploy.
 
 **TODO di progetto**: `doc/TODO.md` — lista prioritizzata delle cose da fare.
 Aggiornare ad ogni sessione. Include: fix di integrità, refactoring, testing, infrastruttura.

@@ -1,15 +1,12 @@
-# Code Guidelines — Crypto FIFO Tracker
+# Code Guidelines
 
-> Regole di progetto vincolanti. Ogni PR e ogni sessione di sviluppo deve rispettarle.
+> Regole universali di sviluppo. Vincolanti per tutti i progetti.
+> Per regole specifiche del progetto, vedere `doc/project_guidelines.md`.
 > Ultima revisione: 2026-03-30.
 
 ---
 
 ## 1. Integrità dei dati
-
-I dati di questa applicazione (transazioni, lotti FIFO, report fiscali) devono essere
-**assolutamente coerenti**. Non ci sono seconde possibilità: un dato corrotto o perso
-può significare una dichiarazione fiscale sbagliata.
 
 ### 1.1 Atomicità delle operazioni DB
 
@@ -19,50 +16,42 @@ In particolare, ogni pattern delete+insert **deve** essere wrappato in una singo
 ```python
 # CORRETTO
 conn.execute("BEGIN")
-delete_by_source(conn, source)
-for row in rows:
-    conn.execute("INSERT INTO ...", params)
+# ... tutte le operazioni di scrittura ...
 conn.commit()
 
 # SBAGLIATO — crash fra DELETE e COMMIT = dati persi
-delete_by_source(conn, source)
+conn.execute("DELETE ...")
 conn.commit()  # <-- il DELETE è già permanente
-for row in rows:
-    conn.execute("INSERT INTO ...", params)
+# ... INSERT che potrebbe non completarsi ...
 conn.commit()
 ```
 
 **Regola**: se un'operazione ha più di un statement di scrittura, usare `BEGIN` esplicito
 e un singolo `COMMIT` alla fine, con `ROLLBACK` nel path di errore.
 
-### 1.2 Precisione numerica: Decimal, non float
+### 1.2 Precisione numerica
 
-Tutti i valori monetari (EUR, costi, ricavi, gain/loss, fee) devono usare `Decimal`,
-non `float`. IEEE 754 accumula errori di arrotondamento su migliaia di operazioni.
+Scegliere la precisione adeguata al dominio. Per valori dove l'errore cumulativo
+conta (finanza, misure scientifiche, conteggi fiscali), preferire `Decimal` a `float`:
 
 ```python
 from decimal import Decimal, ROUND_HALF_UP
 
-# CORRETTO
-cost_basis = Decimal(str(amount)) * Decimal(str(price))
-gain_loss = proceeds - cost_basis
-# Arrotondamento esplicito prima di INSERT
-gain_loss_rounded = gain_loss.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-# SBAGLIATO
-cost_basis = amount * price  # float * float → errori cumulativi
+# Somme cumulative su molti record
+total = sum(Decimal(str(row['value'])) for row in rows)
+rounded = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 ```
 
-**Eccezione**: quantità crypto possono restare float (8 decimali, non soggette a somme cumulative).
-I valori EUR devono sempre essere `round(..., 2)` o `Decimal.quantize("0.01")` prima dell'INSERT in DB.
+**Mai** confrontare float con `==`. Usare tolerance o `round()`.
+Arrotondare esplicitamente prima di ogni INSERT in DB.
+
+> **Dettagli specifici** (quali campi, quanti decimali, eccezioni) → `doc/project_guidelines.md`
 
 ### 1.3 Connessioni DB: lifecycle management
 
-Ogni connessione deve essere chiusa anche in caso di errore. Usare `try/finally`
-o context manager:
+Ogni connessione deve essere chiusa anche in caso di errore:
 
 ```python
-# CORRETTO
 conn = sqlite3.connect(DB_PATH)
 try:
     conn.execute("BEGIN")
@@ -76,6 +65,7 @@ finally:
 ```
 
 **Mai** lasciare una connessione aperta senza un `finally: conn.close()`.
+Nelle web app Flask, usare il pattern `g` con `teardown_appcontext`.
 
 ---
 
@@ -127,37 +117,39 @@ except Exception: # troppo ampio se il tipo è prevedibile
 ### 3.1 Path safety
 
 Ogni route o funzione che accetta un nome file dall'esterno deve validare che il path
-risultante resti all'interno della directory prevista.
+risultante resti all'interno della directory prevista:
 
 ```python
-from werkzeug.utils import secure_filename
-
 def safe_path(base_dir: str, filename: str) -> str:
     """Restituisce il path sicuro o solleva ValueError."""
-    safe_name = secure_filename(filename)
-    if not safe_name:
+    safe_name = os.path.basename(filename)
+    if not safe_name or safe_name.startswith('.'):
         raise ValueError(f"Filename non valido: {filename}")
     full_path = os.path.join(base_dir, safe_name)
-    # Verifica che il path risolto sia dentro base_dir
     if not os.path.realpath(full_path).startswith(os.path.realpath(base_dir)):
         raise ValueError(f"Path traversal attempt: {filename}")
     return full_path
 ```
 
+Se il progetto usa Flask con Werkzeug, preferire `werkzeug.utils.secure_filename`.
 Applicare a: upload, delete, download, qualsiasi route con `<filename>`.
 
 ### 3.2 SQL parametrizzato
 
-Tutte le query SQL devono usare placeholder `?`. Nessuna interpolazione di stringhe.
-(Il progetto già rispetta questa regola — mantenerla.)
+Tutte le query SQL devono usare placeholder (`?` per SQLite, `%s` per PostgreSQL).
+Nessuna interpolazione di stringhe, f-string, o `.format()` nelle query.
 
-### 3.3 Validazione input
+### 3.3 Credenziali
 
-I dati da form web devono essere validati prima dell'INSERT:
-- Tipo transazione: `in ('BUY', 'SELL', 'DEPOSIT', 'WITHDRAWAL')`
-- Importi: positivi, numerici
-- Date: formato ISO valido
-- Exchange: non vuoto
+Mai loggare, mostrare o committare: API key, token, password, secret key.
+Le credenziali vanno in `.env` o variabili d'ambiente, mai nel codice.
+
+### 3.4 Validazione input
+
+I dati provenienti dall'esterno (form web, API, CSV, file upload) devono essere
+validati ai confini del sistema prima di raggiungere il DB o la logica applicativa.
+
+> **Regole di validazione specifiche** (campi, formati, constraint) → `doc/project_guidelines.md`
 
 ---
 
@@ -170,10 +162,10 @@ I path di configurazione devono essere assoluti, derivati da `__file__`:
 ```python
 # CORRETTO
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-DATABASE_PATH = os.path.join(PROJECT_ROOT, "data", "crypto_fifo.db")
+DB_PATH = os.path.join(PROJECT_ROOT, "data", "mydb.db")
 
 # SBAGLIATO
-DATABASE_PATH = "data/crypto_fifo.db"  # relativo al CWD, fragile
+DB_PATH = "data/mydb.db"  # relativo al CWD, fragile
 ```
 
 ### 4.2 Nessun side effect a import time
@@ -185,12 +177,19 @@ essere differiti al primo accesso o wrappati in try/except.
 ### 4.3 No duplicazione codice
 
 Ogni logica significativa deve esistere in un solo posto:
-- Lo schema DB è definito in `doc/schema.sql` — test e setup devono leggerlo da lì
-- Le costanti (exchange country map, epsilon, etc.) sono definite una volta e importate
-- Pattern ripetuti (connect-delete-insert-verify) devono essere estratti in utility condivise
+- Lo schema DB è definito in un unico file sorgente — test e setup lo leggono da lì
+- Le costanti e i mapping sono definiti una volta e importati
+- Pattern ripetuti devono essere estratti in utility condivise
 
 Quando trovi codice duplicato, valuta se estrarre una funzione condivisa.
 Tre copie identiche sono un bug in attesa.
+
+### 4.4 Migrazioni DB idempotenti
+
+Le migrazioni devono essere safe da rieseguire:
+- `CREATE TABLE IF NOT EXISTS`
+- Verificare l'esistenza di colonne prima di `ALTER TABLE`
+- Mai `DROP` senza backup esplicito
 
 ---
 
@@ -238,7 +237,7 @@ Al termine dello sviluppo:
 
 ### 5.6 Test di esistenza
 
-Verificare che i file e le risorse critiche esistano (DB, config, schema.sql).
+Verificare che i file e le risorse critiche esistano (DB, config, schema).
 Un test che fallisce subito con "file not found" è meglio di un errore criptico
 a runtime.
 
@@ -282,7 +281,7 @@ Nessuna affermazione di completamento senza **evidenza fresca di verifica**.
 | Affermazione | Richiede |
 |---|---|
 | "I test passano" | Output del comando test con 0 failure |
-| "Il build compila" | Comando build con exit code 0 |
+| "Il build funziona" | Comando/avvio con exit code 0 |
 | "Il bug è risolto" | Test del sintomo originale che passa |
 | "I requisiti sono soddisfatti" | Checklist punto per punto contro la specifica |
 
@@ -312,13 +311,11 @@ Al termine dello sviluppo, eseguire un'analisi statica del codice.
 Tool consigliati: `ruff` (fast, all-in-one per Python), `flake8`, `mypy` per type checking.
 
 ```bash
-# Esempio con ruff
 ruff check .
 ruff format --check .
 ```
 
-Risolvere i problemi critici prima di committare. Problemi stilistici possono
-essere affrontati in un commit separato.
+Risolvere i problemi critici prima di committare.
 
 ### 8.3 Aggiornare la documentazione
 
@@ -335,8 +332,6 @@ Se perdi la sessione, CLAUDE.md e le guidelines devono bastare per riprendere.
 Committare spesso. Il commit è la protezione principale del codice.
 Un commit ogni task completato, non un mega-commit a fine giornata.
 
----
-
 ### 8.5 Pianificazione prima dell'implementazione
 
 Per task non banali, progettare prima di implementare:
@@ -350,8 +345,8 @@ Per task non banali, progettare prima di implementare:
 
 ## 9. Uso di Superpowers (plugin Claude Code)
 
-Il progetto utilizza il plugin **superpowers** (`superpowers@superpowers-marketplace`)
-che fornisce skill strutturate per lo sviluppo. Le skill sono vincolanti quando applicabili.
+Il plugin **superpowers** (`superpowers@superpowers-marketplace`) fornisce skill
+strutturate per lo sviluppo. Le skill sono vincolanti quando applicabili.
 
 ### 9.1 Quando usare le skill
 
@@ -373,20 +368,16 @@ di qualsiasi risposta o azione. Le skill determinano il *come*, non il *cosa*.
 1. **Skill di processo** prima (brainstorming, debugging) — determinano l'approccio
 2. **Skill di implementazione** dopo (TDD, executing-plans) — guidano l'esecuzione
 
-"Facciamo X" → brainstorming prima, poi skill di implementazione.
-"Fixiamo questo bug" → debugging prima, poi TDD per il fix.
+### 9.3 Regole dalle skill incorporate
 
-### 9.3 Regole dalle skill incorporate nelle guidelines
-
-Le sezioni 5 (Testing/TDD), 6 (Debugging sistematico) e 7 (Verifica prima di completare)
-di queste guidelines incorporano le regole delle skill superpowers corrispondenti.
+Le sezioni 5 (Testing/TDD), 6 (Debugging) e 7 (Verifica) di queste guidelines
+incorporano le regole delle skill superpowers corrispondenti.
 Le skill vanno comunque invocate — forniscono workflow dettagliati oltre le regole base.
 
 ### 9.4 Istruzioni utente prevalenti
 
-Le istruzioni in CLAUDE.md e in queste guidelines hanno **priorità superiore** alle skill
-superpowers. Se queste guidelines dicono "usa Decimal" e una skill non lo menziona,
-si usa comunque Decimal.
+Le istruzioni in CLAUDE.md, in queste guidelines e in `doc/project_guidelines.md`
+hanno **priorità superiore** alle skill superpowers.
 
 ---
 
@@ -396,11 +387,24 @@ Prima di ogni commit, verificare:
 
 - [ ] Nessun `except: pass` o `except Exception: pass` introdotto
 - [ ] Operazioni DB in transazione atomica
-- [ ] Path da input utente validati con `safe_path()`
-- [ ] Valori EUR arrotondati a 2 decimali o in Decimal
+- [ ] Path da input esterno validati
+- [ ] Precisione numerica adeguata (vedi `doc/project_guidelines.md`)
 - [ ] Connessioni DB chiuse in `finally`
+- [ ] Nessuna credenziale nel codice
 - [ ] Test rilevanti eseguiti e passati — con evidenza (output)
 - [ ] Verifiche di completamento fatte (non "dovrebbe funzionare")
 - [ ] Documentazione aggiornata se necessario
 - [ ] Nessun path relativo hardcodato in nuovi file
 - [ ] Skill superpowers invocate dove applicabili
+
+---
+
+## Appendice: regole specifiche del progetto
+
+Ogni progetto ha un file `doc/project_guidelines.md` con regole aggiuntive:
+- Precisione numerica specifica (quali campi, quanti decimali, eccezioni)
+- Regole di validazione input (campi, formati, constraint di dominio)
+- Convenzioni di naming e stile specifiche
+- Pattern architetturali del progetto
+- Comandi test specifici
+- Procedure di deploy
