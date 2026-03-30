@@ -22,9 +22,19 @@ CREATE TABLE transactions (
     fee_currency TEXT,                   -- Usually EUR
     currency TEXT,                       -- Always EUR for Portugal
     transaction_id TEXT,                 -- Unique ID from exchange
-    notes TEXT                           -- Optional description
+    notes TEXT,                          -- Optional description
+    -- Source tracking (added March 2026)
+    source TEXT,                         -- CSV filename or 'web_manual_entry'
+    imported_at TEXT,                    -- ISO timestamp of import
+    record_hash TEXT                     -- SHA256 for dedup and audit
 );
 ```
+
+**SOURCE TRACKING:**
+- `source` = CSV filename that originated this record (set by all importers via `import_and_verify()`)
+- `imported_at` = ISO timestamp of when the record was imported
+- `record_hash` = SHA256 of `source|date|type|exchange|crypto|amount|value|fee` (for dedup and audit)
+- All importers use `import_and_verify()` from `importers/import_utils.py` for atomic delete+insert
 
 **CRITICAL FEE HANDLING:**
 - `total_value` = gross amount (BEFORE fees)

@@ -56,8 +56,8 @@
 ## Operativo / Infrastruttura
 
 - [x] ~~**Audit trail / tracciabilità fiscale**~~ — pagina /audit con drill-down per riga IRS, Print CSS (2026-03-30)
-- [ ] **Backup data/ su Google Drive**: rivedere o creare la procedura rclone per backup della directory `data/` (DB, CSV, report) su Google Drive
-- [ ] **Manuale importatori**: scrivere documentazione per ogni importatore con analisi dei campi del file sorgente e mapping verso il DB
+- [x] ~~**Backup data/ su Google Drive**~~ — `backup_drive.sh` con rclone (2026-03-30)
+- [x] ~~**Manuale importatori**~~ — `doc/en/IMPORT_MAPPING.md` esisteva già (587 righe), aggiornato con source tracking (2026-03-30)
 - [ ] **Semplificazione web UI**: rivedere le pagine web per semplificare il flow operativo (sessione dedicata)
 
 ---
