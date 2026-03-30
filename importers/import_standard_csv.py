@@ -146,7 +146,10 @@ def import_standard_csv(filepath, exchange_name_override=None):
         if ecb:
             print(f"\n  ✓ ECB rates loaded for USD→EUR conversion")
         else:
-            print(f"\n  ⚠️  USD transactions found but ECB rates not available!")
+            raise ValueError(
+                "USD transactions found but ECB rates not available! "
+                "Ensure data/eurusd.csv exists. Import aborted."
+            )
 
     # Detect crypto-to-crypto trades and load crypto prices
     crypto_currencies = currencies - FIAT_CURRENCIES
@@ -240,11 +243,12 @@ def import_standard_csv(filepath, exchange_name_override=None):
                     price_eur = total_eur / amount_val if amount_val > 0 else 0
                     print(f"    USD→EUR: {crypto} {tx_type} ${total_val:.2f} → €{total_eur:.2f}")
                 else:
-                    # No ECB rates — store USD values with warning
-                    total_eur = total_val
-                    fee_eur = fee_val
-                    price_eur = price_val
-                    print(f"    ⚠️  No ECB rates: storing USD value as-is for {crypto} {tx_type}")
+                    # No ECB rates — abort, do NOT store USD as EUR
+                    raise ValueError(
+                        f"ECB rates not available: cannot convert USD→EUR for "
+                        f"{crypto} {tx_type} on {dt} (${total_val:.2f}). "
+                        f"Ensure data/eurusd.csv exists and covers this date."
+                    )
 
                 _insert_tx(dt, tx_type, row_exchange, crypto,
                            amount_val, price_eur, total_eur, fee_eur,
