@@ -152,28 +152,39 @@ DATABASE_PATH = os.environ.get(
 # ============================================================
 # EXCHANGE CLASSIFICATION
 # ============================================================
-# Country code for each exchange (used in tax reports)
+# Country classification for each exchange
+# iso: ISO 3166-1 alpha-2 (used in config/general)
+# at_code: numeric code for Portuguese Autoridade Tributária (Anexo J)
+# at_name: country name in Portuguese (for IRS report)
 EXCHANGE_COUNTRIES = {
-    "Binance": "MT",          # Malta (Binance Europe)
-    "Binance Card": "MT",
-    "Binance OTC": "MT",
-    "Bitstamp": "GB",         # United Kingdom
-    "Bitfinex": "VG",         # British Virgin Islands
-    "Coinbase": "US",         # United States
-    "Coinbase Prime": "US",
-    "Coinpal": "IT",          # Italy
-    "GDTRE": "IT",
-    "Kraken": "US",
-    "Mt.Gox": "JP",           # Japan
-    "OTC": "XX",              # Unknown / varies
-    "Revolut": "LT",          # Lithuania (Revolut EU entity)
-    "TRT": "IT",              # Italy (TheRockTrading)
-    "Wirex": "GB",            # United Kingdom
+    "Binance":        {"iso": "MT", "at_code": "136", "at_name": "Ilhas Caimao"},
+    "Binance Card":   {"iso": "MT", "at_code": "136", "at_name": "Ilhas Caimao"},
+    "Binance OTC":    {"iso": "MT", "at_code": "136", "at_name": "Ilhas Caimao"},
+    "Bitstamp":       {"iso": "GB", "at_code": "826", "at_name": "Reino Unido"},
+    "Bitfinex":       {"iso": "VG", "at_code": "092", "at_name": "Ilhas Virgens Britanicas"},
+    "Coinbase":       {"iso": "US", "at_code": "840", "at_name": "Estados Unidos"},
+    "Coinbase Prime": {"iso": "US", "at_code": "840", "at_name": "Estados Unidos"},
+    "Coinpal":        {"iso": "US", "at_code": "840", "at_name": "Estados Unidos"},
+    "GDTRE":          {"iso": "IT", "at_code": "380", "at_name": "Italia"},
+    "Kraken":         {"iso": "US", "at_code": "840", "at_name": "Estados Unidos"},
+    "Mt.Gox":         {"iso": "JP", "at_code": "392", "at_name": "Japao"},
+    "OTC":            {"iso": "XX", "at_code": "000", "at_name": "Desconhecido"},
+    "Revolut":        {"iso": "LT", "at_code": "440", "at_name": "Lituania"},
+    "TRT":            {"iso": "IT", "at_code": "380", "at_name": "Italia"},
+    "Wirex":          {"iso": "GB", "at_code": "826", "at_name": "Reino Unido"},
 }
 
 def get_exchange_country(exchange_name):
     """Return the ISO country code for an exchange, or 'XX' if unknown."""
-    return EXCHANGE_COUNTRIES.get(exchange_name, "XX")
+    entry = EXCHANGE_COUNTRIES.get(exchange_name)
+    return entry["iso"] if entry else "XX"
+
+def get_exchange_at_country(exchange_name):
+    """Return (at_code, at_name) for Portuguese IRS reports."""
+    entry = EXCHANGE_COUNTRIES.get(exchange_name)
+    if entry:
+        return entry["at_code"], entry["at_name"]
+    return "000", "Desconhecido"
 
 
 # ============================================================

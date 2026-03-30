@@ -6,9 +6,12 @@ import sqlite3
 import sys
 import os
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import DATABASE_PATH
+
 def main():
     year = int(sys.argv[1]) if len(sys.argv) > 1 else 2025
-    db_path = sys.argv[2] if len(sys.argv) > 2 else 'data/crypto_fifo.db'
+    db_path = sys.argv[2] if len(sys.argv) > 2 else DATABASE_PATH
 
     if not os.path.exists(db_path):
         print(f"✗ Database not found: {db_path}")

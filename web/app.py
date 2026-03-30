@@ -57,7 +57,7 @@ _custom_sql_dir = os.path.join(DATA_DIR, 'queries')
 SQL_DIR = _custom_sql_dir if os.path.isdir(_custom_sql_dir) else os.path.join(PROJECT_ROOT, 'calculators')
 
 app = Flask(__name__)
-app.secret_key = 'crypto-fifo-local-dev'  # local only, no real security needed
+app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 
 # ── Helpers ─────────────────────────────────────────────────
 
@@ -1732,15 +1732,23 @@ def get_db_source_stats():
 # ROUTES
 # ════════════════════════════════════════════════════════════
 
+_context_cache = {'data': None, 'ts': 0}
+_CONTEXT_TTL = 5  # seconds
+
 @app.context_processor
 def inject_globals():
-    """Make wizard status and eurusd info available to all templates."""
-    return {
-        'wizard': get_wizard_status(),
-        'db_exists': db_exists(),
-        'eurusd': check_eurusd(),
-        'data_dir_name': os.path.basename(DATA_DIR),
-    }
+    """Make wizard status and eurusd info available to all templates (cached 5s)."""
+    import time
+    now = time.time()
+    if _context_cache['data'] is None or (now - _context_cache['ts']) > _CONTEXT_TTL:
+        _context_cache['data'] = {
+            'wizard': get_wizard_status(),
+            'db_exists': db_exists(),
+            'eurusd': check_eurusd(),
+            'data_dir_name': os.path.basename(DATA_DIR),
+        }
+        _context_cache['ts'] = now
+    return _context_cache['data']
 
 
 # ── Home / Dashboard ───────────────────────────────────────
@@ -2529,7 +2537,7 @@ def fmt_num_filter(n, decimals=0):
 
 @app.template_filter('fmt_eur')
 def fmt_eur_filter(n):
-    if n is None or n == 0:
+    if n is None:
         return '—'
     return f'€{n:,.2f}'
 

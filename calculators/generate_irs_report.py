@@ -38,25 +38,9 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-DB_PATH = 'data/crypto_fifo.db'
-
-# --- Exchange -> (Country Code per Tabela X Anexo J, Country Name) ---
-EXCHANGE_COUNTRY = {
-    'Coinbase':        ('840', 'Estados Unidos'),
-    'Coinbase Prime':  ('840', 'Estados Unidos'),
-    'Binance':         ('136', 'Ilhas Caimao'),
-    'Binance Card':    ('136', 'Ilhas Caimao'),
-    'Binance OTC':     ('136', 'Ilhas Caimao'),
-    'Bitstamp':        ('826', 'Reino Unido'),
-    'Kraken':          ('840', 'Estados Unidos'),
-    'Bitfinex':        ('092', 'Ilhas Virgens Britanicas'),
-    'Mt.Gox':          ('392', 'Japao'),
-    'TRT':             ('380', 'Italia'),
-    'Wirex':           ('826', 'Reino Unido'),
-    'Revolut':         ('440', 'Lituania'),
-    'GDTRE':           ('380', 'Italia'),
-    'Coinpal':         ('840', 'Estados Unidos'),
-}
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import DATABASE_PATH, get_exchange_at_country
+DB_PATH = DATABASE_PATH
 
 DOMESTIC_EXCHANGES = set()  # Portuguese platforms with NIF
 
@@ -145,7 +129,7 @@ def classify_day(day_row):
     exempt = day_row['min_holding_days'] >= 365
     exchange = day_row['exchange_name'] or 'Unknown'
     domestic = exchange in DOMESTIC_EXCHANGES
-    country_code, country_name = EXCHANGE_COUNTRY.get(exchange, ('999', 'Desconhecido'))
+    country_code, country_name = get_exchange_at_country(exchange)
 
     if exempt:
         anexo = 'Anexo G1 Quadro 07'
@@ -494,7 +478,7 @@ def write_summary(ws, year, sales):
 
     row = 11
     for name, d in sorted(exch.items()):
-        code, country = EXCHANGE_COUNTRY.get(name, ('999', '?'))
+        code, country = get_exchange_at_country(name)
         for col, val in enumerate([name, country, code, d['n'], d['a'], d['p'], d['g']], 1):
             c = ws.cell(row=row, column=col, value=val)
             c.font = DATA_FONT; c.border = THIN_BORDER

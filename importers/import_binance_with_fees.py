@@ -179,12 +179,12 @@ def import_binance(filepath, exchange_name='Binance'):
             cursor.execute("""
                 INSERT INTO transactions (
                     transaction_date, transaction_type, exchange_name, cryptocurrency,
-                    amount, price_per_unit, total_value, fee_amount,
+                    amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
                     source, imported_at, record_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 tx['date'], tx['type'], tx['exchange'], tx['crypto'],
-                tx['amount'], tx['price'], tx['total'], tx['fee'],
+                tx['amount'], tx['price'], tx['total'], tx['fee'], 'EUR', 'EUR',
                 source, imported_at, record_hash
             ))
             inserted += 1
