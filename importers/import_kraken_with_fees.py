@@ -17,7 +17,6 @@ Usage:
 import sys
 import os
 import pandas as pd
-import sqlite3
 from datetime import datetime
 import pytz
 from collections import defaultdict
@@ -26,7 +25,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from config import DATABASE_PATH
-from importers.import_utils import compute_record_hash, delete_by_source
+from importers.import_utils import compute_record_hash, delete_by_source, import_and_verify
 
 DB_PATH = DATABASE_PATH
 
@@ -134,10 +133,6 @@ def import_kraken(filepath, exchange_name='Kraken'):
     print(f"EUR received: EUR{total_eur_sell:,.2f}")
     print(f"Total fees: EUR{total_fees:.2f}")
 
-    # Connect to database
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
     # Prepare transactions
     transactions_to_insert = []
 
@@ -192,77 +187,26 @@ def import_kraken(filepath, exchange_name='Kraken'):
         print(f"   Fee:    EUR{tx['fee']:.4f}")
         print(f"   RefID:  {tx['refid']}")
 
-    # Delete previous records for this source file
-    print(f"\nDeleting previous records for source '{source}'...")
-    deleted = delete_by_source(conn, source)
-    print(f"  Deleted {deleted} previous records for {source}")
+    # Import via import_and_verify (atomic delete+insert+verify)
+    def do_inserts(conn):
+        cursor = conn.cursor()
+        count = 0
+        for tx in transactions_to_insert:
+            cursor.execute("""
+                INSERT INTO transactions (
+                    transaction_date, transaction_type, exchange_name, cryptocurrency,
+                    amount, price_per_unit, total_value, fee_amount, currency,
+                    source, imported_at, record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                tx['date'], tx['type'], tx['exchange'], tx['crypto'],
+                tx['amount'], tx['price'], tx['total'], tx['fee'], 'EUR',
+                tx['source'], tx['imported_at'], tx['record_hash']
+            ))
+            count += 1
+        return count
 
-    # Insert new data
-    print("\nInserting new data...")
-    inserted = 0
-    for tx in transactions_to_insert:
-        cursor.execute("""
-            INSERT INTO transactions (
-                transaction_date, transaction_type, exchange_name, cryptocurrency,
-                amount, price_per_unit, total_value, fee_amount, currency,
-                source, imported_at, record_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            tx['date'], tx['type'], tx['exchange'], tx['crypto'],
-            tx['amount'], tx['price'], tx['total'], tx['fee'], 'EUR',
-            tx['source'], tx['imported_at'], tx['record_hash']
-        ))
-        inserted += 1
-
-    conn.commit()
-    conn.close()
-
-    print(f"  Inserted: {inserted:,} transactions")
-
-    # Verify
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT
-            transaction_type,
-            COUNT(*) as count,
-            SUM(amount) as total_btc,
-            SUM(total_value) as total_eur,
-            SUM(fee_amount) as total_fees_eur
-        FROM transactions
-        WHERE exchange_name = ?
-        AND cryptocurrency = 'BTC'
-        GROUP BY transaction_type
-    """, (exchange_name,))
-
-    print("\n" + "=" * 80)
-    print("VERIFICATION")
-    print("=" * 80)
-
-    for row in cursor.fetchall():
-        tx_type, count, btc, eur, fees = row
-        print(f"\n{tx_type}:")
-        print(f"  Transactions: {count:,}")
-        print(f"  BTC: {btc:.8f}")
-        print(f"  EUR: EUR{eur:,.2f}")
-        print(f"  Fees: EUR{fees:,.2f}")
-
-    conn.close()
-
-    print("\n" + "=" * 80)
-    print("SUCCESS!")
-    print("=" * 80)
-    print(f"\n  Kraken ledger imported with fee handling")
-    print(f"  Source: {source}")
-    print(f"  Records: {inserted}")
-    print("\nKey points:")
-    print("  - Paired BTC/EUR rows by refid")
-    print("  - Fee extracted from EUR row")
-    print("  - Trade type determined by amount signs")
-    print("  - Source tracking: source, imported_at, record_hash set")
-
-    print("\n" + "=" * 80)
+    inserted = import_and_verify(DB_PATH, source, do_inserts)
 
     return inserted
 

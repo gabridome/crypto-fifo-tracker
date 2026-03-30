@@ -14,7 +14,6 @@ Usage:
 import sys
 import os
 import csv
-import sqlite3
 from datetime import datetime
 from collections import defaultdict
 import pytz
@@ -23,7 +22,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from config import DATABASE_PATH
-from importers.import_utils import compute_record_hash, delete_by_source
+from importers.import_utils import compute_record_hash, import_and_verify
 
 DB_PATH = DATABASE_PATH
 
@@ -122,71 +121,39 @@ def import_bybit(filepath, exchange_name='Bybit'):
         print(f"  {t['date'][:19]} {t['type']:4s} {t['amount']:.8f} BTC @ {t['price']:,.2f} = {t['total']:,.2f} EUR")
     print(f"\nTotal: {total_btc:.8f} BTC, {total_eur:,.2f} EUR, fees: {total_fees:.2f} EUR")
 
-    # Connect to database
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    # Insert via import_and_verify
+    def do_inserts(conn):
+        cursor = conn.cursor()
 
-    # Delete previous records for this source
-    deleted = delete_by_source(conn, source)
-    print(f"\n  Deleted {deleted} previous records for {source}")
+        # Also clean up the old manual_entry record for Bybit
+        cursor.execute("DELETE FROM transactions WHERE exchange_name = ? AND source = 'manual_entry'",
+                       (exchange_name,))
+        manual_deleted = cursor.rowcount
+        if manual_deleted:
+            print(f"  Deleted {manual_deleted} legacy manual_entry record(s) for {exchange_name}")
 
-    # Also clean up the old manual_entry record for Bybit
-    cursor.execute("DELETE FROM transactions WHERE exchange_name = ? AND source = 'manual_entry'",
-                   (exchange_name,))
-    manual_deleted = cursor.rowcount
-    if manual_deleted:
-        print(f"  Deleted {manual_deleted} legacy manual_entry record(s) for {exchange_name}")
+        inserted = 0
+        for t in trades:
+            record_hash = compute_record_hash(
+                source, t['date'], t['type'], exchange_name,
+                t['crypto'], t['amount'], t['total'], t['fee']
+            )
+            cursor.execute("""
+                INSERT INTO transactions (
+                    transaction_date, transaction_type, exchange_name, cryptocurrency,
+                    amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
+                    source, imported_at, record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                t['date'], t['type'], exchange_name, t['crypto'],
+                t['amount'], t['price'], t['total'], t['fee'],
+                'EUR', 'EUR',
+                source, imported_at, record_hash,
+            ))
+            inserted += 1
+        return inserted
 
-    # Insert trades
-    print("\nInserting trades...")
-    inserted = 0
-    for t in trades:
-        record_hash = compute_record_hash(
-            source, t['date'], t['type'], exchange_name,
-            t['crypto'], t['amount'], t['total'], t['fee']
-        )
-        cursor.execute("""
-            INSERT INTO transactions (
-                transaction_date, transaction_type, exchange_name, cryptocurrency,
-                amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
-                source, imported_at, record_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            t['date'], t['type'], exchange_name, t['crypto'],
-            t['amount'], t['price'], t['total'], t['fee'],
-            'EUR', 'EUR',
-            source, imported_at, record_hash,
-        ))
-        inserted += 1
-
-    conn.commit()
-
-    # Verification
-    cursor.execute("""
-        SELECT transaction_type, COUNT(*), SUM(amount), SUM(total_value), SUM(fee_amount)
-        FROM transactions WHERE source = ?
-        GROUP BY transaction_type
-    """, (source,))
-
-    print("\n" + "=" * 80)
-    print("VERIFICATION")
-    print("=" * 80)
-    for row in cursor.fetchall():
-        tx_type, count, btc, eur, fees = row
-        print(f"\n{tx_type}:")
-        print(f"  Transactions: {count}")
-        print(f"  BTC: {btc:.8f}")
-        print(f"  EUR: {eur:,.2f}")
-        print(f"  Fees: {fees:.2f}")
-
-    conn.close()
-
-    print("\n" + "=" * 80)
-    print("SUCCESS!")
-    print("=" * 80)
-    print(f"\n  Bybit UTA data imported from {source}")
-    print(f"  Records: {inserted}")
-    print("=" * 80)
+    inserted = import_and_verify(DB_PATH, source, do_inserts)
 
     return inserted
 

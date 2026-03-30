@@ -10,7 +10,6 @@ import sys
 import os
 import re
 import pandas as pd
-import sqlite3
 from datetime import datetime
 import pytz
 
@@ -18,7 +17,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from config import DATABASE_PATH
-from importers.import_utils import compute_record_hash, delete_by_source
+from importers.import_utils import compute_record_hash, import_and_verify
 
 DB_PATH = DATABASE_PATH
 
@@ -107,10 +106,6 @@ def import_revolut(filepath, exchange_name='Revolut'):
 
     print(f"\nTotal fees: EUR{df['fee_amount'].sum():.2f}")
 
-    # Connect to database
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
     # Show sample
     print("\n" + "=" * 80)
     print("SAMPLE TRANSACTIONS (first 3):")
@@ -123,94 +118,51 @@ def import_revolut(filepath, exchange_name='Revolut'):
         print(f"   Total:  EUR{row['total_value']:.2f}")
         print(f"   Fee:    EUR{row['fee_amount']:.2f}")
 
-    # Delete previous records for this source file
-    print(f"\nDeleting previous records for source '{source}'...")
-    deleted = delete_by_source(conn, source)
-    print(f"  Deleted {deleted} previous records for {source}")
+    # Insert function for import_and_verify
+    def do_inserts(conn):
+        cursor = conn.cursor()
+        inserted = 0
 
-    # Insert new data
-    print("\nInserting new data...")
-    inserted = 0
+        for _, row in df.iterrows():
+            tx_date = row['date_parsed'].isoformat()
+            tx_type = row['transaction_type']
+            tx_crypto = row['cryptocurrency']
+            tx_amount = row['amount']
+            tx_price = row['price_per_unit']
+            tx_total = row['total_value']
+            tx_fee = row['fee_amount']
 
-    for _, row in df.iterrows():
-        tx_date = row['date_parsed'].isoformat()
-        tx_type = row['transaction_type']
-        tx_crypto = row['cryptocurrency']
-        tx_amount = row['amount']
-        tx_price = row['price_per_unit']
-        tx_total = row['total_value']
-        tx_fee = row['fee_amount']
+            record_hash = compute_record_hash(
+                source, tx_date, tx_type, exchange_name,
+                tx_crypto, tx_amount, tx_total, tx_fee
+            )
 
-        record_hash = compute_record_hash(
-            source, tx_date, tx_type, exchange_name,
-            tx_crypto, tx_amount, tx_total, tx_fee
-        )
+            cursor.execute("""
+                INSERT INTO transactions (
+                    transaction_date, transaction_type, exchange_name, cryptocurrency,
+                    amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
+                    source, imported_at, record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                tx_date,
+                tx_type,
+                exchange_name,
+                tx_crypto,
+                tx_amount,
+                tx_price,
+                tx_total,
+                tx_fee,
+                'EUR',
+                'EUR',
+                source,
+                imported_at,
+                record_hash
+            ))
+            inserted += 1
 
-        cursor.execute("""
-            INSERT INTO transactions (
-                transaction_date, transaction_type, exchange_name, cryptocurrency,
-                amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
-                source, imported_at, record_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            tx_date,
-            tx_type,
-            exchange_name,
-            tx_crypto,
-            tx_amount,
-            tx_price,
-            tx_total,
-            tx_fee,
-            'EUR',
-            'EUR',
-            source,
-            imported_at,
-            record_hash
-        ))
-        inserted += 1
+        return inserted
 
-    conn.commit()
-    print(f"  Inserted: {inserted:,} transactions")
-
-    # Verify
-    cursor.execute("""
-        SELECT
-            transaction_type,
-            cryptocurrency,
-            COUNT(*) as count,
-            SUM(amount) as total_amount,
-            SUM(total_value) as total_eur,
-            SUM(fee_amount) as total_fees
-        FROM transactions
-        WHERE exchange_name = ?
-        GROUP BY transaction_type, cryptocurrency
-    """, (exchange_name,))
-
-    print("\n" + "=" * 80)
-    print("VERIFICATION")
-    print("=" * 80)
-
-    for row in cursor.fetchall():
-        tx_type, crypto, count, amount, eur, fees = row
-        print(f"\n{crypto} {tx_type}:")
-        print(f"  Transactions: {count:,}")
-        print(f"  Amount: {amount:.8f}")
-        print(f"  EUR: EUR{eur:,.2f}")
-        print(f"  Fees: EUR{fees:.2f}")
-
-    conn.close()
-
-    print("\n" + "=" * 80)
-    print("SUCCESS!")
-    print("=" * 80)
-    print(f"\n  Revolut data imported")
-    print(f"  Source: {source}")
-    print(f"  Records: {inserted}")
-    print("  Source tracking: source, imported_at, record_hash set")
-
-    print("\n" + "=" * 80)
-
-    return inserted
+    return import_and_verify(DB_PATH, source, do_inserts, group_by_crypto=True)
 
 
 if __name__ == '__main__':

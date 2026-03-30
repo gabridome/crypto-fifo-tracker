@@ -8,7 +8,6 @@ Accepts a single CSV file via CLI argument.
 import sys
 import os
 import pandas as pd
-import sqlite3
 from datetime import datetime
 import pytz
 
@@ -16,7 +15,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from config import DATABASE_PATH
-from importers.import_utils import compute_record_hash, delete_by_source
+from importers.import_utils import compute_record_hash, delete_by_source, import_and_verify
 
 
 def import_binance_card(filepath, exchange_name='Binance Card'):
@@ -78,94 +77,53 @@ def import_binance_card(filepath, exchange_name='Binance Card'):
     print(f"Total EUR received: {df_sell['total_value'].sum():,.2f} EUR")
     print(f"Total fees: {df_sell['fee_amount'].sum():.2f} EUR")
 
-    # Connect to database
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
+    # Database insert function
+    def do_inserts(conn):
+        cursor = conn.cursor()
+        inserted = 0
 
-    # Delete previous records for this source file
-    deleted = delete_by_source(conn, source)
-    print(f"\n  Deleted {deleted} previous records for {source}")
+        for _, row in df_sell.iterrows():
+            tx_date = row['date_parsed'].isoformat()
+            tx_type = 'SELL'
+            crypto = row['cryptocurrency']
+            amount = row['amount']
+            total_value = row['total_value']
+            fee = row['fee_amount']
 
-    # Insert new data
-    print("\nInserting new data...")
-    inserted = 0
+            record_hash = compute_record_hash(
+                source, tx_date, tx_type, exchange_name,
+                crypto, amount, total_value, fee
+            )
 
-    for _, row in df_sell.iterrows():
-        tx_date = row['date_parsed'].isoformat()
-        tx_type = 'SELL'
-        crypto = row['cryptocurrency']
-        amount = row['amount']
-        total_value = row['total_value']
-        fee = row['fee_amount']
+            cursor.execute("""
+                INSERT INTO transactions (
+                    transaction_date, transaction_type, exchange_name, cryptocurrency,
+                    amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
+                    transaction_id, notes,
+                    source, imported_at, record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                tx_date,
+                tx_type,
+                exchange_name,
+                crypto,
+                amount,
+                row['price_per_unit'],
+                total_value,
+                fee,
+                'EUR',
+                'EUR',
+                row['id'],
+                row.get('label', ''),
+                source,
+                imported_at,
+                record_hash
+            ))
+            inserted += 1
 
-        record_hash = compute_record_hash(
-            source, tx_date, tx_type, exchange_name,
-            crypto, amount, total_value, fee
-        )
+        return inserted
 
-        cursor.execute("""
-            INSERT INTO transactions (
-                transaction_date, transaction_type, exchange_name, cryptocurrency,
-                amount, price_per_unit, total_value, fee_amount, fee_currency, currency,
-                transaction_id, notes,
-                source, imported_at, record_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            tx_date,
-            tx_type,
-            exchange_name,
-            crypto,
-            amount,
-            row['price_per_unit'],
-            total_value,
-            fee,
-            'EUR',
-            'EUR',
-            row['id'],
-            row.get('label', ''),
-            source,
-            imported_at,
-            record_hash
-        ))
-        inserted += 1
-
-    conn.commit()
-    print(f"  Inserted: {inserted:,} transactions")
-
-    # Verify
-    cursor.execute("""
-        SELECT
-            transaction_type, cryptocurrency,
-            COUNT(*) as count,
-            SUM(amount) as total_amount,
-            SUM(total_value) as total_eur,
-            SUM(fee_amount) as total_fees
-        FROM transactions
-        WHERE source = ?
-        GROUP BY transaction_type, cryptocurrency
-    """, (source,))
-
-    print("\n" + "=" * 80)
-    print("VERIFICATION")
-    print("=" * 80)
-
-    for row in cursor.fetchall():
-        tx_type, crypto, count, amount, eur, fees = row
-        print(f"\n{crypto} {tx_type}:")
-        print(f"  Transactions: {count:,}")
-        print(f"  Amount: {amount:.8f}")
-        print(f"  EUR: {eur:,.2f} EUR")
-        print(f"  Fees: {fees:.2f} EUR")
-
-    conn.close()
-
-    print("\n" + "=" * 80)
-    print("SUCCESS!")
-    print("=" * 80)
-    print(f"\nBinance Card data imported from {source}")
-    print(f"  Sell transactions imported (Send/Payment rows ignored)")
-    print(f"  Source tracking: source={source}, imported_at={imported_at}")
-    print("\n" + "=" * 80)
+    import_and_verify(DATABASE_PATH, source, do_inserts, group_by_crypto=True)
 
 
 if __name__ == '__main__':
