@@ -25,13 +25,12 @@ import os
 import pandas as pd
 from datetime import datetime
 import pytz
-from collections import defaultdict
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from config import DATABASE_PATH
-from importers.import_utils import compute_record_hash, delete_by_source, import_and_verify
+from importers.import_utils import compute_record_hash, import_and_verify
 
 DB_PATH = DATABASE_PATH
 

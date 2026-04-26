@@ -10,7 +10,6 @@ import sys
 import os
 import pandas as pd
 from datetime import datetime
-import pytz
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -62,12 +61,12 @@ def import_coinbase(filepath, exchange_name='Coinbase'):
         # Parse values
         try:
             price_at_trans = float(str(row['Price at Transaction']).replace('€', '').replace(',', '')) if pd.notna(row['Price at Transaction']) and row['Price at Transaction'] != '' else 0
-        except:
+        except (ValueError, TypeError, KeyError):
             price_at_trans = 0
 
         try:
             subtotal = float(str(row['Subtotal']).replace('€', '').replace(',', '').replace('-', '')) if pd.notna(row['Subtotal']) and row['Subtotal'] != '' else 0
-        except:
+        except (ValueError, TypeError, KeyError):
             subtotal = 0
 
         # EXTRACT FEE from 'Fees and/or Spread'
@@ -76,7 +75,7 @@ def import_coinbase(filepath, exchange_name='Coinbase'):
         if fee_str and fee_str != 'nan' and fee_str != '':
             try:
                 fee_amount = float(fee_str.replace('€', '').replace(',', '').replace('-', ''))
-            except:
+            except (ValueError, TypeError, KeyError):
                 fee_amount = 0
 
         # Determine transaction type

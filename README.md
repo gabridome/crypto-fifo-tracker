@@ -51,10 +51,26 @@ chmod +x setup.sh
 # 2. Activate virtual environment
 source venv/bin/activate
 
-# 3. Launch the web interface
+# 3. (Optional, recommended) install the enforcement layer
+./scripts/setup-enforcement.sh   # installs ruff + git pre-commit hook
+
+# 4. Launch the web interface
 python3 web/app.py
 # Open http://127.0.0.1:5002
 ```
+
+### Enforcement layer (for contributors)
+
+After `git clone`, run `./scripts/setup-enforcement.sh` once. It installs:
+
+- `ruff` (Python linter) into the venv if missing
+- A git `pre-commit` hook that **blocks** commits containing
+  `except: pass`, ruff errors, or test failures
+- Optionally, a symlink so the project's `before-coding` skill is available
+  at user level for Claude Code
+
+`.git/hooks/` is not versioned, so each fresh clone needs this step. To
+bypass the hook in an emergency: `ALLOW_DIRTY_COMMIT=1 git commit ...` (logged).
 
 The web interface guides you through the full workflow:
 

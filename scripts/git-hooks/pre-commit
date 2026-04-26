@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Git pre-commit hook — last line of defense, runs outside Claude Code.
+# Exit 0 = allow, exit non-zero = abort commit.
+set -u
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Detect venv
+PYTHON=""
+PYTEST=""
+for candidate in "$REPO_ROOT/venv/bin" "$REPO_ROOT/.venv/bin"; do
+  if [ -x "$candidate/python3" ]; then
+    PYTHON="$candidate/python3"
+    [ -x "$candidate/pytest" ] && PYTEST="$candidate/pytest"
+    break
+  fi
+done
+
+RUFF="$(command -v ruff || true)"
+[ -z "$RUFF" ] && [ -x "$REPO_ROOT/venv/bin/ruff" ] && RUFF="$REPO_ROOT/venv/bin/ruff"
+[ -z "$RUFF" ] && [ -x "$REPO_ROOT/.venv/bin/ruff" ] && RUFF="$REPO_ROOT/.venv/bin/ruff"
+
+if [ "${ALLOW_DIRTY_COMMIT:-0}" = "1" ]; then
+  echo "[git pre-commit] ALLOW_DIRTY_COMMIT=1 — skipping checks" >&2
+  exit 0
+fi
+
+cd "$REPO_ROOT" || exit 1
+
+banner() {
+  echo "" >&2
+  echo "============================================================" >&2
+  echo "  COMMIT BLOCKED by .git/hooks/pre-commit" >&2
+  echo "============================================================" >&2
+  echo "$1" >&2
+  echo "" >&2
+  echo "Override (NOT recommended): ALLOW_DIRTY_COMMIT=1 git commit ..." >&2
+}
+
+# 1. Forbidden patterns
+diff="$(git diff --cached --unified=0 -- '*.py' 2>/dev/null || true)"
+if printf '%s' "$diff" | grep -E '^\+[[:space:]]*except([[:space:]]+Exception)?[[:space:]]*:[[:space:]]*pass[[:space:]]*$' >/dev/null; then
+  banner "Forbidden \`except: pass\` in staged diff (code_guidelines.md section 2.1)."
+  exit 1
+fi
+
+# 2. ruff
+if [ -n "$RUFF" ]; then
+  if ! "$RUFF" check . ; then
+    banner "ruff check failed (see above)."
+    exit 1
+  fi
+else
+  echo "[git pre-commit] WARN: ruff not installed — pip install ruff" >&2
+fi
+
+# 3. pytest
+if [ -n "$PYTEST" ] && [ -x "$PYTEST" ]; then
+  if ! "$PYTEST" -q tests/ ; then
+    banner "pytest failed (see above)."
+    exit 1
+  fi
+else
+  echo "[git pre-commit] WARN: pytest not found in venv" >&2
+fi
+
+echo "[git pre-commit] OK: all checks passed"
+exit 0

@@ -126,7 +126,6 @@ class CryptoFIFOTracker:
         buys = 0
         sells = 0
         matches_batch = []  # batch INSERT for sale_lot_matches
-        BATCH_SIZE = 5000
 
         for trans in transactions:
             trans_type = trans['transaction_type']

@@ -1,3 +1,47 @@
+# ⛔ STOP — MANDATORY PRE-FLIGHT (do not skip, do not summarise)
+
+You are reading CLAUDE.md for the crypto-fifo-tracker project. Before you respond
+to ANY user request that involves reading, writing, or modifying code in this
+repo, you MUST complete the following steps. The user has explicitly asked to
+be alerted when these steps are skipped.
+
+1. **Read `doc/code_guidelines.md`** in full (10 sections — universal rules).
+   If already read in this session, state so explicitly; otherwise open it now.
+2. **Read `doc/project_guidelines.md`** (Decimal/EUR rules, importer pattern,
+   port 5002, validation rules).
+3. **Check `doc/TODO.md`** for relevant outstanding items.
+4. **Invoke the project skill `before-coding`** (`.claude/skills/before-coding/SKILL.md`)
+   for any non-trivial change. It encodes the per-task workflow:
+   read → check TODO → brainstorm → branch → test first → ruff → pytest → verify.
+
+## Hard rules — blocking, not advisory
+
+- `ruff check .` MUST pass before every commit. Pre-commit hook rejects failures.
+- `venv/bin/pytest tests/` MUST pass before every commit. Same enforcement.
+- `except: pass` and `except Exception: pass` are FORBIDDEN. The hook greps the
+  staged diff and rejects.
+- TDD red-green-refactor is required for new behaviour: write the failing test
+  FIRST, observe it fail, then implement. Invoke
+  `superpowers:test-driven-development` before writing implementation code.
+- Completion claims ("fatto", "done", "tests pass") REQUIRE fresh verification
+  command output in the SAME message. Stale claims violate
+  `superpowers:verification-before-completion`.
+
+## Self-correction protocol
+
+If you proceed with a code change without (a) reading the guidelines, (b) running
+ruff+pytest, or (c) invoking the relevant superpowers skill, the user has
+authorised this recovery move: **stop, name the step you skipped, restart from
+step 1**. Do not paper over the omission.
+
+## Bypass
+
+The pre-commit hook can be bypassed only with `ALLOW_DIRTY_COMMIT=1 git commit ...`.
+The bypass is logged to stderr — it is an audit trail, not a hidden escape hatch.
+Use it only when explicitly authorised by the user.
+
+---
+
 # CLAUDE.md — Project Knowledge Base
 
 > This file is written by Claude for Claude. It contains everything needed

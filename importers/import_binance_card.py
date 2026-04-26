@@ -15,7 +15,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from config import DATABASE_PATH
-from importers.import_utils import compute_record_hash, delete_by_source, import_and_verify
+from importers.import_utils import compute_record_hash, import_and_verify
 
 
 def import_binance_card(filepath, exchange_name='Binance Card'):

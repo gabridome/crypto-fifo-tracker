@@ -14,7 +14,6 @@ All transactions use the standard CSV format for import_standard_csv.py.
 import csv
 import os
 import random
-import math
 from datetime import datetime, timedelta
 
 random.seed(42)  # Reproducible
@@ -50,7 +49,6 @@ PRICE_ANCHORS = {
 def get_price(dt):
     """Interpolate BTC/EUR price for a date, with ±5% daily noise."""
     year, month = dt.year, dt.month
-    day_frac = (dt.day - 1) / 30.0  # 0..1 within month
 
     # Find surrounding anchors
     keys = sorted(PRICE_ANCHORS.keys())
