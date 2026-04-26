@@ -58,7 +58,8 @@
 - [x] ~~**Audit trail / tracciabilità fiscale**~~ — pagina /audit con drill-down per riga IRS, Print CSS (2026-03-30)
 - [x] ~~**Backup data/ su Google Drive**~~ — `backup_drive.sh` con rclone (2026-03-30)
 - [x] ~~**Manuale importatori**~~ — `doc/en/IMPORT_MAPPING.md` esisteva già (587 righe), aggiornato con source tracking (2026-03-30)
-- [ ] **Semplificazione web UI**: rivedere le pagine web per semplificare il flow operativo (sessione dedicata)
+- [x] ~~**Semplificazione web UI**~~ — pagina unificata `/exchanges` (2026-03-30)
+- [x] ~~**Enforcement layer**~~ — CLAUDE.md preamble, hooks, skill `before-coding`, git pre-commit (2026-04-26)
 
 ---
 

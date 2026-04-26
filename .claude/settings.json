@@ -27,10 +27,39 @@
       "Bash(ls -la /Users/gbd/proj/crypto-fifo-tracker/demo/*.csv)",
       "Bash(sqlite3 demo/DEMO_crypto_fifo.db \"SELECT DISTINCT cryptocurrency FROM sale_lot_matches LIMIT 5; SELECT DISTINCT cryptocurrency FROM transactions LIMIT 5;\")",
       "Bash(sqlite3 demo/DEMO_crypto_fifo.db \"SELECT COUNT\\(*\\) FROM sale_lot_matches; SELECT COUNT\\(*\\) FROM sale_lot_matches WHERE cryptocurrency=''BTC'';\")",
-      "Bash(source venv/bin/activate)"
+      "Bash(source venv/bin/activate)",
+      "Bash(pip3 install:*)",
+      "Bash(rclone listremotes:*)",
+      "Bash(chmod +x backup_drive.sh)",
+      "Bash(./backup_drive.sh --dry-run)",
+      "Bash(./backup_drive.sh)"
     ],
     "additionalDirectories": [
       "/Users/gbd/proj/crypto-fifo-tracker/data"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/hooks/skill-reminder.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/hooks/pre-commit-check.sh"
+          }
+        ]
+      }
     ]
   }
 }
