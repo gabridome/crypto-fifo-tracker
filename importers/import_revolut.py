@@ -61,7 +61,7 @@ def parse_eur_value(value_str):
     value_str = value_str.replace(',', '')  # Remove comma (thousands separator)
     try:
         return float(value_str)
-    except:
+    except (ValueError, TypeError):
         return 0
 
 

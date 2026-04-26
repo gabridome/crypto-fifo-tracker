@@ -46,7 +46,7 @@ def parse_numeric(value):
     value_str = str(value).replace(',', '').replace('"', '').strip()
     try:
         return float(value_str)
-    except:
+    except (ValueError, TypeError):
         return 0.0
 
 

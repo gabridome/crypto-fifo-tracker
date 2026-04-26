@@ -20,7 +20,6 @@ import os
 import sys
 import re
 import glob
-import json
 import subprocess
 import shutil
 import hashlib
@@ -83,8 +82,7 @@ def db_exists():
     return os.path.exists(DATABASE_PATH)
 
 # CSV parsing extracted to csv_parser.py
-from web.csv_parser import (parse_csv_deep, parse_csv_rows, CSV_PARSE_RULES,
-                             USD_EXCHANGES, _parse_date)
+from web.csv_parser import (parse_csv_deep, parse_csv_rows, USD_EXCHANGES, _parse_date)
 
 def check_eurusd():
     """
@@ -1120,7 +1118,6 @@ def status():
             csv_merged['max_date'] = max(all_dates)
 
         # Build comparison metrics — same metrics from both sources
-        metrics = []
         csv_buys = csv_merged['buy_count'] if csvs else None
         csv_sells = csv_merged['sell_count'] if csvs else None
         db_buys = db['buys'] if db else None

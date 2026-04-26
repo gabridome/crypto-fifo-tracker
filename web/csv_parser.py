@@ -401,7 +401,7 @@ def _parse_trt_grouped(filepath, rules):
                     groups[key]['first_line'] = line_num
 
             results = []
-            for (date_str, desc), g in groups.items():
+            for (date_str, _desc), g in groups.items():
                 btc_amount = 0
                 eur_amount = 0
                 fee_eur = 0

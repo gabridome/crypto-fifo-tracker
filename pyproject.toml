@@ -1,0 +1,39 @@
+[tool.ruff]
+# Line length is permissive — we don't enforce 79/88 in this codebase.
+line-length = 120
+target-version = "py311"
+exclude = [
+    "venv",
+    ".venv",
+    "deprecated",
+    "demo",
+    "data",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+# Rules we actively enforce (catch real bugs and our project guidelines)
+select = [
+    "E722",  # bare except (forbidden by code_guidelines.md §2.2)
+    "F401",  # unused imports
+    "F811",  # redefined-while-unused
+    "F821",  # undefined name (real bug)
+    "F823",  # local-variable-referenced-before-assignment
+    "F841",  # unused local variable
+    "B",     # bugbear: real bug patterns
+    "S102",  # exec usage
+    "S301",  # pickle (security)
+    "S324",  # insecure hash usage
+]
+
+# Rules we explicitly ignore — cosmetic or context-dependent in this codebase.
+ignore = [
+    "E402",  # module-level import not at top (used with sys.path tricks)
+    "E501",  # line too long (we set our own length above; long lines OK)
+    "E701",  # multiple statements on one line (sometimes used for guards)
+    "E702",  # multiple statements on one line (semicolon) — used in CLI scripts
+    "E741",  # ambiguous variable name
+    "F541",  # f-string without placeholders — purely cosmetic
+    "B008",  # Do not perform function call in argument defaults — common in scripts
+    "B904",  # use raise from — too noisy in legacy code
+]

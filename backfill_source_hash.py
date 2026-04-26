@@ -19,6 +19,7 @@ import sys
 import glob
 import re
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
@@ -38,16 +39,19 @@ def compute_record_hash(source, date, tx_type, exchange, crypto, amount, value, 
     """
     # Normalize: strip whitespace, fixed decimal precision
     try:
-        amount_n = f"{float(amount):.8f}"
-    except (ValueError, TypeError):
+        amount_n = f"{Decimal(str(amount)):.8f}"
+    except (ValueError, TypeError, InvalidOperation):
         amount_n = str(amount)
     try:
-        value_n = f"{float(value):.2f}"
-    except (ValueError, TypeError):
+        value_n = f"{Decimal(str(value)):.2f}"
+    except (ValueError, TypeError, InvalidOperation):
         value_n = str(value)
     try:
-        fee_n = f"{float(fee):.2f}"
-    except (ValueError, TypeError):
+        if fee is None or str(fee).strip() == '':
+            fee_n = "0.00"
+        else:
+            fee_n = f"{Decimal(str(fee)):.2f}"
+    except (ValueError, TypeError, InvalidOperation):
         fee_n = str(fee or 0)
 
     raw = f"{source or ''}|{date}|{tx_type}|{exchange}|{crypto}|{amount_n}|{value_n}|{fee_n}"
@@ -104,157 +108,164 @@ def backfill():
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
 
-    # Check columns exist
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
-    if 'source' not in cols or 'record_hash' not in cols:
-        print("✗ Migration not applied yet. Run: python3 migrate_add_source_tracking.py")
-        conn.close()
-        return
+    try:
+        # Check columns exist
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+        if 'source' not in cols or 'record_hash' not in cols:
+            print("✗ Migration not applied yet. Run: python3 migrate_add_source_tracking.py")
+            return
 
-    exchange_files = build_exchange_to_files_map()
-    print("Exchange → CSV file mapping:")
-    for ex, files in sorted(exchange_files.items()):
-        print(f"  {ex:25s} → {', '.join(files)}")
+        exchange_files = build_exchange_to_files_map()
+        print("Exchange → CSV file mapping:")
+        for ex, files in sorted(exchange_files.items()):
+            print(f"  {ex:25s} → {', '.join(files)}")
 
-    # ── Phase 1: Backfill source ──────────────────────────────
+        conn.execute("BEGIN")
 
-    null_source = conn.execute(
-        "SELECT COUNT(*) FROM transactions WHERE source IS NULL"
-    ).fetchone()[0]
+        # ── Phase 1: Backfill source ──────────────────────────────
 
-    print(f"\nRecords without source: {null_source:,}")
+        null_source = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE source IS NULL"
+        ).fetchone()[0]
 
-    if null_source > 0:
-        updated_source = 0
-        for exchange, files in exchange_files.items():
-            if len(files) == 1:
-                # Single file for this exchange: assign directly
-                cursor = conn.execute(
-                    "UPDATE transactions SET source = ? WHERE exchange_name = ? AND source IS NULL",
-                    (files[0], exchange)
+        print(f"\nRecords without source: {null_source:,}")
+
+        if null_source > 0:
+            updated_source = 0
+            for exchange, files in exchange_files.items():
+                if len(files) == 1:
+                    # Single file for this exchange: assign directly
+                    cursor = conn.execute(
+                        "UPDATE transactions SET source = ? WHERE exchange_name = ? AND source IS NULL",
+                        (files[0], exchange)
+                    )
+                    if cursor.rowcount > 0:
+                        print(f"  ✓ {exchange:25s} → {files[0]:40s} ({cursor.rowcount:,} records)")
+                        updated_source += cursor.rowcount
+                else:
+                    # Multiple files: we can't be sure which record came from which file
+                    # Assign the exchange name as a placeholder
+                    combined = f"[{'+'.join(files)}]"
+                    cursor = conn.execute(
+                        "UPDATE transactions SET source = ? WHERE exchange_name = ? AND source IS NULL",
+                        (combined, exchange)
+                    )
+                    if cursor.rowcount > 0:
+                        print(f"  ≈ {exchange:25s} → {combined:40s} ({cursor.rowcount:,} records, multi-file)")
+                        updated_source += cursor.rowcount
+
+            # Handle records whose exchange has no CSV file (manual entries, Bybit, etc.)
+            cursor = conn.execute(
+                "UPDATE transactions SET source = 'manual_entry' WHERE source IS NULL"
+            )
+            if cursor.rowcount > 0:
+                print(f"  · {'(no CSV)':25s} → {'manual_entry':40s} ({cursor.rowcount:,} records)")
+                updated_source += cursor.rowcount
+
+            print(f"\n  Source backfill: {updated_source:,} records updated")
+
+        # ── Phase 2: Backfill imported_at ─────────────────────────
+
+        null_imported = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE imported_at IS NULL"
+        ).fetchone()[0]
+
+        if null_imported > 0:
+            now = datetime.now().isoformat()
+            conn.execute(
+                "UPDATE transactions SET imported_at = ? WHERE imported_at IS NULL",
+                (now,)
+            )
+            print(f"  Imported_at backfill: {null_imported:,} records → {now[:19]}")
+
+        # ── Phase 3: Compute record_hash ──────────────────────────
+
+        null_hash = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE record_hash IS NULL"
+        ).fetchone()[0]
+
+        print(f"\nRecords without hash: {null_hash:,}")
+
+        if null_hash > 0:
+            rows = conn.execute("""
+                SELECT id, source, transaction_date, transaction_type,
+                       exchange_name, cryptocurrency, amount, total_value, fee_amount
+                FROM transactions
+                WHERE record_hash IS NULL
+            """).fetchall()
+
+            updated_hash = 0
+            for row in rows:
+                h = compute_record_hash(
+                    row['source'], row['transaction_date'], row['transaction_type'],
+                    row['exchange_name'], row['cryptocurrency'],
+                    row['amount'], row['total_value'], row['fee_amount']
                 )
-                if cursor.rowcount > 0:
-                    print(f"  ✓ {exchange:25s} → {files[0]:40s} ({cursor.rowcount:,} records)")
-                    updated_source += cursor.rowcount
-            else:
-                # Multiple files: we can't be sure which record came from which file
-                # Assign the exchange name as a placeholder
-                combined = f"[{'+'.join(files)}]"
-                cursor = conn.execute(
-                    "UPDATE transactions SET source = ? WHERE exchange_name = ? AND source IS NULL",
-                    (combined, exchange)
-                )
-                if cursor.rowcount > 0:
-                    print(f"  ≈ {exchange:25s} → {combined:40s} ({cursor.rowcount:,} records, multi-file)")
-                    updated_source += cursor.rowcount
+                conn.execute("UPDATE transactions SET record_hash = ? WHERE id = ?", (h, row['id']))
+                updated_hash += 1
 
-        # Handle records whose exchange has no CSV file (manual entries, Bybit, etc.)
-        cursor = conn.execute(
-            "UPDATE transactions SET source = 'manual_entry' WHERE source IS NULL"
-        )
-        if cursor.rowcount > 0:
-            print(f"  · {'(no CSV)':25s} → {'manual_entry':40s} ({cursor.rowcount:,} records)")
-            updated_source += cursor.rowcount
+            print(f"  Hash backfill: {updated_hash:,} records computed")
 
-        print(f"\n  Source backfill: {updated_source:,} records updated")
+        conn.commit()
 
-    # ── Phase 2: Backfill imported_at ─────────────────────────
+        # ── Verify ────────────────────────────────────────────────
 
-    null_imported = conn.execute(
-        "SELECT COUNT(*) FROM transactions WHERE imported_at IS NULL"
-    ).fetchone()[0]
+        print("\n" + "=" * 60)
+        print("VERIFICATION")
+        print("=" * 60)
 
-    if null_imported > 0:
-        now = datetime.now().isoformat()
-        conn.execute(
-            "UPDATE transactions SET imported_at = ? WHERE imported_at IS NULL",
-            (now,)
-        )
-        print(f"  Imported_at backfill: {null_imported:,} records → {now[:19]}")
+        total = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        with_source = conn.execute("SELECT COUNT(*) FROM transactions WHERE source IS NOT NULL").fetchone()[0]
+        with_hash = conn.execute("SELECT COUNT(*) FROM transactions WHERE record_hash IS NOT NULL").fetchone()[0]
+        with_imported = conn.execute("SELECT COUNT(*) FROM transactions WHERE imported_at IS NOT NULL").fetchone()[0]
 
-    # ── Phase 3: Compute record_hash ──────────────────────────
+        print(f"  Total:        {total:,}")
+        print(f"  With source:  {with_source:,}  {'✓' if with_source == total else '✗'}")
+        print(f"  With hash:    {with_hash:,}  {'✓' if with_hash == total else '✗'}")
+        print(f"  With date:    {with_imported:,}  {'✓' if with_imported == total else '✗'}")
 
-    null_hash = conn.execute(
-        "SELECT COUNT(*) FROM transactions WHERE record_hash IS NULL"
-    ).fetchone()[0]
-
-    print(f"\nRecords without hash: {null_hash:,}")
-
-    if null_hash > 0:
-        rows = conn.execute("""
-            SELECT id, source, transaction_date, transaction_type,
-                   exchange_name, cryptocurrency, amount, total_value, fee_amount
+        # Check for duplicate hashes
+        dupes = conn.execute("""
+            SELECT record_hash, COUNT(*) as n
             FROM transactions
-            WHERE record_hash IS NULL
+            WHERE record_hash IS NOT NULL
+            GROUP BY record_hash
+            HAVING n > 1
+            ORDER BY n DESC
+            LIMIT 10
         """).fetchall()
 
-        updated_hash = 0
-        for row in rows:
-            h = compute_record_hash(
-                row['source'], row['transaction_date'], row['transaction_type'],
-                row['exchange_name'], row['cryptocurrency'],
-                row['amount'], row['total_value'], row['fee_amount']
-            )
-            conn.execute("UPDATE transactions SET record_hash = ? WHERE id = ?", (h, row['id']))
-            updated_hash += 1
+        if dupes:
+            print(f"\n  ⚠ Found {len(dupes)} duplicate hash groups:")
+            for d in dupes[:5]:
+                # Show what the duplicates are
+                examples = conn.execute("""
+                    SELECT source, exchange_name, transaction_date, transaction_type, amount
+                    FROM transactions WHERE record_hash = ?
+                """, (d['record_hash'],)).fetchall()
+                print(f"    Hash {d['record_hash'][:12]}... ({d['n']}x):")
+                for ex in examples:
+                    print(f"      {ex['source']:30s} {ex['exchange_name']:15s} {ex['transaction_date'][:19]} {ex['transaction_type']} {ex['amount']}")
+        else:
+            print(f"\n  ✓ No duplicate hashes found")
 
-        print(f"  Hash backfill: {updated_hash:,} records computed")
+        # Source distribution
+        print(f"\nSource distribution:")
+        sources = conn.execute("""
+            SELECT source, COUNT(*) as n
+            FROM transactions
+            GROUP BY source
+            ORDER BY n DESC
+        """).fetchall()
+        for s in sources:
+            print(f"  {s['source']:45s} {s['n']:>7,} records")
 
-    conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
-    # ── Verify ────────────────────────────────────────────────
-
-    print("\n" + "=" * 60)
-    print("VERIFICATION")
-    print("=" * 60)
-
-    total = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
-    with_source = conn.execute("SELECT COUNT(*) FROM transactions WHERE source IS NOT NULL").fetchone()[0]
-    with_hash = conn.execute("SELECT COUNT(*) FROM transactions WHERE record_hash IS NOT NULL").fetchone()[0]
-    with_imported = conn.execute("SELECT COUNT(*) FROM transactions WHERE imported_at IS NOT NULL").fetchone()[0]
-
-    print(f"  Total:        {total:,}")
-    print(f"  With source:  {with_source:,}  {'✓' if with_source == total else '✗'}")
-    print(f"  With hash:    {with_hash:,}  {'✓' if with_hash == total else '✗'}")
-    print(f"  With date:    {with_imported:,}  {'✓' if with_imported == total else '✗'}")
-
-    # Check for duplicate hashes
-    dupes = conn.execute("""
-        SELECT record_hash, COUNT(*) as n
-        FROM transactions
-        WHERE record_hash IS NOT NULL
-        GROUP BY record_hash
-        HAVING n > 1
-        ORDER BY n DESC
-        LIMIT 10
-    """).fetchall()
-
-    if dupes:
-        print(f"\n  ⚠ Found {len(dupes)} duplicate hash groups:")
-        for d in dupes[:5]:
-            # Show what the duplicates are
-            examples = conn.execute("""
-                SELECT source, exchange_name, transaction_date, transaction_type, amount
-                FROM transactions WHERE record_hash = ?
-            """, (d['record_hash'],)).fetchall()
-            print(f"    Hash {d['record_hash'][:12]}... ({d['n']}x):")
-            for ex in examples:
-                print(f"      {ex['source']:30s} {ex['exchange_name']:15s} {ex['transaction_date'][:19]} {ex['transaction_type']} {ex['amount']}")
-    else:
-        print(f"\n  ✓ No duplicate hashes found")
-
-    # Source distribution
-    print(f"\nSource distribution:")
-    sources = conn.execute("""
-        SELECT source, COUNT(*) as n
-        FROM transactions
-        GROUP BY source
-        ORDER BY n DESC
-    """).fetchall()
-    for s in sources:
-        print(f"  {s['source']:45s} {s['n']:>7,} records")
-
-    conn.close()
     print(f"\n✓ Backfill complete")
 
 

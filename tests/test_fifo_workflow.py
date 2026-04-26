@@ -13,7 +13,6 @@ Run: pytest tests/ -v
 import os
 import sys
 import sqlite3
-import pytest
 
 # Ensure project root is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
