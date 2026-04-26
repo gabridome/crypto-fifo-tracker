@@ -1413,15 +1413,22 @@ def run_sql_query(filename):
     with open(sql_path, 'r') as f:
         sql = f.read().strip()
 
-    # Security: only allow SELECT statements
-    sql_upper = sql.upper().lstrip()
+    # Security: only allow SELECT statements (also accept CTE / WITH).
+    # Strip line comments (`-- ...`) and blank lines before checking the
+    # first keyword, so a query with a header comment is still accepted.
+    sql_upper = sql.upper()
+    sql_no_comments = '\n'.join(
+        line for line in sql_upper.split('\n')
+        if line.strip() and not line.strip().startswith('--')
+    ).lstrip()
+
     forbidden = ('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE',
                  'ATTACH', 'DETACH', 'PRAGMA', 'REPLACE', 'VACUUM', 'REINDEX')
     for kw in forbidden:
-        if kw in sql_upper.split():
+        if kw in sql_no_comments.split():
             return jsonify(error=f'Forbidden SQL keyword: {kw}'), 403
 
-    if not sql_upper.startswith('SELECT') and not sql_upper.startswith('WITH'):
+    if not sql_no_comments.startswith('SELECT') and not sql_no_comments.startswith('WITH'):
         return jsonify(error='Only SELECT queries are allowed'), 403
 
     if not db_exists():
