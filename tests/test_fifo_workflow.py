@@ -198,6 +198,123 @@ class TestHoldingPeriods:
         assert row[1] >= 365, "Should be long-term (from oldest lot)"
 
 
+class TestHoldingPeriodCalendarDays:
+    """holding_period_days must use calendar days (date diff), not raw timedelta.
+
+    Otherwise a purchase late in the day and a sale early in the day exactly
+    one calendar year later returns 364 instead of 365 — incorrectly classified
+    as taxable.
+    """
+
+    def test_same_calendar_date_one_year_apart_is_exempt(self, db_path):
+        """
+        Purchase 2024-01-15T23:00+00:00, sale 2025-01-15T01:00+00:00.
+        Calendar diff = 366 days (2024 is leap). MUST be exempt.
+        Old formula would give floor(timedelta) = 365 days exact (still exempt
+        in this case, but on years without leap day, the boundary is 364).
+        """
+        # Use a non-leap-aware case for the bug demonstration:
+        # 2025-01-15T23:00+00:00 → 2026-01-15T01:00+00:00
+        # Old: timedelta = 364d 2h → .days = 364 (TAXABLE) ❌
+        # New: date diff = 365d (EXEMPT) ✓
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2025-01-15T23:00:00+00:00', 'BUY', 'TST', 1.0, 100, 100, 0, 'X')"""
+        )
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2026-01-15T01:00:00+00:00', 'SELL', 'TST', 1.0, 200, 200, 0, 'X')"""
+        )
+        conn.commit()
+        conn.close()
+
+        from calculators.crypto_fifo_tracker import CryptoFIFOTracker
+        tracker = CryptoFIFOTracker(db_path)
+        tracker.calculate_fifo_lots('TST')
+        tracker.close()
+
+        conn = sqlite3.connect(db_path)
+        days = conn.execute(
+            "SELECT holding_period_days FROM sale_lot_matches WHERE cryptocurrency='TST'"
+        ).fetchone()[0]
+        conn.close()
+        assert days == 365, (
+            f"Stesso giorno calendario un anno dopo deve dare 365 giorni; "
+            f"got {days}. La formula vecchia (timedelta.days) qui ritorna 364."
+        )
+
+    def test_one_day_short_of_year_is_taxable(self, db_path):
+        """
+        Purchase 2025-01-15, sale 2026-01-14. 364 calendar days. TAXABLE.
+        """
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2025-01-15T12:00:00+00:00', 'BUY', 'TST2', 1.0, 100, 100, 0, 'X')"""
+        )
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2026-01-14T12:00:00+00:00', 'SELL', 'TST2', 1.0, 200, 200, 0, 'X')"""
+        )
+        conn.commit()
+        conn.close()
+
+        from calculators.crypto_fifo_tracker import CryptoFIFOTracker
+        tracker = CryptoFIFOTracker(db_path)
+        tracker.calculate_fifo_lots('TST2')
+        tracker.close()
+
+        conn = sqlite3.connect(db_path)
+        days = conn.execute(
+            "SELECT holding_period_days FROM sale_lot_matches WHERE cryptocurrency='TST2'"
+        ).fetchone()[0]
+        conn.close()
+        assert days == 364, f"364 calendar days expected, got {days}"
+
+    def test_naive_purchase_aware_sale_uses_calendar_dates(self, db_path):
+        """
+        Purchase date stored as naive (no TZ), sale as TZ-aware.
+        Holding period must be computed on calendar dates only.
+        """
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2024-06-10', 'BUY', 'TST3', 1.0, 100, 100, 0, 'X')"""
+        )
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2025-06-10T12:00:00+00:00', 'SELL', 'TST3', 1.0, 200, 200, 0, 'X')"""
+        )
+        conn.commit()
+        conn.close()
+
+        from calculators.crypto_fifo_tracker import CryptoFIFOTracker
+        tracker = CryptoFIFOTracker(db_path)
+        tracker.calculate_fifo_lots('TST3')
+        tracker.close()
+
+        conn = sqlite3.connect(db_path)
+        days = conn.execute(
+            "SELECT holding_period_days FROM sale_lot_matches WHERE cryptocurrency='TST3'"
+        ).fetchone()[0]
+        conn.close()
+        # 2024-06-10 → 2025-06-10 = 365 calendar days
+        assert days == 365
+
+
 # ============================================================
 # Test 6: Gain/loss
 # ============================================================
