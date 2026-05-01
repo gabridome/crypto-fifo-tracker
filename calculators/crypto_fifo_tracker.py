@@ -201,13 +201,13 @@ class CryptoFIFOTracker:
 
                     gain_loss = proceeds - cost_basis
 
-                    # Holding period
+                    # Holding period: counted on calendar dates only (no TZ).
+                    # `(sale_dt - purchase_dt).days` floors the timedelta and a purchase
+                    # late in the day vs a sale early in the day exactly one calendar year
+                    # later would return 364 instead of 365 (taxable instead of exempt).
+                    # Calendar-date diff is timezone-independent and matches AT practice.
                     purchase_date_dt = datetime.fromisoformat(lot['purchase_date'])
-                    if purchase_date_dt.tzinfo is None and sale_date_dt.tzinfo is not None:
-                        purchase_date_dt = purchase_date_dt.replace(tzinfo=sale_date_dt.tzinfo)
-                    elif purchase_date_dt.tzinfo is not None and sale_date_dt.tzinfo is None:
-                        sale_date_dt = sale_date_dt.replace(tzinfo=purchase_date_dt.tzinfo)
-                    holding_days = (sale_date_dt - purchase_date_dt).days
+                    holding_days = (sale_date_dt.date() - purchase_date_dt.date()).days
 
                     matches_batch.append((
                         trans['id'],       # sale_transaction_id
