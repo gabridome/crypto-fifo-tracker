@@ -15,8 +15,16 @@ DUST_THRESHOLD = Decimal('1e-8')  # Single threshold for all dust comparisons
 
 
 def _to_eur(value):
-    """Round a Decimal value to 2 decimal places for EUR storage."""
+    """Round a Decimal value to 2 decimal places for EUR currency totals
+    (cost_basis, proceeds, gain_loss, fees)."""
     return float(value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+
+
+def _to_price(value):
+    """Round a Decimal value to 8 decimal places for unit prices.
+    Use for purchase_price_per_unit / sale_price_per_unit so sub-EUR tokens
+    (e.g. SHIB at EUR 0.00001234) are not flattened to 0.00."""
+    return float(value.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP))
 
 
 class CryptoFIFOTracker:
@@ -216,8 +224,8 @@ class CryptoFIFOTracker:
                         lot['purchase_date'],
                         cryptocurrency,
                         float(amount_from_lot),
-                        _to_eur(purchase_price),
-                        _to_eur(sale_price),
+                        _to_price(purchase_price),
+                        _to_price(sale_price),
                         _to_eur(cost_basis),
                         _to_eur(proceeds),
                         _to_eur(gain_loss),
@@ -254,7 +262,7 @@ class CryptoFIFOTracker:
             ''', (
                 lot['purchase_transaction_id'], lot['cryptocurrency'],
                 lot['purchase_date'], float(lot['original_amount']),
-                float(lot['remaining_amount']), _to_eur(lot['purchase_price_per_unit']),
+                float(lot['remaining_amount']), _to_price(lot['purchase_price_per_unit']),
                 _to_eur(lot['cost_basis']), _to_eur(lot['purchase_fee_total']),
                 lot['exchange_name'],
             ))
