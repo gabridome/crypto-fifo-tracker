@@ -46,6 +46,31 @@ DOMESTIC_EXCHANGES = set()  # Portuguese platforms with NIF
 
 OWNER_TITULAR = 'A'  # Sujeito Passivo A
 
+
+def warn_on_unknown_country_codes(db_path, year):
+    """Restituisce la lista di exchange con sale_lot_matches nell'anno
+    per cui get_exchange_at_country() ritorna code='000' (Desconhecido).
+
+    Le righe in Anexo J Quadro 9.4A devono avere un codice paese reale.
+    Questa funzione e' chiamata in main() per stampare un warning visibile
+    prima del filing.
+    """
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("""
+        SELECT DISTINCT t.exchange_name
+        FROM sale_lot_matches slm
+        JOIN transactions t ON slm.sale_transaction_id = t.id
+        WHERE slm.sale_date >= ? AND slm.sale_date < ?
+    """, (f'{year}-01-01', f'{year + 1}-01-01')).fetchall()
+    conn.close()
+
+    unknown = []
+    for (exchange_name,) in rows:
+        code, _ = get_exchange_at_country(exchange_name)
+        if code == '000':
+            unknown.append(exchange_name)
+    return unknown
+
 # --- Styles ---
 HEADER_FONT = Font(name='Arial', bold=True, size=9, color='000000')
 HEADER_FILL = PatternFill('solid', fgColor='B4C6E7')
@@ -583,6 +608,16 @@ def main():
     if not raw_days:
         print(f'\n  Nessuna vendita trovata per il {year}.')
         sys.exit(0)
+
+    unknown_exchanges = warn_on_unknown_country_codes(db_path, year)
+    if unknown_exchanges:
+        print('\n  ' + '!' * 68, file=sys.stderr)
+        print('  ! ATTENZIONE: questi exchange hanno AT country code 000 (Desconhecido):', file=sys.stderr)
+        for ex in unknown_exchanges:
+            print(f'  !   - {ex}', file=sys.stderr)
+        print('  ! Le relative righe Anexo J andranno corrette a mano nel report Excel', file=sys.stderr)
+        print('  ! oppure va aggiunto un mapping in config.EXCHANGE_COUNTRIES.', file=sys.stderr)
+        print('  ' + '!' * 68 + '\n', file=sys.stderr)
 
     sales = [classify_day(d) for d in raw_days]
     exempt = [s for s in sales if s['exempt']]
