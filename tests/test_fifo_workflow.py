@@ -14,6 +14,8 @@ import os
 import sys
 import sqlite3
 
+import pytest
+
 # Ensure project root is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -196,6 +198,118 @@ class TestHoldingPeriods:
         conn.close()
         assert row[0].startswith('2020-01-15'), f"FIFO should use oldest lot, got {row[0]}"
         assert row[1] >= 365, "Should be long-term (from oldest lot)"
+
+
+class TestSubEuroTokenPrecision:
+    """Unit prices for sub-EUR tokens (SHIB, PEPE, ...) must not round to 0.00.
+
+    `purchase_price_per_unit` and `sale_price_per_unit` are stored as REAL.
+    They must keep at least 8 decimals to be useful for tokens priced below
+    €1. The aggregate EUR columns (cost_basis, proceeds, gain_loss) stay at
+    2 decimals.
+    """
+
+    def test_purchase_price_below_1_euro_preserved(self, db_path):
+        """Buying SHIB-like token at €0.00001234 must keep precision in fifo_lots."""
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2024-06-10T12:00:00+00:00', 'BUY', 'SHIB',
+                       1000000.0, 0.00001234, 12.34, 0, 'X')"""
+        )
+        conn.commit()
+        conn.close()
+
+        from calculators.crypto_fifo_tracker import CryptoFIFOTracker
+        tracker = CryptoFIFOTracker(db_path)
+        tracker.calculate_fifo_lots('SHIB')
+        tracker.close()
+
+        conn = sqlite3.connect(db_path)
+        ppu = conn.execute(
+            "SELECT purchase_price_per_unit FROM fifo_lots WHERE cryptocurrency='SHIB'"
+        ).fetchone()[0]
+        conn.close()
+        assert ppu == pytest.approx(0.00001234, abs=1e-9), (
+            f"purchase_price_per_unit deve preservare 8 decimali; "
+            f"got {ppu}, expected 0.00001234. La formula vecchia "
+            f"(_to_eur con 2 decimali) restituirebbe 0.0."
+        )
+
+    def test_sale_price_below_1_euro_preserved(self, db_path):
+        """Selling SHIB-like token at €0.00005678 must keep precision in sale_lot_matches."""
+        conn = sqlite3.connect(db_path)
+        # Need a BUY first
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2023-01-10T12:00:00+00:00', 'BUY', 'PEPE',
+                       1000000.0, 0.00001000, 10.00, 0, 'X')"""
+        )
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2024-06-10T12:00:00+00:00', 'SELL', 'PEPE',
+                       1000000.0, 0.00005678, 56.78, 0, 'X')"""
+        )
+        conn.commit()
+        conn.close()
+
+        from calculators.crypto_fifo_tracker import CryptoFIFOTracker
+        tracker = CryptoFIFOTracker(db_path)
+        tracker.calculate_fifo_lots('PEPE')
+        tracker.close()
+
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            """SELECT purchase_price_per_unit, sale_price_per_unit
+               FROM sale_lot_matches WHERE cryptocurrency='PEPE'"""
+        ).fetchone()
+        conn.close()
+        assert row[0] == pytest.approx(0.00001000, abs=1e-9), \
+            f"purchase_price_per_unit got {row[0]}"
+        assert row[1] == pytest.approx(0.00005678, abs=1e-9), \
+            f"sale_price_per_unit got {row[1]}"
+
+    def test_eur_aggregate_columns_still_at_2_decimals(self, db_path):
+        """cost_basis, proceeds, gain_loss must remain at 2 decimals (currency totals)."""
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2023-01-10T12:00:00+00:00', 'BUY', 'XYZ',
+                       1.0, 100.123, 100.123, 0.5, 'X')"""
+        )
+        conn.execute(
+            """INSERT INTO transactions
+               (transaction_date, transaction_type, cryptocurrency, amount,
+                price_per_unit, total_value, fee_amount, exchange_name)
+               VALUES ('2024-06-10T12:00:00+00:00', 'SELL', 'XYZ',
+                       1.0, 200.987, 200.987, 0.3, 'X')"""
+        )
+        conn.commit()
+        conn.close()
+
+        from calculators.crypto_fifo_tracker import CryptoFIFOTracker
+        tracker = CryptoFIFOTracker(db_path)
+        tracker.calculate_fifo_lots('XYZ')
+        tracker.close()
+
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            """SELECT cost_basis, proceeds, gain_loss
+               FROM sale_lot_matches WHERE cryptocurrency='XYZ'"""
+        ).fetchone()
+        conn.close()
+        # Each must be exactly 2-decimal rounded (no trailing 4-5-6 digits)
+        for col_name, val in zip(('cost_basis', 'proceeds', 'gain_loss'), row, strict=True):
+            assert round(val, 2) == val, \
+                f"{col_name}={val} non è arrotondato a 2 decimali"
 
 
 class TestHoldingPeriodCalendarDays:
