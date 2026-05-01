@@ -74,6 +74,12 @@ def get_daily_sales(db_path, year):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
+    # purchase_fees viene allocato proporzionalmente da fifo_lots.purchase_fee_total
+    # (fonte di verita' al momento della creazione del lotto).
+    # La formula precedente "cost_basis - amount * purchase_price_per_unit" derivava
+    # il valore indirettamente e ereditava il rumore di arrotondamento di
+    # purchase_price_per_unit (2 decimali nello slm).
+    # CASE WHEN difensivo: protegge da division-by-zero su lotti zero (impossibili oggi).
     query = """
         SELECT
             date(slm.sale_date) as sale_day,
@@ -84,12 +90,15 @@ def get_daily_sales(db_path, year):
             SUM(slm.proceeds) as proceeds,
             SUM(slm.cost_basis) as cost_basis,
             SUM(slm.gain_loss) as gain_loss,
-            SUM(slm.cost_basis - (slm.amount_sold * slm.purchase_price_per_unit)) as purchase_fees,
+            SUM(CASE WHEN fl.original_amount > 0
+                     THEN fl.purchase_fee_total * slm.amount_sold / fl.original_amount
+                     ELSE 0 END) as purchase_fees,
             MIN(slm.holding_period_days) as min_holding_days,
             (slm.holding_period_days >= 365) as is_exempt,
             COUNT(*) as num_transactions
         FROM sale_lot_matches slm
         JOIN transactions t ON slm.sale_transaction_id = t.id
+        JOIN fifo_lots fl ON slm.fifo_lot_id = fl.id
         WHERE slm.sale_date >= ? AND slm.sale_date < ?
         GROUP BY date(slm.sale_date), t.exchange_name, (slm.holding_period_days >= 365)
         ORDER BY sale_day ASC, t.exchange_name ASC
