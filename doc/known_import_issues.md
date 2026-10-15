@@ -2,7 +2,7 @@
 
 > Catalogo dei problemi di parsing/import incontrati, con causa e soluzione.
 > Aggiornare ogni volta che si risolve un nuovo problema di import.
-> Ultima revisione: 2026-03-30.
+> Ultima revisione: 2026-10-15.
 
 ---
 
@@ -57,6 +57,8 @@
 | Problema | Causa | Stato | Note |
 |----------|-------|-------|------|
 | Prezzi in USD | Come Bitfinex, serve ECB | Risolto | Stesso pattern ecb_rates.py |
+| Ordini `Cancelled` con riempimento parziale scartati | L'importer filtrava `status == 'Completed'`, ma Prime cancella un ordine **dopo** un fill parziale e addebita le commissioni: la quantità eseguita resta in `filled base quantity` | Risolto 2026-10-15 | Lo status non è la domanda giusta: ora il filtro è `filled base quantity > DUST_THRESHOLD` e lo status finisce nelle `notes`. Come accorgersene su un conto reale: il saldo di chiusura dell'estratto mensile combacia con la somma di *tutti* i buy riempiti, non con quella dei soli `Completed`. I SELL cancellati, almeno su questo export, hanno sempre fill zero: il filtro perdeva solo acquisti, quindi sottostimava quantità e cost basis, non i ricavi |
+| Le gambe stablecoin dei trade non entrano | Il filtro `market == 'BTC/USD'` tiene solo il lato BTC | By design | Chi converte BTC in USDT/USDC vede registrata la vendita del BTC ma non l'acquisto della stablecoin, che resta senza lotto. Per il FIFO delle stablecoin servono gli export dell'exchange dove stanno e le gambe stablecoin dei trade Binance |
 
 ### Kraken (`import_kraken_with_fees.py`)
 

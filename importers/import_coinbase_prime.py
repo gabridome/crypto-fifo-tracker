@@ -2,6 +2,11 @@
 Coinbase Prime Orders Importer
 Handles BUY/SELL orders with USD to EUR conversion using ECB historical rates
 
+An order counts as executed when ``filled base quantity > 0``, **whatever its
+status is**: Prime cancels an order after a partial fill and still charges the
+fees, so ``status == 'Completed'`` is not the same question as "did it fill?".
+See ``filled_orders()`` and ``doc/known_import_issues.md``.
+
 Usage:
     python3 importers/import_coinbase_prime.py <filepath> [exchange_name]
 """
@@ -17,8 +22,36 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from importers.ecb_rates import ECBRates
 from importers.import_utils import compute_record_hash, import_and_verify
+from calculators.crypto_fifo_tracker import DUST_THRESHOLD
 from config import DATABASE_PATH
 DB_PATH = DATABASE_PATH
+
+# Colonna con la quantità davvero eseguita (l'export UI la tiene distinta
+# dalla quantità ordinata, `total order quantity`).
+FILLED_QTY_COLUMN = 'filled base quantity'
+
+
+def filled_orders(df):
+    """Gli ordini che hanno eseguito, qualunque sia lo ``status``.
+
+    Prime può cancellare un ordine **dopo** un riempimento parziale: la
+    quantità eseguita resta in ``filled base quantity``, il controvalore in
+    ``filled quote quantity``, il prezzo medio in ``average fill price``, e le
+    commissioni vengono addebitate. Filtrare per ``status == 'Completed'``
+    scartava quelle esecuzioni — quantità e cost basis mancanti nel FIFO, con
+    le fee pagate per nulla.
+
+    Come verificarlo su un conto proprio: il saldo di chiusura dell'estratto
+    mensile del custode combacia con la somma di *tutti* i buy riempiti, non
+    con quella dei soli ``Completed``. Dopo questo fix serve un reimport e un
+    ricalcolo FIFO: cambiano i lotti aperti e la frontiera dei 365 giorni.
+
+    Quantità non numeriche o sotto ``DUST_THRESHOLD`` non sono esecuzioni:
+    ``errors='coerce'`` le porta a NaN e il confronto le scarta senza
+    sollevare.
+    """
+    filled = pd.to_numeric(df[FILLED_QTY_COLUMN], errors='coerce')
+    return df[filled > float(DUST_THRESHOLD)].copy()
 
 
 def import_coinbase_prime(filepath, exchange_name='Coinbase Prime'):
@@ -42,9 +75,11 @@ def import_coinbase_prime(filepath, exchange_name='Coinbase Prime'):
     print(f"\nLoaded {len(df):,} rows from {filepath}")
     print(f"Columns: {list(df.columns)}")
 
-    # Filter only completed orders
-    df = df[df['status'] == 'Completed'].copy()
-    print(f"\nCompleted orders: {len(df):,}")
+    # Keep every order that filled, cancelled ones included (v. filled_orders)
+    df = filled_orders(df)
+    print(f"\nFilled orders: {len(df):,}")
+    for status, n in df['status'].value_counts().items():
+        print(f"  {status}: {n:,}")
 
     # Filter only BTC market
     df = df[df['market'] == 'BTC/USD'].copy()
@@ -103,6 +138,11 @@ def import_coinbase_prime(filepath, exchange_name='Coinbase Prime'):
                 dt = pytz.UTC.localize(dt)
 
             notes = f"USD: ${row['price_usd']:.2f}/BTC, Total: ${row['total_usd']:.2f}, Fee: ${row['fee_usd']:.2f}, ECB Rate: {row['usd_eur_rate']:.4f}"
+            status = str(row.get('status', '') or '').strip()
+            if status and status != 'Completed':
+                # Tracciabilità per la pagina /audit: l'ordine è stato
+                # cancellato dopo il riempimento, l'esecuzione resta valida.
+                notes += f", Order status: {status}"
 
             record_hash = compute_record_hash(
                 source, dt.isoformat(), row['transaction_type'],

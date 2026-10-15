@@ -1,7 +1,7 @@
 # TODO — Crypto FIFO Tracker
 
 > Lista delle cose da fare, ordinata per priorità. Aggiornare ad ogni sessione.
-> Ultima revisione: 2026-03-30.
+> Ultima revisione: 2026-10-15.
 
 ---
 
@@ -52,6 +52,24 @@
 - [x] ~~**`fmt_eur_filter`**~~ — mostra €0.00 per zero, '—' solo per None (2026-03-30)
 
 ---
+
+## Priorità ALTA — Dati
+
+- [x] ~~**Ordini Prime `Cancelled` con fill parziale**~~ — il filtro `status == 'Completed'`
+  scartava esecuzioni vere (quantità, cost basis e commissioni addebitate). Ora
+  `filled_orders()` tiene ogni riga con `filled base quantity > DUST_THRESHOLD`
+  (2026-10-15). Dopo un fix così serve **reimport + ricalcolo FIFO**: cambiano i lotti
+  aperti e la frontiera dei 365 giorni.
+- [ ] **Stablecoin senza catena** — convertire BTC in USDT/USDC registra la vendita del
+  BTC ma non l'acquisto della stablecoin: nessun lotto, e le vendite di stablecoin
+  restano non matchate. Servono gli export dell'exchange dove stanno e le gambe
+  stablecoin dei trade Binance. Attenzione ai lotti inseriti a mano con parità 1,00
+  verso EUR: va usato il tasso ECB del giorno.
+- [ ] **Vendite senza lotto d'acquisto** (es. coin da fork del 2017): quattro SELL non
+  matchati, nessun cost basis. Decidere come trattarli nel report IRS.
+- [ ] **Riconciliazione con il custode** — i lotti aperti del tracker vanno confrontati
+  con i saldi reali (exchange + custodia propria): se non combaciano, mancano
+  acquisti da una parte o dismissioni dall'altra. Vale come controllo periodico.
 
 ## Operativo / Infrastruttura
 
