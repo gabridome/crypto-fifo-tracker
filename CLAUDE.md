@@ -1,17 +1,22 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+---
+
 # ⛔ STOP — MANDATORY PRE-FLIGHT (do not skip, do not summarise)
 
-You are reading CLAUDE.md for the crypto-fifo-tracker project. Before you respond
-to ANY user request that involves reading, writing, or modifying code in this
-repo, you MUST complete the following steps. The user has explicitly asked to
-be alerted when these steps are skipped.
+Before responding to ANY user request that involves reading, writing, or modifying
+code in this repo, you MUST complete the following steps. The user has explicitly
+asked to be alerted when these steps are skipped.
 
-1. **Read `doc/code_guidelines.md`** in full (10 sections — universal rules).
+1. **Read `doc/code_guidelines.md`** in full (universal rules, 10 sections).
    If already read in this session, state so explicitly; otherwise open it now.
 2. **Read `doc/project_guidelines.md`** (Decimal/EUR rules, importer pattern,
    port 5002, validation rules).
 3. **Check `doc/TODO.md`** for relevant outstanding items.
 4. **Invoke the project skill `before-coding`** (`.claude/skills/before-coding/SKILL.md`)
-   for any non-trivial change. It encodes the per-task workflow:
+   for any non-trivial change. It encodes the 7-gate workflow:
    read → check TODO → brainstorm → branch → test first → ruff → pytest → verify.
 
 ## Hard rules — blocking, not advisory
@@ -30,435 +35,255 @@ be alerted when these steps are skipped.
 ## Self-correction protocol
 
 If you proceed with a code change without (a) reading the guidelines, (b) running
-ruff+pytest, or (c) invoking the relevant superpowers skill, the user has
-authorised this recovery move: **stop, name the step you skipped, restart from
-step 1**. Do not paper over the omission.
+ruff+pytest, or (c) invoking the relevant superpowers skill: **stop, name the
+step you skipped, restart from step 1**. Do not paper over the omission.
 
 ## Bypass
 
-The pre-commit hook can be bypassed only with `ALLOW_DIRTY_COMMIT=1 git commit ...`.
-The bypass is logged to stderr — it is an audit trail, not a hidden escape hatch.
-Use it only when explicitly authorised by the user.
+Pre-commit hook bypassable only with `ALLOW_DIRTY_COMMIT=1 git commit ...`,
+logged to stderr — audit trail, not a hidden escape hatch. Use only when
+explicitly authorised by the user.
 
 ---
 
-# CLAUDE.md — Project Knowledge Base
+# Project Overview
 
-> This file is written by Claude for Claude. It contains everything needed
-> to understand, maintain, and reconstruct this project from scratch.
-> Last updated: 2026-03-30.
+Open-source FIFO capital-gains tracker for cryptocurrency, designed for
+Portuguese IRS tax filing (Anexo G1 + Anexo J). Imports transactions from
+multiple exchanges, calculates FIFO gains/losses, classifies as exempt
+(≥365 days) or taxable (<365 days), and generates Excel reports matching
+the official Autoridade Tributária form layout.
 
-## What this project is
+**License:** MIT • **Language:** Python 3.11+ • **Database:** SQLite3
+**Multi-country ready** via `config.py` profiles.
 
-An open-source FIFO (First In, First Out) capital gains tracker for cryptocurrency,
-designed for Portuguese IRS tax filing. It imports transactions from multiple exchanges,
-calculates FIFO gains/losses, classifies them as exempt (≥365 days) or taxable (<365 days),
-and generates Excel reports matching the official Autoridade Tributária form layout.
-
-**License**: MIT. **Language**: Python 3.11+. **Database**: SQLite3.
-**Primary user**: Portuguese crypto taxpayers.
-**Architecture**: multi-country ready via `config.py` profiles.
-
-## Directory structure and the data/ separation principle
-
-The core design principle is a clean separation between **code** (tracked in git,
-updatable) and **personal data** (gitignored, private, backed up separately).
+## Big-picture architecture
 
 ```
-crypto-fifo-tracker/
-├── config.py                    ← Country/tax configuration, DATABASE_PATH
-├── setup.sh                     ← Automated setup for new users
-├── .gitignore                   ← Ignores data/ except sample_*.csv and template_*.csv
-├── LICENSE                      ← MIT
-├── CONTRIBUTING.md
-├── CHANGELOG.md
-├── README.md                    ← Bilingual landing page (EN/PT)
-├── CLAUDE.md                    ← This file
-│
-├── web/                         ← Flask web application (NEW)
-│   ├── app.py                   ← Main application (~1700 lines)
-│   └── templates/
-│       ├── base.html            ← Layout with sidebar navigation
-│       ├── collect.html         ← Step 1: upload/manage CSV files
-│       ├── import_data.html     ← Step 2: import with exchange grouping
-│       ├── status.html          ← Step 3: CSV↔DB comparison dashboard
-│       ├── fifo.html            ← Step 4: FIFO calculation
-│       ├── reports.html         ← Step 5: Excel report generation
-│       └── manual.html          ← Step 6: manual transaction entry
-│
-├── calculators/                 ← FIFO engine and report generation
-│   ├── __init__.py
-│   ├── crypto_fifo_tracker.py   ← Core FIFO library (the heart of the project)
-│   ├── calculate_fifo.py        ← FIFO calculation entry point
-│   ├── generate_irs_report.py   ← Excel report (Anexo G1 + Anexo J sheets)
-│   └── update_fifo_schema.py    ← DB schema migrations
-│
-├── importers/                   ← One script per exchange
-│   ├── __init__.py
-│   ├── import_utils.py          ← Shared: compute_record_hash(), delete_by_source()
-│   ├── ecb_rates.py             ← USD→EUR conversion via ECB CSV
-│   ├── crypto_prices.py         ← Crypto price lookup (CryptoCompare daily BTC/EUR etc.)
-│   ├── fetch_crypto_prices.py   ← Download historical crypto prices from CryptoCompare API
-│   ├── import_standard_csv.py   ← Generic CSV importer (handles EUR, USD, crypto-to-crypto)
-│   ├── import_binance_with_fees.py
-│   ├── import_coinbase_prime.py
-│   ├── import_coinbase_standalone.py
-│   ├── import_bitstamp_with_fees.py
-│   ├── import_bitfinex_ecb.py
-│   ├── import_kraken_with_fees.py
-│   ├── import_mtgox_with_fees.py
-│   ├── import_trt_with_fees.py
-│   ├── import_wirex.py
-│   ├── import_revolut.py
-│   ├── import_binance_card.py
-│   └── verify_exchange_import.py
-│
-├── migrate_add_source_tracking.py   ← DB migration: source, imported_at, record_hash (NEW)
-├── backfill_source_hash.py          ← Backfill existing records with source/hash (NEW)
-│
-├── reports/                     ← Report generation scripts (CODE, not output)
-│   ├── generate_annual_summary.py
-│   ├── generate_reports.py
-│   └── yearly_balance.py
-│
-├── data/                        ← ALL personal data (gitignored except samples)
-│   ├── crypto_fifo.db           ← SQLite database
-│   ├── eurusd.csv               ← ECB historical EUR/USD rates
-│   ├── crypto_prices.csv        ← CryptoCompare daily prices (BTC/EUR, BCH/EUR, ETH/EUR)
-│   ├── template_manual_transactions.csv  ← Template for manual/OTC imports (NEW)
-│   ├── sample_transactions.csv  ← Fake data for testing (TRACKED in git)
-│   ├── *.csv                    ← User's exchange export files
-│   ├── reports/                 ← Generated .xlsx output
-│   ├── backups/                 ← Database snapshots
-│   └── supporting_documents/    ← Exchange statements, invoices
-│
-├── doc/
-│   ├── schema.sql               ← Database DDL
-│   ├── en/                      ← English documentation (7 guides)
-│   └── pt/                      ← Portuguese documentation (8 guides incl. recursos_fiscais)
-│
-└── tests/
-    ├── __init__.py
-    └── test_fifo_workflow.py    ← 9 test functions (~33 assertions)
+Exchange CSV files (data/)
+    │
+    ├── importers/import_*.py  (one per exchange + import_standard_csv.py)
+    │       │
+    │       └── importers/import_utils.py
+    │           - compute_record_hash() — deterministic SHA256
+    │           - delete_by_source()    — surgical DELETE by CSV filename
+    │           - import_and_verify()   — atomic delete+insert+verify (BEGIN/COMMIT)
+    │
+    ▼
+SQLite DB (data/crypto_fifo.db)
+  transactions ── (BUY) ──> fifo_lots ──> sale_lot_matches (one per consumed lot)
+                                              │
+    ▲                                         ▼
+    │                              calculators/crypto_fifo_tracker.py
+    │                              CryptoFIFOTracker.calculate_fifo_lots()
+    │                              - Decimal arithmetic, _to_eur() / _to_price()
+    │                              - DUST_THRESHOLD = Decimal('1e-8')
+    │                              - holding period on calendar dates
+    │
+    ▼
+calculators/generate_irs_report.py
+  get_daily_sales() → GROUP BY (sale_day, exchange, is_exempt)
+  → Excel with Quadro 7 (exempt) + Quadro 9.4A (taxable)
 ```
 
-## Web interface (NEW — March 2026)
+**The data/ separation principle**: code is tracked in git; everything in
+`data/` (DB, CSV exports, generated reports, backups) is gitignored except
+`sample_transactions.csv` and `template_manual_transactions.csv`.
 
-A wizard-style local Flask application that guides the user through the entire workflow.
-Replaces the old `demoweb.py` prototype.
+## Critical reference docs
 
-### Running
+- **`doc/code_guidelines.md`** — universal rules (atomicity, Decimal, no silent
+  except, path safety, TDD, debugging, verification, Superpowers usage)
+- **`doc/project_guidelines.md`** — project-specific (port 5002, importer
+  pattern, validation rules)
+- **`doc/TODO.md`** — prioritised task list, kept up to date
+- **`doc/schema.sql`** — single source of truth for DB schema (test fixtures
+  read from here; never duplicate the schema in code)
+- **`doc/known_import_issues.md`** — catalog of per-exchange parsing gotchas
+  (encoding, currency suffixes, multi-line trades, etc.)
+- **`doc/en/`** + **`doc/pt/`** — end-user documentation in English/Portuguese
+
+## Database schema (summary; full DDL in `doc/schema.sql`)
+
+Three tables, all values in EUR:
+
+- **`transactions`** — BUY/SELL/DEPOSIT/WITHDRAWAL from every source.
+  Key invariants: `total_value` is gross (BEFORE fees); `fee_amount` is
+  separate (never subtracted). Each row has `source` (CSV filename),
+  `imported_at` (ISO), `record_hash` (SHA256 over normalised fields) for
+  audit trail and rollback.
+- **`fifo_lots`** — one row per BUY. Tracks `remaining_amount` and
+  `purchase_fee_total`. Cost basis = total_value + fee.
+- **`sale_lot_matches`** — one row per (SELL × consumed lot). Carries
+  `holding_period_days` (calendar-day diff, not timedelta) and proportional
+  cost basis / proceeds / gain_loss.
+
+`record_hash` formula: `SHA256("{source}|{date}|{type}|{exchange}|{crypto}|{amount:.8f}|{value:.2f}|{fee:.2f}")`.
+
+## FIFO algorithm — key invariants
+
+1. Per cryptocurrency, BUY/SELL ordered by `(transaction_date, id)`
+2. Each BUY → one `fifo_lot` with `remaining_amount = original_amount`
+3. Each SELL consumes lots starting from oldest with remaining > 0
+4. Per consumed lot: proportional cost_basis, proceeds, gain_loss
+5. **Fees included in cost basis for buys**; sale fees proportionally subtracted from proceeds
+6. **`holding_period_days`** computed on calendar dates only:
+   `(sale_dt.date() - purchase_dt.date()).days` (timezone-independent;
+   avoids the timedelta-floor 364/365 boundary bug)
+7. **EUR precision**: `Decimal(str(x))` throughout; `_to_eur()` quantizes
+   to 2 decimals for currency totals; `_to_price()` quantizes to 8 decimals
+   for unit prices (so sub-EUR tokens like SHIB don't round to 0.00)
+
+## Portuguese tax rules (config.py)
+
+Art.º 10.º CIRS, Lei 24-D/2022:
+- Holdings ≥ 365 days: **exempt** (still declare in Anexo G1, Quadro 7)
+- Holdings < 365 days: **28%** flat (Anexo J, Quadro 9.4A for foreign exchanges)
+- FIFO mandatory, all values EUR, daily aggregation per exchange per tax status
+- Filing window: April 1 — June 30. Data retention: 7 years
+
+Exchange→country map in `config.EXCHANGE_COUNTRIES` (ISO + AT numeric code +
+name). `get_exchange_at_country()` returns `('000', 'Desconhecido')` for
+unmapped exchanges; `generate_irs_report.warn_on_unknown_country_codes()`
+emits a stderr banner before report generation.
+
+## Web interface (Flask, port 5002 — 5000 is occupied by macOS ControlCenter)
+
+`web/app.py` (~1780 lines) is a thin orchestration layer. It uses
+`subprocess.run()` to call existing importer/calculator scripts, so
+importers don't need to be rewritten as Flask views.
+
+| Page | Purpose |
+|------|---------|
+| `/exchanges` | **Unified Collect+Import+Status**: per-exchange cards with file info, CSV↔DB comparison, import/re-import button, delete |
+| `/exchange-docs/<exchange>` | Per-exchange field mapping, download instructions, known issues (read from `doc/known_import_issues.md`) |
+| `/fifo` | Per-year gain/loss breakdown, current holdings; runs `calculate_fifo.py` |
+| `/reports` | IRS Excel generation by year; SQL queries from `calculators/*.sql` |
+| `/manual` | Manual transaction form for OTC, gifts, inheritance, airdrops |
+| `/audit` | Per-IRS-row drilldown to source CSV + record_hash. Print CSS for PDF export |
+| `/collect`, `/import`, `/status` | Legacy pages (kept for backward compatibility; superseded by `/exchanges`) |
+
+The SQL query runner at `/reports/query/<filename>` runs `.sql` files from
+`calculators/` (or `data/queries/` if exists) read-only, stripping `--`
+comments before checking for SELECT/WITH start.
+
+## Source tracking
+
+Three columns added to `transactions`: `source`, `imported_at`, `record_hash`.
+Use cases:
+- **Dedup**: re-import deletes by `source`, then inserts
+- **Audit**: recompute hash from CSV row → verify DB record unchanged
+- **Rollback**: `DELETE FROM transactions WHERE source = 'wirex_2024.csv'`
+
+All importers use `import_and_verify(db_path, source, insert_fn)` from
+`importers/import_utils.py` — wraps `delete_by_source` + insert loop in a
+single transaction with rollback on error.
+
+## ECB and CryptoCompare prices
+
+- **USD→EUR** via `data/eurusd.csv` (ECB official daily). `importers/ecb_rates.py`
+  with 5-day weekend/holiday fallback. USD exchanges: Bitfinex, Coinbase Prime,
+  Kraken, Mt.Gox.
+- **Crypto unit prices** via `data/crypto_prices.csv` (CryptoCompare daily).
+  `importers/crypto_prices.py` with same lookup pattern. Used for Wirex BTC
+  card payments and crypto-to-crypto trade EUR valuation.
+
+Importers ABORT if rates needed but file missing (no silent fallback to 1:1).
+
+## Enforcement layer (4 + 1 levels)
+
+1. **CLAUDE.md preamble** — Claude Code reads guidelines + invokes `before-coding`
+2. **UserPromptSubmit hook** (`scripts/hooks/skill-reminder.py`) — injects
+   reminders for keywords like "implement", "fix", "done"
+3. **PreToolUse(Bash) hook** (`scripts/hooks/pre-commit-check.sh`) — blocks
+   `git commit` from Claude on ruff/pytest fail or `except: pass` in diff
+4. **OS-level git pre-commit** (`scripts/git-hooks/pre-commit` installed by
+   `scripts/setup-enforcement.sh`) — same checks for direct terminal commits
+5. *(consolidated/health on GitHub only)*: **GitHub Actions CI** as Layer 5
+   (not present in this repo — crypto-fifo-tracker is local-only / OSS)
+
+Setup after fresh clone: `./scripts/setup-enforcement.sh`. Idempotent.
+
+---
+
+# Common commands
+
+## Setup (once per clone)
+
+```bash
+./setup.sh                         # creates venv, installs deps, initialises DB
+source venv/bin/activate
+./scripts/setup-enforcement.sh     # installs git pre-commit hook + ruff
+```
+
+## Run the web app (primary workflow)
 
 ```bash
 python3 web/app.py
 # Open http://127.0.0.1:5002
 ```
 
-Port is 5002 (not 5000 — macOS ControlCenter occupies 5000).
-
-### Architecture
-
-`web/app.py` (~1700 lines) is a self-contained Flask app. It uses `subprocess.run()`
-to call existing importer/calculator scripts, so no importers need to be rewritten
-as Flask views. The web app is a thin orchestration layer.
-
-### Visual design
-
-Dark industrial/brutalist theme. CSS variables for consistent palette.
-Sidebar navigation with step completion indicators (○ empty, ◐ partial, ● complete).
-Status bar in sidebar shows DB connection and ECB rate file status.
-
-### Pages and their roles
-
-**① Collect** (`/collect`): Upload CSV files or see what's in data/.
-Per-exchange download instructions (Binance, Coinbase, Bitstamp, etc.).
-Template download for manual/OTC transactions.
-ECB eurusd.csv freshness warning if stale or missing.
-
-**② Import** (`/import`): Files grouped by exchange. Each file has its own
-Import button and DB status badge (tx count, buys/sells). Per-file import
-via `POST /import/run-file/<filename>`. Column mapping documentation per exchange.
-
-**③ Status** (`/status`): Symmetric CSV↔DB comparison. Same metrics
-(BUY count, SELL count, dates, values, fees) extracted from both
-the CSV file and the database, displayed side by side.
-Color-coded delta column (✓ match, yellow close, red mismatch).
-Record-level matching with row-by-row diagnosis of unmatched records.
-ECB rate file panel at top: coverage dates, gaps vs USD-exchange CSVs.
-
-**④ FIFO** (`/fifo`): Per-year gain/loss breakdown, current holdings,
-auto-backup before calculation. Calls `calculators/calculate_fifo.py`.
-
-**⑤ Reports** (`/reports`): Per-exchange statistics, IRS Excel generation
-by year, download existing reports. Calls `calculators/generate_irs_report.py`.
-
-**⑥ Manual Entry** (`/manual`): Form for OTC, gifts, inheritance, airdrops.
-Records source as `web_manual_entry` with computed hash.
-
-### Key data structures in app.py
-
-**EXCHANGE_PATTERNS**: List of (regex, exchange_name, importer_script) tuples
-for detecting exchange from CSV filename. Covers all exchanges + manual sources.
-
-**EXCHANGE_FIELD_MAP**: Per-exchange documentation of CSV column → DB field mapping,
-including column names, type value mapping, and notes. Displayed on Import page.
-
-**CSV_PARSE_RULES**: Per-exchange parsing rules (date_col, type_col, amount_col, etc.)
-for deep-parsing CSV files to extract aggregate statistics for Status comparison.
-
-**USD_EXCHANGES**: Set of exchanges whose data is in USD ('Bitfinex', 'Coinbase Prime',
-'Kraken', 'Mt.Gox') — used by `check_eurusd()` to validate coverage.
-
-### Import flow
-
-All importers follow the same per-file pattern:
-```
-python3 importers/import_EXCHANGE.py <filepath> [exchange_name]
-```
-→ `delete_by_source(conn, source)` removes previous records for this file
-→ INSERT with `source`, `imported_at`, `record_hash` on every record.
-
-Each CSV file is imported individually — no concatenation or merging.
-Multi-file exchanges (Wirex yearly, Coinbase monthly) import each file
-separately. The web app route `POST /import/run-file/<filename>` detects
-the exchange and importer from the filename, then calls the importer CLI.
-
-## Source tracking system (NEW — March 2026)
-
-Three columns added to `transactions` table:
-
-| Column | Type | Purpose |
-|--------|------|---------|
-| `source` | TEXT | CSV filename that originated this record |
-| `imported_at` | TEXT | ISO timestamp of when record was imported |
-| `record_hash` | TEXT | SHA256 hash for dedup, audit, rollback |
-
-### record_hash computation
-
-```python
-SHA256(f"{source}|{date}|{type}|{exchange}|{crypto}|{amount:.8f}|{value:.2f}|{fee:.2f}")
-```
-
-Same inputs always produce same hash. Used for:
-- **Deduplication**: on APPEND import, skip records whose hash already exists in DB
-- **Audit**: verify DB record matches CSV row by recomputing hash
-- **Incremental import** (future): import only new rows from updated CSV
-
-### Rollback by source
-
-```sql
--- Remove all records from a specific file
-DELETE FROM transactions WHERE source = 'wirex_2024.csv';
-
--- Remove everything imported today
-DELETE FROM transactions WHERE imported_at >= '2026-03-02';
-```
-
-### Migration scripts
-
-- `migrate_add_source_tracking.py`: ALTER TABLE + indexes. Safe to run multiple times.
-  Creates automatic backup before migration.
-- `backfill_source_hash.py`: One-time backfill for existing records. Infers source
-  from exchange_name → CSV file mapping. Computes hash for all records.
-  Multi-file exchanges get `[file1+file2+file3]` as source.
-
-### Shared utilities
-
-`importers/import_utils.py` provides:
-- `compute_record_hash()` — deterministic SHA256
-- `delete_by_source()` — surgical DELETE by source file
-
-## Database schema
-
-SQLite3. Three tables, all values in EUR.
-
-### transactions
-Every BUY, SELL, DEPOSIT, WITHDRAWAL from every exchange.
-```sql
-id, transaction_date (ISO 8601), transaction_type, exchange_name,
-cryptocurrency, amount, price_per_unit, total_value (gross, BEFORE fees),
-fee_amount (separate), fee_currency, currency, transaction_id, notes, created_at,
-source, imported_at, record_hash
-```
-- `total_value` = amount × price_per_unit (gross, no fee deducted)
-- `fee_amount` is always separate, never subtracted from total_value
-- `transaction_type` CHECK constraint: BUY, SELL, DEPOSIT, WITHDRAWAL
-- `source` = CSV filename or 'web_manual_entry' or 'manual_entry'
-- `record_hash` = SHA256 for dedup and audit
-
-### fifo_lots
-Each BUY creates one lot. Lots are consumed by SELLs in chronological order.
-```sql
-id, purchase_transaction_id (FK), cryptocurrency, purchase_date,
-original_amount, remaining_amount, purchase_price_per_unit,
-cost_basis (total_value + fee), purchase_fee_total, exchange_name, created_at
-```
-
-### sale_lot_matches
-Each SELL is matched to one or more FIFO lots (oldest first).
-```sql
-id, sale_transaction_id (FK), fifo_lot_id (FK), sale_date, purchase_date,
-cryptocurrency, amount_sold, purchase_price_per_unit, sale_price_per_unit,
-cost_basis, proceeds, gain_loss, holding_period_days, created_at
-```
-
-### Indexes
-```sql
-idx_transactions_source      ON transactions(source)
-idx_transactions_hash        ON transactions(record_hash)
-idx_transactions_imported_at ON transactions(imported_at)
-```
-
-## FIFO algorithm
-
-1. For each cryptocurrency separately:
-2. Get all BUY and SELL ordered by date, then by id
-3. For each BUY: create fifo_lot with remaining_amount = original_amount
-4. For each SELL: consume lots starting from oldest with remaining > 0
-5. For each lot consumed: proportional cost_basis, proceeds, gain_loss, holding_period_days
-
-**Critical**: Fees INCLUDED in cost_basis for buys. Sale fees proportionally
-distributed. FIFO order strictly chronological.
-
-## Portuguese tax rules
-
-Config: `config.py`. Legal basis: Art.º 10.º CIRS, Lei 24-D/2022.
-
-- Holdings ≥ 365 days: **exempt** (must still declare in Anexo G1, Quadro 07)
-- Holdings < 365 days: taxed at **28%** flat (Anexo J, Quadro 9.4A for foreign)
-- FIFO mandatory, all values EUR, daily aggregation per exchange per tax status
-- Filing: April 1 — June 30. Data retention: 7 years.
-
-## ECB rate conversion
-
-USD→EUR via `data/eurusd.csv`. USD exchanges: Bitfinex, Coinbase Prime, Kraken, Mt.Gox.
-Web app checks coverage vs CSV date ranges, warns if stale (>30d) or gaps exist.
-
-## Crypto price data (CryptoCompare)
-
-Daily closing prices for BTC, BCH, ETH in EUR from CryptoCompare API.
-Stored in `data/crypto_prices.csv` (format: `date,coin,close_eur`).
-
-**Download**: `python3 importers/fetch_crypto_prices.py [coins...] [--full]`
-- Default coins: BTC, BCH, ETH
-- Incremental mode: appends only new dates to existing file
-- `--full` flag: re-downloads all history from scratch
-- API: `https://min-api.cryptocompare.com/data/v2/histoday` (free, no API key)
-
-**Lookup module**: `importers/crypto_prices.py`
-```python
-from importers.crypto_prices import CryptoPrices
-prices = CryptoPrices('data/crypto_prices.csv')
-eur_price = prices.get_eur_price('BTC', '2017-10-25')   # → 4876.32
-eur_total = prices.crypto_to_eur('BTC', 0.5, '2017-10-25')  # → 2438.16
-```
-- Mirrors `ECBRates` pattern: load CSV once, lookup by (coin, date)
-- 5-day fallback for weekends/holidays
-- Used by: `import_wirex.py` (BTC card payments), `import_standard_csv.py`
-  (crypto-to-crypto EUR valuation), status page parser (Wirex)
-
-**Coverage**: BTC from 2011-08-27, BCH from 2017-08-01, ETH from 2015-08-07.
-
-## Exchange CSV files and their importers
-
-| Exchange | Importer | Format | Multi-file |
-|----------|----------|--------|------------|
-| Binance | import_binance_with_fees.py | exchange-specific | No |
-| Binance Card | import_binance_card.py | exchange-specific | No |
-| Binance OTC | import_standard_csv.py | standard | No |
-| Coinbase | import_coinbase_standalone.py | exchange-specific | Yes (monthly) |
-| Coinbase Prime | import_coinbase_prime.py | exchange-specific | No |
-| Bitstamp | import_bitstamp_with_fees.py | exchange-specific | No |
-| Bitfinex | import_bitfinex_ecb.py (USD→EUR) | exchange-specific | No |
-| Kraken | import_kraken_with_fees.py | exchange-specific | No |
-| Mt.Gox | import_mtgox_with_fees.py | exchange-specific | No |
-| TRT | import_trt_with_fees.py | exchange-specific | No |
-| Wirex | import_wirex.py | exchange-specific | Yes (yearly) |
-| Revolut | import_revolut.py | exchange-specific | No |
-| changely | import_standard_csv.py | standard | No |
-| Coinpal | import_standard_csv.py | standard | No |
-| GDTRE | import_standard_csv.py | standard | No |
-| Inheritance | import_standard_csv.py | standard | No |
-| OTC | import_standard_csv.py | standard | No |
-
-Standard CSV template: `data/template_manual_transactions.csv`.
-Required: transaction_date, transaction_type, exchange_name, cryptocurrency, amount, total_value.
-
-## Configuration
-
-`config.py`: DATABASE_PATH, EXEMPT_HOLDING_DAYS (365), SHORT_TERM_RATE (0.28),
-EXCHANGE_COUNTRIES. Env overrides: FIFO_COUNTRY, FIFO_DB.
-
-## Test suite
-
-`tests/test_fifo_workflow.py` — 9 test functions (~33 assertions). Run: `python3 tests/test_fifo_workflow.py`
-
-## Dependencies
-
-```
-flask, pandas, openpyxl, pytz, requests
-```
-
-## Known issues and TODO
-
-- [x] ~~Exchange-specific importers still DELETE by exchange_name~~ — all 11 importers
-      now use `delete_by_source()` and accept `<filepath> [exchange_name]` CLI arguments.
-- [x] ~~`generate_irs_report.py` line 612 path bug~~ — verified correct.
-- [x] ~~Crypto-to-crypto trades (changely, OTC) only recorded one side~~ — fixed in
-      `import_standard_csv.py`: now creates sideA + sideB with EUR values from CryptoPrices.
-- [x] ~~Wirex EUR values were yearly estimates~~ — now uses CryptoCompare daily prices.
-- [x] ~~No crypto price data source~~ — CryptoCompare API integrated (BTC/BCH/ETH daily from 2011).
-- [ ] Report generators in `reports/` could be consolidated into `calculators/`
-- [ ] Exchange country code formats not unified between config.py and generate_irs_report.py
-- [ ] No automated ECB rate fetching
-- [ ] Web status page record matching could use record_hash once all importers set it natively
-- [ ] Test suite uses embedded FIFO calculator — ideally test crypto_fifo_tracker.py directly
-- [ ] Binance status page: USDT fees not converted to EUR (display-only, DB correct) — +€19.57
-- [ ] Binance Card status page: `abs()` on negative differenza (display-only) — +€95.83
-- [ ] Bybit CSV missing from data/ — 1 BUY in DB but no source file
-- [ ] Kraken: verify if ledger CSV is complete (user suspects missing trades)
-
-## Development workflow
+## CLI workflow (alternative)
 
 ```bash
-git checkout -b feature/NAME
-
-# Web app (hot reload)
-python3 web/app.py
-
-# Test routes
-python3 -c "
-from web.app import app; app.config['TESTING']=True; c=app.test_client()
-for r in ['/','/collect','/import','/status','/fifo','/reports','/manual']:
-    print(f'{r:15s} → {c.get(r,follow_redirects=True).status_code}')
-"
-
-# FIFO tests
-python3 tests/test_fifo_workflow.py
-
-# Merge
-git checkout main && git merge --no-ff feature/NAME
+python3 importers/import_<exchange>.py data/<file>.csv [exchange_name]
+python3 calculators/calculate_fifo.py            # recalculate all FIFO lots
+python3 calculators/generate_irs_report.py 2024  # generates data/reports/IRS_Crypto_FIFO_2024.xlsx
 ```
 
-## Code guidelines e TODO
+## Tests, lint, smoke
 
-**Regole universali**: `doc/code_guidelines.md` — vincolanti per tutti i progetti.
-Coprono: integrità dati, gestione errori, sicurezza, architettura, testing/TDD,
-debugging sistematico, verifica completamento, workflow, uso Superpowers.
+```bash
+venv/bin/pytest tests/ -q                        # full suite (~50 tests)
+venv/bin/pytest tests/test_irs_report.py -v      # one file
+venv/bin/pytest tests/ -k "holding_period"       # one test pattern
+ruff check .                                     # static analysis
+ruff check . --fix                               # auto-fix safe issues
 
-**Regole specifiche progetto**: `doc/project_guidelines.md` — precisione numerica (Decimal per EUR),
-validazione input (BUY/SELL/...), pattern importers, conversione valute, schema DB, deploy.
+# Web-app smoke test (no DB writes)
+python3 -c "
+from web.app import app; app.config['TESTING']=True; c=app.test_client()
+for r in ['/','/exchanges','/fifo','/reports','/manual','/audit']:
+    print(f'{r:15s} -> {c.get(r,follow_redirects=True).status_code}')
+"
+```
 
-**TODO di progetto**: `doc/TODO.md` — lista prioritizzata delle cose da fare.
-Aggiornare ad ogni sessione. Include: fix di integrità, refactoring, testing, infrastruttura.
+## Backup data/ to Google Drive
 
-### Workflow di sviluppo (checklist)
+```bash
+./backup_drive.sh                   # rclone sync to gdrive:crypto-fifo-tracker/backups
+./backup_drive.sh --dry-run         # preview without uploading
+```
 
-1. Valutare se creare un branch (`feature/descrizione`)
-2. Pianificare: cosa fare, quali test scrivere/eseguire, documentazione da aggiornare
-3. Sviluppare seguendo `doc/code_guidelines.md`
-4. Aggiornare la documentazione (CLAUDE.md, guide) durante lo sviluppo
-5. Eseguire test rilevanti e documentare l'esito
-6. Analisi statica: `ruff check .` (o equivalente)
-7. Committare con messaggio descrittivo
-8. Aggiornare `doc/TODO.md` se task completate o nuove emerse
+## Useful SQL queries (in `calculators/`, runnable from `/reports` page)
+
+- `BTC_esenti_per_vendita.sql` — lots sellable tax-exempt today, with cumulative total
+- `Maturing_lots.sql` — lots approaching 365-day boundary, ordered by days remaining
+- `BTC_to_sell_per_purchase_year.sql` — remaining BTC by purchase year
+- `transactions_per_exchange.sql`, `transactions_per_years.sql` — overview queries
+
+## Development workflow (see also `before-coding` skill)
+
+```bash
+git checkout -b feature/NAME       # branch first for non-trivial changes
+# ... TDD red-green-refactor ...
+venv/bin/pytest tests/ -q && ruff check .
+git commit -m "..."                # pre-commit hook re-runs both
+git checkout main && git merge --no-ff feature/NAME
+git push origin main
+```
+
+# Configuration
+
+`config.py` — country profile, `DATABASE_PATH`, `PROJECT_ROOT`,
+`EXCHANGE_COUNTRIES`. Env overrides:
+- `FIFO_COUNTRY` (default `PT`)
+- `FIFO_DB` (default `data/crypto_fifo.db` resolved from PROJECT_ROOT)
+
+All paths in `config.py` are absolute, derived from `__file__`. No relative
+paths in defaults (see code_guidelines.md §4.1).
+
+# Dependencies
+
+`flask`, `flask-wtf` (CSRF), `pandas`, `openpyxl`, `requests`. Dev: `pytest`,
+`ruff`. Python 3.11+. Replaces `pytz` with stdlib `zoneinfo`.
