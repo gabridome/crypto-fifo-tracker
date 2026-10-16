@@ -91,9 +91,22 @@ def _print_convert_warning(converts):
 
 
 def _print_zero_proceeds_warning(zero_out):
-    """Announce every zero-proceeds withdrawal, the other side of the same fork."""
-    print(f'  ⚠ {len(zero_out)} withdrawal row(s) recorded as a TRANSFER (no proceeds) — '
-          f'confirm none of them was a sale:', file=sys.stderr)
+    """Announce every outgoing transfer the import recorded as non-taxable.
+
+    This lists the *whole* class, not a filtered-down set of doubtful rows —
+    on a real export that can run to dozens of lines, most of them a plain
+    'Send' or an ordinary 'Withdraw' that was never ambiguous. It cannot be
+    narrower: which export label produced a given TRANSFER_OUT (a plain
+    send vs. a withdrawal whose fiat subtotal happened to come back blank)
+    is a fact of the reader's classification, not of the normalized row
+    this function receives — non_btc_readers deliberately does not carry
+    that provenance into `kind`, and widening that contract just for this
+    warning is not worth it. So the header must say what the list actually
+    is (everything in this category) rather than implying a shortlist of
+    suspects it cannot produce.
+    """
+    print(f'  ⚠ {len(zero_out)} outgoing transfer(s) recorded as non-taxable — none of these '
+          f'produced a disposal; confirm that is right:', file=sys.stderr)
     for r in zero_out:
         print(f"      {r['when'][:10]}  {r['give_amount']:.8f} {r['give_asset']} out",
               file=sys.stderr)

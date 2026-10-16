@@ -202,7 +202,14 @@ def test_convert_rows_are_listed_for_confirmation(db_path, tmp_path, capsys):
 
 
 def test_zero_proceeds_withdrawals_are_listed_too(db_path, tmp_path, capsys):
-    """The transfer side of the fork gets the same confirmation list."""
+    """The transfer side of the fork gets its own list, honestly scoped.
+
+    It lists the whole TRANSFER_OUT class, not just the doubtful rows —
+    the ambiguity (which export label produced this row) is not carried in
+    the normalized row, so the warning cannot claim to have shortlisted
+    anything. The wording must say that plainly rather than imply a
+    filtered-down set of suspects.
+    """
     export = tmp_path / 'account_history.csv'
     export.write_text(
         'ID,Timestamp,Transaction Type,Asset,Quantity Transacted,Price Currency,'
@@ -214,7 +221,7 @@ def test_zero_proceeds_withdrawals_are_listed_too(db_path, tmp_path, capsys):
                          shape='account_history', db_path=db_path, rates=_FakeRates())
 
     err = capsys.readouterr().err
-    assert 'recorded as a TRANSFER' in err
+    assert 'recorded as non-taxable' in err
     assert '25.00000000 USDC' in err
 
 
