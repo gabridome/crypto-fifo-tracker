@@ -1072,10 +1072,20 @@ class Rates:
         self._crypto = CryptoPrices()
 
     def fiat_to_eur(self, amount, currency, when):
+        """Keep these parameter names: value_row calls by keyword on purpose.
+
+        The plan once had the crypto call's arguments swapped, and only the
+        test double's parameter names turned it into a TypeError instead of a
+        silently wrong figure (task 5 review). Renaming a parameter here
+        breaks the call loudly, which is the point.
+        """
         if currency == 'EUR':
             return amount
         if currency != 'USD':
-            raise ValueError(f'no rate source for fiat {currency}')
+            raise ValueError(
+                f'no rate source for fiat {currency}: add one before importing '
+                f'an export denominated in it rather than treating it as EUR '
+                f'(doc/project_guidelines.md §Conversione valute)')
         return self._ecb.usd_to_eur(amount, datetime.fromisoformat(when))
 
     def crypto_to_eur(self, coin, amount, when):
@@ -1097,7 +1107,14 @@ def import_non_btc_legs(filepath, exchange_name, shape, db_path=None):
     with open(filepath, encoding='utf-8-sig') as fh:
         rows = list(READERS[shape](fh, exchange_name))
 
-    txs = [tx for row in rows for tx in value_row(row, rates)
+    # row_ref must be unique per row: value_row folds it into the swap id, and
+    # the real export has 74 crypto-to-crypto trades sharing one timestamp with
+    # no order id, two pairs of which are identical on both quantities. Without
+    # it, distinct swaps would share an inheritance key (task 5 refuses a swap
+    # with a blank row_ref rather than minting a colliding id).
+    txs = [tx
+           for i, row in enumerate(rows)
+           for tx in value_row(row, rates, row_ref=f'{source}#{i}')
            if tx['cryptocurrency'] != 'BTC']
 
     print(f'  {len(rows)} rows read, {len(txs)} non-BTC legs to write')
@@ -1166,12 +1183,53 @@ if __name__ == '__main__':
 Run: `venv/bin/pytest tests/test_import_non_btc_legs.py -v`
 Expected: 3 passed (migration + the two above).
 
-- [ ] **Step 5: Run ruff and the whole suite, then commit**
+- [ ] **Step 5: Pin the fee contract on its own**
+
+`_apply_fee` is exercised today only through `value_row`'s branches. Tasks 9-11
+will depend on its `give_total` — "what was actually disposed" — so pin the
+contract where it can be read without the valuation around it. Add to
+`tests/test_non_btc_valuation.py`:
+
+```python
+from importers.non_btc_valuation import _apply_fee
+
+
+def test_apply_fee_no_fee_is_a_passthrough():
+    assert _apply_fee('BTC', 2.0, 'USDT', 1000.0, '', 0.0) == (1000.0, 2.0)
+
+
+def test_apply_fee_in_the_received_asset_reduces_it():
+    take, give_total = _apply_fee('BTC', 2.0, 'USDT', 1000.0, 'USDT', 2.0)
+    assert (take, give_total) == (998.0, 2.0)
+
+
+def test_apply_fee_in_the_given_asset_inflates_the_disposal():
+    take, give_total = _apply_fee('BTC', 2.0, 'USDT', 1000.0, 'BTC', 0.01)
+    assert take == 1000.0
+    assert give_total == pytest.approx(2.01)
+
+
+def test_apply_fee_refuses_a_blank_asset():
+    with pytest.raises(ValueError, match='no asset'):
+        _apply_fee('BTC', 2.0, 'USDT', 1000.0, '', 5.0)
+
+
+def test_apply_fee_refuses_a_third_asset():
+    with pytest.raises(ValueError, match='neither leg'):
+        _apply_fee('BTC', 2.0, 'USDT', 1000.0, 'BNB', 0.5)
+
+
+def test_apply_fee_refuses_consuming_the_whole_leg():
+    with pytest.raises(ValueError, match='consumes the whole'):
+        _apply_fee('BTC', 2.0, 'USDT', 1000.0, 'USDT', 1000.0)
+```
+
+- [ ] **Step 6: Run ruff and the whole suite, then commit**
 
 ```bash
 venv/bin/ruff check .
 venv/bin/pytest tests/ -q
-git add importers/import_non_btc_legs.py tests/test_import_non_btc_legs.py
+git add importers/import_non_btc_legs.py tests/test_import_non_btc_legs.py tests/test_non_btc_valuation.py
 git commit -m "feat(importers): import_non_btc_legs with an additive source tag"
 ```
 
