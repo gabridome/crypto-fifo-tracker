@@ -118,15 +118,18 @@ def pre_migration_db():
 class _FakeRates:
     """No-network rate source for these tests: EUR passes through unchanged.
 
-    None of the fixtures below price anything other than a plain EUR leg —
-    there is no USD-denominated row and no crypto-to-crypto swap among them.
-    Constructing the real `Rates()` anyway would still build an `ECBRates`
-    and a `CryptoPrices`, which read CSV caches by a path relative to the
-    working directory and may reach out to the network when the cache looks
-    stale (see import_non_btc_legs.Rates). A unit test must not depend on
-    either, which is exactly why `import_non_btc_legs` takes a `rates=`
-    seam — these tests use it, which is a required adaptation of the task's
-    own verbatim test calls (none of which pass `rates=` as written).
+    Constructing the real `Rates()` would build an `ECBRates` and a
+    `CryptoPrices`, which read CSV caches by a path relative to the working
+    directory and may reach out to the network when the cache looks stale
+    (see import_non_btc_legs.Rates). A unit test must not depend on either,
+    which is exactly why `import_non_btc_legs` takes a `rates=` seam — these
+    tests use it, which is a required adaptation of the task's own verbatim
+    test calls (none of which pass `rates=` as written).
+
+    `crypto_to_eur` uses a fixed rate (2.0) rather than refusing outright:
+    the swap_group_id end-to-end test below needs a real crypto-to-crypto
+    leg to price, and the fixed rate is enough to prove the two legs link —
+    no test here asserts a specific valuation figure from it.
     """
 
     def fiat_to_eur(self, amount, currency, when):
@@ -135,7 +138,7 @@ class _FakeRates:
         return amount
 
     def crypto_to_eur(self, coin, amount, when):
-        raise AssertionError('crypto_to_eur should not be called by these fixtures')
+        return amount * 2.0
 
 
 def _seed_btc_row(db_path, source):
@@ -237,6 +240,110 @@ def test_import_is_idempotent(db_path, tmp_path):
         'SELECT record_hash FROM transactions ORDER BY id').fetchall()
 
     assert first == second and len(first) == 1
+
+
+def test_failed_row_names_the_row_and_leaves_nothing_written(db_path, tmp_path):
+    """The property that matters most: a mid-import failure must not touch
+    the database at all — not the BTC row from another importer, not a
+    non-BTC leg a *previous*, successful run of this importer already wrote
+    from the same file. value_row is walked over every row before
+    import_and_verify (and therefore before any delete) is ever called, so
+    a later row's failure must propagate before a single statement runs.
+
+    Also covers the companion fix: `_apply_fee`'s own message ("fee charged
+    in BNB, which is neither leg...") names only amounts and symbols, which
+    does not localize a row on a real export where several rows share a fee
+    amount. The index and the row's own date/kind must be in the raised
+    message too.
+    """
+    export = tmp_path / 'trade_history.csv'
+    export.write_text(
+        'Date(UTC),Pair,Side,Executed,Amount,Fee,Order No.\n'
+        '2024-04-01 09:00:00,USDCEUR,BUY,1000.000000,930.000000,0,o1\n'
+    )
+    _seed_btc_row(db_path, export.name)
+    inserted = import_non_btc_legs(str(export), 'Bybit', 'trade_history', db_path,
+                                    rates=_FakeRates())
+    assert inserted == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        before_btc = conn.execute(
+            "SELECT record_hash FROM transactions WHERE cryptocurrency='BTC'").fetchall()
+        before_legs = conn.execute(
+            "SELECT record_hash FROM transactions WHERE cryptocurrency!='BTC' "
+            "ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    assert before_btc and before_legs  # sanity: both kinds of row exist before the failing call
+
+    # Re-import the same file, now with a second row whose fee is in a third
+    # asset (BNB) — _apply_fee refuses it. The first row's amount is changed
+    # (930 -> 931) so that if it were ever re-inserted before the second row
+    # is reached, the hash comparison below would actually notice — a row
+    # that happened to come out byte-identical to the one it replaced would
+    # hide a partial-write bug behind an unchanged hash.
+    export.write_text(
+        'Date(UTC),Pair,Side,Executed,Amount,Fee,Order No.\n'
+        '2024-04-01 09:00:00,USDCEUR,BUY,1000.000000,931.000000,0,o1\n'
+        '2024-04-02 11:00:00,BTCUSDT,SELL,2.000000,120000.000000,0.5BNB,o2\n'
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        import_non_btc_legs(str(export), 'Bybit', 'trade_history', db_path, rates=_FakeRates())
+    message = str(exc_info.value)
+    assert 'row 1' in message
+    assert '2024-04-02' in message
+    assert 'TRADE' in message
+    assert 'neither leg' in message  # the wrapped message, not swallowed
+
+    conn = sqlite3.connect(db_path)
+    try:
+        after_btc = conn.execute(
+            "SELECT record_hash FROM transactions WHERE cryptocurrency='BTC'").fetchall()
+        after_legs = conn.execute(
+            "SELECT record_hash FROM transactions WHERE cryptocurrency!='BTC' "
+            "ORDER BY id").fetchall()
+    finally:
+        conn.close()
+
+    assert after_btc == before_btc, 'the BTC row changed after a failed non-btc import'
+    assert after_legs == before_legs, 'the previous successful leg changed after a failed import'
+
+
+def test_crypto_to_crypto_swap_round_trips_swap_group_id(db_path, tmp_path):
+    """Both legs of a non-BTC swap must land in the DB sharing one swap_group_id.
+
+    Column existence is the migration test's job; the id's shape (stable,
+    collision-resistant) is value_row's own unit tests. Neither proves that
+    an actual end-to-end import — through a real reader, through this
+    importer's INSERT — ever puts a non-null, shared id into the database.
+    Tasks 9-11 are keyed on exactly this column, so this is the missing
+    middle: read back out of the database, not just asserted on the
+    in-memory dicts value_row returns.
+    """
+    export = tmp_path / 'trade_history.csv'
+    export.write_text(
+        'Date(UTC),Pair,Side,Executed,Amount,Fee,Order No.\n'
+        '2024-05-01 09:00:00,USDCUSDT,SELL,1000.000000,999.000000,0,o1\n'
+    )
+
+    inserted = import_non_btc_legs(str(export), 'Bybit', 'trade_history', db_path,
+                                    rates=_FakeRates())
+
+    assert inserted == 2
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT cryptocurrency, transaction_type, swap_group_id FROM transactions "
+            "ORDER BY cryptocurrency").fetchall()
+    finally:
+        conn.close()
+
+    assert [r[0] for r in rows] == ['USDC', 'USDT']
+    assert [r[1] for r in rows] == ['SELL', 'BUY']
+    assert rows[0][2] is not None
+    assert rows[0][2] == rows[1][2]
 
 
 def test_migration_adds_swap_group_id(pre_migration_db):

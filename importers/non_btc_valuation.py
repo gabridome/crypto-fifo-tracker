@@ -118,6 +118,12 @@ def _tx(row, tx_type, crypto, amount, total_value, swap_group_id=None):
         'exchange_name': row['exchange'],
         'transaction_id': row['ref'],
         'swap_group_id': swap_group_id,
+        # Not a DB column — the row's own classification (TRADE/CONVERT/...),
+        # carried through for whoever writes the row (import_non_btc_legs
+        # puts it in `notes`) so an /audit trace does not have to re-derive
+        # it by eye from the figures alone. Belongs here, not reconstructed
+        # one layer up: this function already has `row` in hand.
+        'kind': row['kind'],
     }
 
 

@@ -39,8 +39,14 @@ READERS = {
 class Rates:
     """The project's rate sources behind the interface valuation expects.
 
-    A missing rate aborts the import (doc/project_guidelines.md §Conversione
-    valute): a leg valued with a guessed rate is worse than no leg.
+    A missing rate aborts the import for crypto prices, and for any fiat
+    other than EUR/USD (doc/project_guidelines.md §Conversione valute): a
+    leg valued with a guessed rate is worse than no leg. USD is the one
+    exception, and it is pre-existing behaviour this class inherits rather
+    than a guarantee it makes itself: `ECBRates.get_rate()` falls back to
+    the nearest available date (with only a print, not a raise) when the
+    exact day's rate is missing. A future reader should not assume "aborts
+    on any missing rate" covers that path too.
     """
 
     def __init__(self):
@@ -139,14 +145,20 @@ def import_non_btc_legs(filepath, exchange_name, shape, db_path=None, rates=None
     # it, distinct swaps would share an inheritance key (task 5 refuses a swap
     # with a blank row_ref rather than minting a colliding id).
     #
-    # Each tx also carries the row it came from (`_row`), not stored in the
-    # DB but used below to put the row's kind (TRADE/CONVERT/...) into
-    # `notes` — the one thing in this file an /audit trace would otherwise
-    # have to re-derive by eye from the figures alone.
-    txs = [(tx, row)
-           for i, row in enumerate(rows)
-           for tx in value_row(row, rates, row_ref=f'{source}#{i}')
-           if tx['cryptocurrency'] != 'BTC']
+    # Each row is valued on its own, and a failure is re-raised naming the
+    # row (its index and when/kind — never an amount, per §3.3) rather than
+    # just the figures _apply_fee already names. "fee of 5.0 with no asset"
+    # does not localize anything on a real export where several rows share
+    # that amount; the row context is cheap to add here and wrong to add
+    # inside the pure valuation layer, which has no concept of "which row in
+    # this import".
+    txs = []
+    for i, row in enumerate(rows):
+        try:
+            row_txs = list(value_row(row, rates, row_ref=f'{source}#{i}'))
+        except ValueError as exc:
+            raise ValueError(f'row {i} ({row["when"]}, {row["kind"]}): {exc}') from exc
+        txs.extend(tx for tx in row_txs if tx['cryptocurrency'] != 'BTC')
 
     print(f'  {len(rows)} rows read, {len(txs)} non-BTC legs to write')
 
@@ -161,7 +173,7 @@ def import_non_btc_legs(filepath, exchange_name, shape, db_path=None, rates=None
 
     def do_inserts(conn):
         cursor = conn.cursor()
-        for tx, row in txs:
+        for tx in txs:
             cursor.execute("""
                 INSERT INTO transactions (
                     transaction_date, transaction_type, exchange_name, cryptocurrency,
@@ -191,7 +203,7 @@ def import_non_btc_legs(filepath, exchange_name, shape, db_path=None, rates=None
                 # bare EUR figure with no provenance.
                 'EUR', 'EUR',
                 tx['transaction_id'],
-                f"{row['kind']} leg from {os.path.basename(filepath)}",
+                f"{tx['kind']} leg from {os.path.basename(filepath)}",
                 source, imported_at,
                 compute_record_hash(source, tx['transaction_date'], tx['transaction_type'],
                                     tx['exchange_name'], tx['cryptocurrency'],
@@ -207,4 +219,10 @@ if __name__ == '__main__':
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(1)
-    import_non_btc_legs(sys.argv[1], sys.argv[3] if len(sys.argv) > 3 else 'Unknown', sys.argv[2])
+    if len(sys.argv) > 3:
+        cli_exchange_name = sys.argv[3]
+    else:
+        cli_exchange_name = 'Unknown'
+        print("  note: no exchange_name given — tagging every row 'Unknown' "
+              "(pass it as a third argument to avoid this)", file=sys.stderr)
+    import_non_btc_legs(sys.argv[1], cli_exchange_name, sys.argv[2])
