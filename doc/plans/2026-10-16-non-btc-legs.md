@@ -10,16 +10,16 @@
 
 ---
 
-## Scope note, read before Task 7
+## Scope note on the tax rule
 
-The spec (§7) describes both values of `swap_realizes`. This plan implements the
-parameter, the plumbing and the `True` path — today's behaviour, consistent with
-figures already filed. `False` requires a deferral engine (the acquired asset
-inherits the date and value of the asset given up) and the jurisdiction answer
-that would justify it is still open, so Task 7 makes `False` fail loudly instead
-of guessing. The data model carries `swap_group_id` from Task 1, so adding the
-deferral path later is a recalculation and not a re-import, exactly as the spec
-promises.
+Both values of `swap_realizes` are implemented. `True` is today's behaviour and
+the default: a swap is a disposal of the asset given up. `False` is the
+deferral regime: the swap realizes nothing, the lots of the asset given up are
+consumed, and the asset received inherits **one lot per lot consumed**, each
+with its original acquisition date and cost — which is what keeps the
+365-day clock honest. Tasks 8-11 build it. Which value is correct for a given
+jurisdiction is a question for a tax professional, not for this repo: the
+setting exists so the answer can be applied without re-importing anything.
 
 ## File structure
 
@@ -33,7 +33,8 @@ promises.
 | `calculators/crypto_fifo_tracker.py` (modify) | read `swap_realizes`, refuse `False` |
 | `doc/compliance.md` (create) | the evidence method, no data |
 | `doc/en/crypto_to_crypto_guide.md`, `doc/pt/crypto_to_crypto_guide.md` (modify) | assumption, not law |
-| `tests/test_non_btc_readers.py`, `tests/test_non_btc_valuation.py`, `tests/test_import_non_btc_legs.py`, `tests/test_swap_realizes.py` (create) | one test module per unit |
+| `calculators/update_fifo_schema_swap_transfers.py` (create) | migration: `swap_lot_transfers` |
+| `tests/test_non_btc_readers.py`, `tests/test_non_btc_valuation.py`, `tests/test_import_non_btc_legs.py`, `tests/test_swap_realizes.py`, `tests/test_swap_deferral.py` (create) | one test module per unit |
 
 Normalized row — the contract between readers and valuation, used by every task:
 
@@ -978,23 +979,18 @@ def test_module_exports_the_flag():
     assert config.SWAP_REALIZES is True
 
 
-def test_deferral_path_refuses_instead_of_guessing(db_path, monkeypatch):
-    """swap_realizes=False needs a deferral engine we have not built: say so."""
-    from calculators.crypto_fifo_tracker import CryptoFIFOTracker
+def test_engine_reads_the_flag():
+    """The engine must import the flag, not re-read config at call time."""
+    import calculators.crypto_fifo_tracker as engine
 
-    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
-    tracker = CryptoFIFOTracker(db_path)
-    try:
-        with pytest.raises(NotImplementedError, match='swap_realizes'):
-            tracker.calculate_fifo_lots('BTC')
-    finally:
-        tracker.close()
+    assert hasattr(engine, 'SWAP_REALIZES')
 ```
 
 - [ ] **Step 2: Run it and watch it fail**
 
 Run: `venv/bin/pytest tests/test_swap_realizes.py -v`
-Expected: FAIL — `KeyError: 'swap_realizes'` on the first test.
+Expected: FAIL — `KeyError: 'swap_realizes'` on the first test, `AttributeError`
+on the third.
 
 - [ ] **Step 3: Add the setting to `config.py`**
 
@@ -1011,26 +1007,17 @@ and with the other module-level exports (after `DECLARE_EXEMPT`, line ~134):
 SWAP_REALIZES = _profile["tax_rules"].get("swap_realizes", True)
 ```
 
-- [ ] **Step 4: Honour it in the engine**
+- [ ] **Step 4: Let the engine read it**
 
-In `calculators/crypto_fifo_tracker.py`, next to the `DUST_THRESHOLD` import
-block at the top:
+In `calculators/crypto_fifo_tracker.py`, with the imports at the top:
 
 ```python
 from config import SWAP_REALIZES
 ```
 
-and as the first statement of `calculate_fifo_lots` (line 107, before the
-`print`):
-
-```python
-        if not SWAP_REALIZES:
-            raise NotImplementedError(
-                'swap_realizes=False requires the deferral path (the acquired asset '
-                'inherits date and value of the asset given up), which is not '
-                'implemented. See doc/specs/2026-10-16-non-btc-legs-design.md §7.'
-            )
-```
+Nothing else in this task: Tasks 9-11 are what act on it. Importing it by name
+(rather than reading `config` inside the loop) is what lets the tests set it
+with `monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', …)`.
 
 - [ ] **Step 5: Run it and watch it pass**
 
@@ -1058,7 +1045,647 @@ git commit -m "feat(config): swap_realizes as a declared tax rule, deferral path
 
 ---
 
-### Task 8: Documentation
+### Task 8: `swap_lot_transfers` — the table that carries inheritance
+
+Under deferral, a swap does not realize: the lots of the asset given up are
+consumed and their **acquisition date and cost** move to the asset received.
+That crossing has to survive between two per-crypto passes of the engine, and
+it has to be auditable, so it is a table and not a variable.
+
+**Files:**
+- Create: `calculators/update_fifo_schema_swap_transfers.py`
+- Modify: `doc/schema.sql`
+- Test: `tests/test_swap_deferral.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+"""Deferral path: a swap that does not realize, and the inheritance it creates."""
+import os
+import sqlite3
+import subprocess
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
+
+
+def test_migration_creates_swap_lot_transfers(db_path):
+    script = os.path.join(PROJECT_ROOT, 'calculators', 'update_fifo_schema_swap_transfers.py')
+
+    for _ in range(2):  # idempotent
+        r = subprocess.run([sys.executable, script, db_path], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+
+    conn = sqlite3.connect(db_path)
+    try:
+        cols = [row[1] for row in conn.execute('PRAGMA table_info(swap_lot_transfers)')]
+    finally:
+        conn.close()
+
+    assert cols == ['id', 'swap_group_id', 'from_cryptocurrency', 'to_cryptocurrency',
+                    'swap_date', 'source_purchase_date', 'amount_from', 'cost_basis',
+                    'created_at']
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `venv/bin/pytest tests/test_swap_deferral.py -v`
+Expected: FAIL — the script does not exist.
+
+- [ ] **Step 3: Write the migration**
+
+```python
+#!/usr/bin/env python3
+"""Create swap_lot_transfers — lot inheritance across a deferred swap.
+
+One row per lot slice that moves from the asset given up to the asset received:
+the acquisition date and cost travel, the gain does not.
+
+Idempotent (CREATE TABLE IF NOT EXISTS). Takes the database path as argv[1].
+"""
+import os
+import sqlite3
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import DATABASE_PATH
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS swap_lot_transfers (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    swap_group_id        TEXT NOT NULL,
+    from_cryptocurrency  TEXT NOT NULL,
+    to_cryptocurrency    TEXT NOT NULL,
+    swap_date            TEXT NOT NULL,
+    source_purchase_date TEXT NOT NULL,
+    amount_from          REAL NOT NULL,
+    cost_basis           REAL NOT NULL,
+    created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_group
+    ON swap_lot_transfers(swap_group_id);
+CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_to
+    ON swap_lot_transfers(to_cryptocurrency);
+"""
+
+
+def migrate(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute('BEGIN')
+        conn.executescript(SCHEMA)
+        conn.commit()
+        print('✓ swap_lot_transfers present')
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+if __name__ == '__main__':
+    migrate(sys.argv[1] if len(sys.argv) > 1 else DATABASE_PATH)
+```
+
+- [ ] **Step 4: Run it and watch it pass**
+
+Run: `venv/bin/pytest tests/test_swap_deferral.py -v`
+Expected: 1 passed.
+
+- [ ] **Step 5: Add the same DDL to `doc/schema.sql`** (verbatim from `SCHEMA` above), so test fixtures and a fresh install carry it.
+
+- [ ] **Step 6: Run the suite and commit**
+
+```bash
+venv/bin/pytest tests/ -q
+git add calculators/update_fifo_schema_swap_transfers.py doc/schema.sql tests/test_swap_deferral.py
+git commit -m "feat(schema): swap_lot_transfers, lot inheritance across a deferred swap"
+```
+
+---
+
+### Task 9: Give side — consume the lots, realize nothing, record the inheritance
+
+**Files:**
+- Modify: `calculators/crypto_fifo_tracker.py` (the query at line ~115, the SELL branch at ~169, the bulk write at ~249)
+- Test: `tests/test_swap_deferral.py`
+
+- [ ] **Step 1: Write the failing test** (append)
+
+```python
+from calculators.crypto_fifo_tracker import CryptoFIFOTracker
+
+
+def _tx(conn, **kw):
+    """Insert one transaction; returns its id."""
+    cols = ('transaction_date', 'transaction_type', 'cryptocurrency', 'amount',
+            'price_per_unit', 'total_value', 'fee_amount', 'fee_currency', 'currency',
+            'exchange_name', 'source', 'imported_at', 'record_hash', 'swap_group_id')
+    row = {c: kw.get(c) for c in cols}
+    row.setdefault('fee_amount', 0)
+    cur = conn.execute(
+        f"INSERT INTO transactions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+        tuple(row[c] for c in cols))
+    conn.commit()
+    return cur.lastrowid
+
+
+def _seed_swap(db_path):
+    """Buy 1 ETH for EUR 1000 in 2020, swap it for 2000 USDT in 2024."""
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='h1')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='h2',
+            swap_group_id='swap-1')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=2000.0, price_per_unit=1.5, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='h3',
+            swap_group_id='swap-1')
+    finally:
+        conn.close()
+
+
+def test_deferred_swap_realizes_nothing_and_records_the_transfer(db_path, monkeypatch):
+    _seed_swap(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        matches = conn.execute("SELECT COUNT(*) FROM sale_lot_matches WHERE cryptocurrency='ETH'").fetchone()[0]
+        transfers = conn.execute("""SELECT swap_group_id, from_cryptocurrency, to_cryptocurrency,
+                                           source_purchase_date, amount_from, cost_basis
+                                    FROM swap_lot_transfers""").fetchall()
+        remaining = conn.execute("SELECT ROUND(SUM(remaining_amount),8) FROM fifo_lots "
+                                 "WHERE cryptocurrency='ETH'").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert matches == 0, 'a deferred swap must not produce a realized match'
+    assert transfers == [('swap-1', 'ETH', 'USDT', '2020-01-10T10:00:00+00:00', 1.0, 1000.0)]
+    assert remaining == 0.0, 'the lots of the asset given up are consumed'
+
+
+def test_realizing_swap_still_produces_a_match(db_path):
+    """With the default setting nothing changes: the swap is a disposal."""
+    _seed_swap(db_path)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        gain = conn.execute("SELECT ROUND(SUM(gain_loss),2) FROM sale_lot_matches "
+                            "WHERE cryptocurrency='ETH'").fetchone()[0]
+        transfers = conn.execute('SELECT COUNT(*) FROM swap_lot_transfers').fetchone()[0]
+    finally:
+        conn.close()
+
+    assert gain == 2000.0
+    assert transfers == 0
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `venv/bin/pytest tests/test_swap_deferral.py -v`
+Expected: the deferred test FAILs (`sale_lot_matches` has 1 row, `swap_lot_transfers` empty); the realizing test passes already.
+
+- [ ] **Step 3: Select the column and the swap's other side**
+
+In `calculate_fifo_lots`, extend the query (line ~115) with `swap_group_id`:
+
+```python
+        query = '''
+            SELECT id, transaction_date, transaction_type, amount,
+                   price_per_unit, total_value, fee_amount, fee_currency, exchange_name,
+                   swap_group_id
+            FROM transactions
+            WHERE cryptocurrency = ?
+            AND transaction_type IN ('BUY', 'SELL', 'DEPOSIT', 'WITHDRAWAL')
+            ORDER BY transaction_date ASC, id ASC
+        '''
+```
+
+and right after `transactions = self.cursor.fetchall()` add the map from a swap
+group to the asset received, plus a clean slate for this crypto's transfers:
+
+```python
+        # Which asset each swap group delivers — needed on the give side, where
+        # the other leg belongs to a different cryptocurrency.
+        self.cursor.execute("""
+            SELECT swap_group_id, cryptocurrency FROM transactions
+            WHERE swap_group_id IS NOT NULL AND transaction_type = 'BUY'
+        """)
+        swap_takes = {row['swap_group_id']: row['cryptocurrency'] for row in self.cursor.fetchall()}
+
+        # Idempotent per crypto, like the DELETEs above.
+        self.cursor.execute('DELETE FROM swap_lot_transfers WHERE from_cryptocurrency = ?',
+                            (cryptocurrency,))
+        transfers_batch = []
+```
+
+- [ ] **Step 4: Defer instead of realizing, inside the SELL loop**
+
+In the SELL branch, replace the `matches_batch.append((...))` block with:
+
+```python
+                    deferred = bool(trans['swap_group_id']) and not SWAP_REALIZES
+                    if deferred:
+                        # No realization: the acquisition date and cost travel to
+                        # the asset received (spec §7, deferral regime).
+                        transfers_batch.append((
+                            trans['swap_group_id'],
+                            cryptocurrency,
+                            swap_takes.get(trans['swap_group_id'], ''),
+                            sale_date,
+                            lot['purchase_date'],
+                            float(amount_from_lot),
+                            _to_eur(cost_basis),
+                        ))
+                    else:
+                        matches_batch.append((
+                            trans['id'],       # sale_transaction_id
+                            i,                 # lot index (replaced with db_id later)
+                            sale_date,
+                            lot['purchase_date'],
+                            cryptocurrency,
+                            float(amount_from_lot),
+                            _to_price(purchase_price),
+                            _to_price(sale_price),
+                            _to_eur(cost_basis),
+                            _to_eur(proceeds),
+                            _to_eur(gain_loss),
+                            holding_days,
+                        ))
+```
+
+- [ ] **Step 5: Write the transfers with the lots**
+
+In the bulk-write section, after the lots are inserted and before the matches
+(so a failure rolls back together with them):
+
+```python
+        if transfers_batch:
+            print(f"  Writing {len(transfers_batch):,} swap lot transfers (deferral)...")
+            self.cursor.executemany('''
+                INSERT INTO swap_lot_transfers
+                (swap_group_id, from_cryptocurrency, to_cryptocurrency, swap_date,
+                 source_purchase_date, amount_from, cost_basis)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', transfers_batch)
+```
+
+- [ ] **Step 6: Run them and watch them pass**
+
+Run: `venv/bin/pytest tests/test_swap_deferral.py tests/test_swap_realizes.py -v`
+Expected: all passed.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add calculators/crypto_fifo_tracker.py tests/test_swap_deferral.py
+git commit -m "feat(fifo): deferred swap consumes lots without realizing, records inheritance"
+```
+
+---
+
+### Task 10: Take side — lots that inherit date and cost
+
+**Files:**
+- Modify: `calculators/crypto_fifo_tracker.py` (BUY branch, line ~141)
+- Test: `tests/test_swap_deferral.py`
+
+- [ ] **Step 1: Write the failing test** (append)
+
+```python
+def test_received_asset_inherits_date_and_cost(db_path, monkeypatch):
+    """The USDT received keeps the ETH acquisition date: the clock does not restart."""
+    _seed_swap(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')    # give side first
+        tracker.calculate_fifo_lots('USDT')   # take side
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        lots = conn.execute("""SELECT purchase_date, ROUND(original_amount,8),
+                                      ROUND(cost_basis,2), ROUND(purchase_price_per_unit,8)
+                               FROM fifo_lots WHERE cryptocurrency='USDT'""").fetchall()
+    finally:
+        conn.close()
+
+    assert lots == [('2020-01-10T10:00:00+00:00', 2000.0, 1000.0, 0.5)]
+
+
+def test_two_source_lots_become_two_inherited_lots(db_path, monkeypatch):
+    """One swap of two lots creates two lots, each with its own inherited date."""
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2019-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=0.5, price_per_unit=200.0, total_value=100.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='a1')
+        _tx(conn, transaction_date='2021-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=0.5, price_per_unit=600.0, total_value=300.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='a2')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='a3', swap_group_id='swap-2')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='a4', swap_group_id='swap-2')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        lots = conn.execute("""SELECT purchase_date, ROUND(original_amount,8), ROUND(cost_basis,2)
+                               FROM fifo_lots WHERE cryptocurrency='USDT'
+                               ORDER BY purchase_date""").fetchall()
+    finally:
+        conn.close()
+
+    # 1000 USDT split pro-rata on the ETH consumed (0.5 + 0.5), each slice keeping its cost
+    assert lots == [('2019-01-01T10:00:00+00:00', 500.0, 100.0),
+                    ('2021-01-01T10:00:00+00:00', 500.0, 300.0)]
+
+
+def test_take_side_without_its_give_side_fails_loudly(db_path, monkeypatch):
+    """Processing the received asset before the one given up is an ordering bug."""
+    _seed_swap(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='swap-1'):
+            tracker.calculate_fifo_lots('USDT')  # give side not computed yet
+    finally:
+        tracker.close()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `venv/bin/pytest tests/test_swap_deferral.py -k inherit -v`
+Expected: FAIL — the USDT lot is still priced from its own `price_per_unit`
+(`2000.0, 3000.0, 1.5` instead of the inherited values).
+
+- [ ] **Step 3: Build inherited lots in the BUY branch**
+
+At the start of the `if trans_type == 'BUY':` branch, before `amount = …`:
+
+```python
+            if trans_type == 'BUY' and trans['swap_group_id'] and not SWAP_REALIZES:
+                # Deferral: this asset was received in a swap. It does not get a
+                # new cost basis — it inherits one lot per lot consumed on the
+                # other side, with that lot's acquisition date.
+                self.cursor.execute('''
+                    SELECT source_purchase_date, amount_from, cost_basis
+                    FROM swap_lot_transfers
+                    WHERE swap_group_id = ? AND to_cryptocurrency = ?
+                    ORDER BY source_purchase_date ASC, id ASC
+                ''', (trans['swap_group_id'], cryptocurrency))
+                slices = self.cursor.fetchall()
+                if not slices:
+                    raise ValueError(
+                        f"swap {trans['swap_group_id']}: no lot transfer recorded. "
+                        f"Compute the asset given up before {cryptocurrency} — "
+                        f"use swap_dependency_order()."
+                    )
+                received = Decimal(str(trans['amount']))
+                total_from = sum(Decimal(str(s['amount_from'])) for s in slices)
+                allocated = Decimal('0')
+                for n, sl in enumerate(slices, 1):
+                    share = (Decimal(str(sl['amount_from'])) / total_from
+                             if total_from > 0 else Decimal('0'))
+                    # Last slice takes the remainder: the sum must equal what arrived.
+                    qty = (received - allocated) if n == len(slices) else (received * share)
+                    allocated += qty
+                    cost = Decimal(str(sl['cost_basis']))
+                    mem_lots.append({
+                        'db_id': None,
+                        'purchase_transaction_id': trans['id'],
+                        'cryptocurrency': cryptocurrency,
+                        'purchase_date': sl['source_purchase_date'],   # inherited
+                        'original_amount': qty,
+                        'remaining_amount': qty,
+                        'purchase_price_per_unit': (cost / qty) if qty > 0 else Decimal('0'),
+                        'cost_basis': cost,                            # inherited
+                        'purchase_fee_total': Decimal('0'),
+                        'exchange_name': trans['exchange_name'],
+                    })
+                buys += 1
+                continue
+
+            if trans_type == 'BUY':
+```
+
+The inherited lots are appended in `source_purchase_date` order, which keeps
+`mem_lots` sorted the way the FIFO pointer expects.
+
+- [ ] **Step 4: Run them and watch them pass**
+
+Run: `venv/bin/pytest tests/test_swap_deferral.py -v`
+Expected: all passed (6 tests in this module).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add calculators/crypto_fifo_tracker.py tests/test_swap_deferral.py
+git commit -m "feat(fifo): received asset inherits date and cost, one lot per source lot"
+```
+
+---
+
+### Task 11: Processing order
+
+Deferral makes one crypto's lots depend on another's. The driver must compute
+the asset given up before the asset received, and say so when that is
+impossible.
+
+**Files:**
+- Modify: `calculators/crypto_fifo_tracker.py` (new module-level function)
+- Modify: `calculators/calculate_fifo.py` (the crypto list at line ~49)
+- Test: `tests/test_swap_deferral.py`
+
+- [ ] **Step 1: Write the failing test** (append)
+
+```python
+from calculators.crypto_fifo_tracker import swap_dependency_order
+
+
+def test_order_puts_the_asset_given_up_first(db_path):
+    _seed_swap(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        order = swap_dependency_order(conn, ['USDT', 'ETH'])
+    finally:
+        conn.close()
+
+    assert order.index('ETH') < order.index('USDT')
+
+
+def test_order_keeps_unrelated_cryptos_and_is_stable(db_path):
+    _seed_swap(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        order = swap_dependency_order(conn, ['USDT', 'BTC', 'ETH'])
+    finally:
+        conn.close()
+
+    assert sorted(order) == ['BTC', 'ETH', 'USDT']
+    assert order.index('ETH') < order.index('USDT')
+
+
+def test_order_refuses_a_cycle(db_path):
+    """A → B and B → A cannot both inherit: stop instead of picking one."""
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2024-01-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='AAA', amount=1.0, price_per_unit=1.0, total_value=1.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+            imported_at='2026-01-01T00:00:00', record_hash='c1', swap_group_id='s1')
+        _tx(conn, transaction_date='2024-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='BBB', amount=1.0, price_per_unit=1.0, total_value=1.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+            imported_at='2026-01-01T00:00:00', record_hash='c2', swap_group_id='s1')
+        _tx(conn, transaction_date='2024-02-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='BBB', amount=1.0, price_per_unit=1.0, total_value=1.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+            imported_at='2026-01-01T00:00:00', record_hash='c3', swap_group_id='s2')
+        _tx(conn, transaction_date='2024-02-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='AAA', amount=1.0, price_per_unit=1.0, total_value=1.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+            imported_at='2026-01-01T00:00:00', record_hash='c4', swap_group_id='s2')
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        with pytest.raises(ValueError, match='cycle'):
+            swap_dependency_order(conn, ['AAA', 'BBB'])
+    finally:
+        conn.close()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `venv/bin/pytest tests/test_swap_deferral.py -k order -v`
+Expected: FAIL — `ImportError: cannot import name 'swap_dependency_order'`.
+
+- [ ] **Step 3: Write the ordering function**
+
+Add at module level in `calculators/crypto_fifo_tracker.py`, after
+`DUST_THRESHOLD`:
+
+```python
+def swap_dependency_order(conn, cryptos):
+    """Order cryptos so a swap's give side is computed before its take side.
+
+    Only matters under deferral, where the asset received inherits the lots of
+    the asset given up. Alphabetical within each layer, so the order is stable
+    between runs. Raises ValueError on a cycle instead of choosing a side.
+    """
+    cur = conn.execute("""
+        SELECT give.cryptocurrency AS give_crypto, take.cryptocurrency AS take_crypto
+        FROM transactions give
+        JOIN transactions take ON take.swap_group_id = give.swap_group_id
+                              AND take.transaction_type = 'BUY'
+        WHERE give.swap_group_id IS NOT NULL AND give.transaction_type = 'SELL'
+    """)
+    edges = {c: set() for c in cryptos}          # give → takes that depend on it
+    indegree = {c: 0 for c in cryptos}
+    for row in cur.fetchall():
+        give, take = row['give_crypto'], row['take_crypto']
+        if give in edges and take in indegree and take not in edges[give] and give != take:
+            edges[give].add(take)
+            indegree[take] += 1
+
+    ready = sorted(c for c in cryptos if indegree[c] == 0)
+    ordered = []
+    while ready:
+        current = ready.pop(0)
+        ordered.append(current)
+        for dependent in sorted(edges[current]):
+            indegree[dependent] -= 1
+            if indegree[dependent] == 0:
+                ready.append(dependent)
+        ready.sort()
+
+    if len(ordered) != len(cryptos):
+        stuck = sorted(set(cryptos) - set(ordered))
+        raise ValueError(f'swap dependency cycle between {stuck}: cannot decide '
+                         f'which asset inherits from which')
+    return ordered
+```
+
+- [ ] **Step 4: Use it in the driver**
+
+In `calculators/calculate_fifo.py`, after the `cryptos` list is read (line ~49)
+and before the per-crypto loop:
+
+```python
+    from calculators.crypto_fifo_tracker import swap_dependency_order
+    cryptos = swap_dependency_order(tracker.conn, cryptos)
+    print(f"✓ Processing order: {', '.join(cryptos)}")
+```
+
+If `tracker.conn` is not exposed, use `tracker.cursor.connection`.
+
+- [ ] **Step 5: Run them and watch them pass**
+
+Run: `venv/bin/pytest tests/test_swap_deferral.py -v`
+Expected: 9 passed.
+
+- [ ] **Step 6: Run ruff and the whole suite, then commit**
+
+```bash
+venv/bin/ruff check .
+venv/bin/pytest tests/ -q
+git add calculators/crypto_fifo_tracker.py calculators/calculate_fifo.py tests/test_swap_deferral.py
+git commit -m "feat(fifo): topological processing order for deferred swaps"
+```
+
+---
+
+### Task 12: Documentation
 
 **Files:**
 - Create: `doc/compliance.md`
@@ -1172,7 +1799,7 @@ git commit -m "docs: compliance method, swap rule demoted to a declared assumpti
 
 ---
 
-### Task 9: Run it on the real data
+### Task 13: Run it on the real data
 
 Not a code task: the operator runs it, with a backup and a regression check.
 Figures stay out of this repo — they go in the local register.
@@ -1202,6 +1829,7 @@ Write the three numbers down: lots, BTC remaining, cost basis.
 
 ```bash
 venv/bin/python calculators/update_fifo_schema_swap_group.py
+venv/bin/python calculators/update_fifo_schema_swap_transfers.py
 ```
 
 - [ ] **Step 4: Import each export, one per shape**
@@ -1232,7 +1860,23 @@ one thing it may not do.
 `data/manual_entries_log.md` — one entry for any transcription, with effect
 (transactions before → after, lots, realized per year).
 
-- [ ] **Step 7: Open the questions the numbers raise**
+- [ ] **Step 7: Measure what the other rule would cost**
+
+With the legs in place, run the engine under both rules and write both results
+in the register — this is the number the tax professional needs in order to
+answer, instead of an abstract question:
+
+```bash
+venv/bin/python calculators/calculate_fifo.py          # swap_realizes=True (profile default)
+FIFO_SWAP_REALIZES=0 venv/bin/python calculators/calculate_fifo.py   # see note
+```
+
+If reading the flag from the environment is not wired, change the profile value
+in `config.py`, run, record, and change it back — the run prints the rule in
+force, so a recorded output can never be mistaken for the other one. Keep the
+`True` run as the final state of the database.
+
+- [ ] **Step 8: Open the questions the numbers raise**
 
 Realized results of a past tax year have changed. That is a question for the
 tax professional before any amended return, together with the one that decides
@@ -1243,11 +1887,14 @@ tax professional before any amended return, together with the one that decides
 ## Self-review
 
 **Spec coverage:** §3 → Task 1. §4 readers → Tasks 2-4, importer → Task 6. §5
-valuation → Task 5. §6 evidence → Task 8 (`doc/compliance.md`) and Task 9
-(registers). §7 setting → Task 7, with the deferral path explicitly deferred
-and declared in the Scope note. §8 "what does not change" → the regression
-tests in Tasks 6 and 9. §9 testing → the test steps of every task. §10 risks →
-Task 9 steps 5 and 7.
+valuation → Task 5. §6 evidence → Task 12 (`doc/compliance.md`) and Task 13
+(registers). §7 setting → Task 7 for the declaration, Tasks 8-11 for both
+behaviours: the inheritance table, the give side that realizes nothing, the
+take side that inherits date and cost one lot per source lot, and the
+processing order that makes the dependency safe. §8 "what does not change" →
+the regression tests in Tasks 6 and 13, plus `test_realizing_swap_still_produces_a_match`
+in Task 9, which pins today's behaviour while the new path is added. §9 testing
+→ the test steps of every task. §10 risks → Task 13 steps 5, 7 and 8.
 
 **Placeholders:** the only angle bracket left is `<path-to-deposit-withdrawal-export>`
 in Task 9, which is an operator path that cannot live in a public repo.
@@ -1256,4 +1903,8 @@ in Task 9, which is an operator path that cannot live in a public repo.
 used verbatim in Tasks 2-5; `value_row(row, rates)` has the same signature in
 Task 5 and Task 6; `rates` implements `fiat_to_eur` and `crypto_to_eur` in both
 the test fake and the production `Rates`; `SOURCE_SUFFIX` is defined in Task 6
-and imported by its test.
+and imported by its test; `swap_lot_transfers` has the same nine columns in the
+migration (Task 8), the insert (Task 9) and the select (Task 10);
+`swap_dependency_order(conn, cryptos)` has the same signature in Task 11 and in
+the driver patch, and both pass a connection with `row_factory = sqlite3.Row`,
+which `CryptoFIFOTracker` already sets.
