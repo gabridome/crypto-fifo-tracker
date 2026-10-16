@@ -30,7 +30,7 @@ setting exists so the answer can be applied without re-importing anything.
 | `importers/non_btc_valuation.py` (create) | normalized row → transaction dict, the §5 rules |
 | `importers/import_non_btc_legs.py` (create) | CLI + DB write via `import_and_verify` |
 | `config.py` (modify) | `swap_realizes` in every profile's `tax_rules` |
-| `calculators/crypto_fifo_tracker.py` (modify) | read `swap_realizes`, refuse `False` |
+| `calculators/crypto_fifo_tracker.py` (modify) | honour `swap_realizes`: realize, or defer and inherit lots; swap dependency order |
 | `doc/compliance.md` (create) | the evidence method, no data |
 | `doc/en/crypto_to_crypto_guide.md`, `doc/pt/crypto_to_crypto_guide.md` (modify) | assumption, not law |
 | `calculators/update_fifo_schema_swap_transfers.py` (create) | migration: `swap_lot_transfers` |
@@ -50,7 +50,7 @@ Normalized row — the contract between readers and valuation, used by every tas
     'fee_asset':  '',            # '' when no fee
     'fee_amount': 0.0,
     'exchange':   'Bybit',
-    'ref':        '2280000000376446136',  # exchange reference, '' if absent
+    'ref':        'ORD-12345',   # exchange reference, '' if absent
 }
 ```
 
