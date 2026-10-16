@@ -134,7 +134,7 @@ def test_fee_consuming_the_whole_leg_refuses():
     (the *gross* take_amount is well above DUST), so a separate guard is
     needed once the fee is subtracted.
     """
-    with pytest.raises(ValueError, match='fee'):
+    with pytest.raises(ValueError, match='consumes the whole'):
         value_row(_row(kind='TRADE', give_asset='BTC', give_amount=2.0,
                        take_asset='USDT', take_amount=2.0,
                        fee_asset='USDT', fee_amount=2.0),

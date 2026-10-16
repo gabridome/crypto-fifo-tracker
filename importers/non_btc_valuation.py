@@ -9,10 +9,14 @@ whether a missing rate is fatal (it is: see import_non_btc_legs).
 between the two (amount first, then currency; vs. coin first, then
 amount). An earlier draft of this module called `crypto_to_eur` with those
 two swapped; it surfaced only because the test double's own parameter names
-made the mismatch a TypeError instead of a silently wrong value. Verified
-against the real sources, not just the double: `importers/ecb_rates.py`
-(`usd_to_eur(self, usd_amount, date)`) and `importers/crypto_prices.py`
-(`crypto_to_eur(self, coin, amount, date)`).
+made the mismatch a TypeError instead of a silently wrong value. Every call
+below passes these as keyword arguments for exactly that reason: a
+positional call that disagrees with a collaborator's parameter order or
+names now fails loudly on the first row, every time, instead of depending
+on a test double happening to use the same names the real one does.
+Verified against the real sources, not just the double: `importers/
+ecb_rates.py` (`usd_to_eur(self, usd_amount, date)`) and `importers/
+crypto_prices.py` (`crypto_to_eur(self, coin, amount, date)`).
 """
 import hashlib
 import os
@@ -45,6 +49,55 @@ def _swap_id(row, row_ref):
     raw = (f"{row['when']}|{row['exchange']}|{row['give_asset']}|{row['give_amount']}"
            f"|{row['take_asset']}|{row['take_amount']}|{row['ref']}|{row_ref}")
     return 'swap-' + hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
+
+
+def _apply_fee(give, give_amt, take, take_amt, fee_asset, fee_amt):
+    """Fold a fee into the quantity it actually came out of.
+
+    Returns `(take_amt, give_total)`: `take_amt` reduced when the fee was
+    taken from the asset received (it is already missing from the
+    account), `give_total` inflated when the fee was paid in the asset
+    given up (paying a fee in that asset is itself a disposal of it, same
+    as the trade). A fee in a third asset cannot be allocated without
+    valuing that asset too, which this function has no mandate to do: it
+    refuses. `give_total` is "what was actually disposed" — tasks 9-11 need
+    exactly this figure to build lot inheritance across a deferred swap, so
+    it is computed once here rather than inlined in each valuation branch,
+    where task 9 would otherwise have to duplicate it by eye.
+
+    Order matters for the message only: swapping the next two guards would
+    not change any number — a blank fee_asset also satisfies the membership
+    check, so both still raise either way — it would only report a blank
+    fee_asset as "neither leg" instead of "no asset", a less precise
+    message for the same row. Verified by the mutation check in the commit
+    that added these tests: deleting either guard turns red exactly the
+    test naming it, and only that one.
+    """
+    if fee_amt > DUST and not fee_asset:
+        raise ValueError(f'fee of {fee_amt} with no asset: cannot tell what was charged')
+    if fee_amt > DUST and fee_asset not in (give, take):
+        raise ValueError(
+            f'fee charged in {fee_asset}, which is neither leg ({give}/{take}): '
+            f'allocating it would need a price for {fee_asset} too'
+        )
+    if fee_amt > DUST and fee_asset == take:
+        gross_take_amt = take_amt
+        take_amt -= fee_amt
+        if take_amt <= DUST:
+            # The row survives the dust check in value_row (that one tests
+            # the *gross* amounts), but a fee this large leaves ~nothing of
+            # the leg it was taken from. Emitting it would attach a real,
+            # non-zero cost to a lot of ~zero quantity: a price_per_unit
+            # this function cannot report honestly, and a lot FIFO can
+            # never fully dispose of downstream. An export where the fee
+            # swallows the whole leg is an inconsistency to stop on, not a
+            # number to round away.
+            raise ValueError(
+                f'fee of {fee_amt} {fee_asset} consumes the whole {take} leg '
+                f'({gross_take_amt} {take}): nothing would be left to value'
+            )
+    give_total = give_amt + (fee_amt if fee_amt > DUST and fee_asset == give else 0.0)
+    return take_amt, give_total
 
 
 def _tx(row, tx_type, crypto, amount, total_value, swap_group_id=None):
@@ -89,50 +142,19 @@ def value_row(row, rates, row_ref=''):
 
     give_is_fiat, take_is_fiat = give in FIAT, take in FIAT
 
-    # Where the fee sits decides what it does. Taken out of what arrives, it
-    # is already missing from the account, so it reduces the quantity acquired.
-    # Charged on what you hand over, it is part of what the purchase cost. Paid
-    # in a third asset it cannot be allocated without valuing that asset too,
-    # which this function has no mandate to do: it refuses.
+    # Where the fee sits decides what it does — see _apply_fee. From here on
+    # take_amt is the net acquired/sold and give_total is the gross disposed;
+    # the three branches below are pure valuation on those two figures.
     fee_asset, fee_amt = row['fee_asset'], row['fee_amount']
-    # Order matters: '' not in (give, take) is also true, so a blank
-    # fee_asset satisfies the membership check below too. This guard must
-    # run first, or it is dead code — the membership guard would catch a
-    # blank fee_asset first and report it as "neither leg" instead of "no
-    # asset", which is a worse message for the same row. Do not reorder
-    # these two without checking that each one's own test still needs it
-    # (see the mutation check noted in the two tests' commit message).
-    if fee_amt > DUST and not fee_asset:
-        raise ValueError(f'fee of {fee_amt} with no asset: cannot tell what was charged')
-    if fee_amt > DUST and fee_asset not in (give, take):
-        raise ValueError(
-            f'fee charged in {fee_asset}, which is neither leg ({give}/{take}): '
-            f'allocating it would need a price for {fee_asset} too'
-        )
-    if fee_amt > DUST and fee_asset == take:
-        take_amt -= fee_amt
-        if take_amt <= DUST:
-            # The row survives the dust check above (it tests the *gross*
-            # amounts), but a fee this large leaves ~nothing of the leg it
-            # was taken from. Emitting it would attach a real, non-zero cost
-            # to a lot of ~zero quantity: a price_per_unit this function
-            # cannot report honestly, and a lot FIFO can never fully
-            # dispose of downstream. An export where the fee swallows the
-            # whole leg is an inconsistency to stop on, not a number to
-            # round away.
-            raise ValueError(
-                f'fee of {fee_amt} {fee_asset} consumes the whole {take} leg '
-                f'({row["take_amount"]} {take}): nothing would be left to value'
-            )
-    give_total = give_amt + (fee_amt if fee_amt > DUST and fee_asset == give else 0.0)
+    take_amt, give_total = _apply_fee(give, give_amt, take, take_amt, fee_asset, fee_amt)
 
     if give_is_fiat and not take_is_fiat:
-        value = rates.fiat_to_eur(give_total, give, row['when'])
+        value = rates.fiat_to_eur(amount=give_total, currency=give, when=row['when'])
         return [_tx(row, 'BUY', take, take_amt, value)]
 
     if take_is_fiat and not give_is_fiat:
         # The fee, if charged in the fiat received, is already out of take_amt.
-        value = rates.fiat_to_eur(take_amt, take, row['when'])
+        value = rates.fiat_to_eur(amount=take_amt, currency=take, when=row['when'])
         # A fee charged in the asset given up also left the account, exactly
         # like the trade itself: paying a fee in USDC is a disposal of USDC.
         # So the quantity disposed is give_total (the gross), not give_amt —
@@ -150,7 +172,7 @@ def value_row(row, rates, row_ref=''):
                 'same-second timestamps and a blank ref column collide on real exports, '
                 'so this refuses rather than risk sharing one id between two swaps'
             )
-        value = rates.crypto_to_eur(give, give_total, row['when'])
+        value = rates.crypto_to_eur(coin=give, amount=give_total, when=row['when'])
         group = _swap_id(row, row_ref)
         # Same rule as the crypto-to-fiat SELL below: a fee in the asset
         # given up is itself a disposal of that asset, so give_total (the
