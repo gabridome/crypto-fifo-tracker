@@ -251,6 +251,34 @@ def test_account_history_malformed_quantity_raises_with_field_named():
         list(read_account_history(io.StringIO(bad), exchange='Coinbase'))
 
 
+def test_account_history_quantity_with_a_stray_unit_raises():
+    """split_amount tolerates a unit suffix by returning it rather than
+    raising; Quantity Transacted has no unit column of its own, so a
+    suffix here is not a harmless typo, it is the row contradicting its
+    own Asset column — Asset=USDC with Quantity Transacted=1500.0BTC must
+    not silently become 1500.0 USDC. A bare float() used to catch this by
+    accident (it raises on a trailing letter); split_amount does not, so
+    the unit must be checked explicitly.
+    """
+    contradictory = ACCOUNT_HISTORY.replace(
+        ',Receive,USDC,1500.0,EUR,€0.93,€1395.0,€1395.0,€0.00',
+        ',Receive,USDC,1500.0BTC,EUR,€0.93,€1395.0,€1395.0,€0.00',
+    )
+    with pytest.raises(ValueError, match='Quantity Transacted'):
+        list(read_account_history(io.StringIO(contradictory), exchange='Coinbase'))
+
+
+def test_account_history_unknown_type_raises_with_id_and_timestamp():
+    """After this round, the unknown-type raise's only job is to be
+    findable in a large file. Nothing else tests that property, so a
+    later refactor unifying error messages could drop the ID=/Timestamp=
+    suffix and every other test would still pass.
+    """
+    bad = ACCOUNT_HISTORY.replace(',Receive,USDC', ',Staking Reward,USDC')
+    with pytest.raises(ValueError, match=r"Staking Reward.*ID='a1'"):
+        list(read_account_history(io.StringIO(bad), exchange='Coinbase'))
+
+
 def test_account_history_send_is_transfer_out():
     """No existing test built a Send row: TRANSFER_OUT had zero coverage."""
     send = ACCOUNT_HISTORY.replace(

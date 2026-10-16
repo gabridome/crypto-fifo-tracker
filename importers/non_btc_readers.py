@@ -4,6 +4,17 @@ Each reader takes an open text file and yields normalized rows (the contract is
 documented in doc/plans/2026-10-16-non-btc-legs.md). Pure functions: no DB, no
 network, no config. Unknown shapes raise ValueError — a leg guessed wrong is
 worse than an import that stops.
+
+A zero in the normalized row means two different things depending on which
+pair of fields it sits in, and a reader of this module must tell them apart
+rather than infer it:
+- `give_asset='' `/`take_asset=''` paired with the matching `*_amount=0.0`
+  means *there is no such leg* — a transfer has only one side, by
+  construction, not a side that happens to be zero.
+- `fee_asset=<currency>` paired with `fee_amount=0.0` means *there is a fee,
+  and it is zero* — the currency is a property of the row (where the fee
+  would be denominated if there were one), independent of the amount, so
+  `fee_asset` is never blanked out just because `fee_amount` is 0.0.
 """
 import csv
 import re
@@ -175,12 +186,23 @@ def read_account_history(fh, exchange):
         kind_raw = (row['Transaction Type'] or '').strip()
 
         try:
-            qty, _unit = split_amount(row['Quantity Transacted'])
+            qty, qty_unit = split_amount(row['Quantity Transacted'])
         except ValueError as exc:
             raise ValueError(
                 f'unparsable Quantity Transacted: {row["Quantity Transacted"]!r} '
                 f'(ID={row.get("ID")!r}, Timestamp={row.get("Timestamp")!r})'
             ) from exc
+        if qty_unit:
+            # split_amount returns the suffix, if any, instead of raising on
+            # one — this column has none, so a unit here means the row
+            # contradicts its own 'Asset' column (e.g. Asset=USDC with
+            # Quantity Transacted=1500.0BTC). Discarding qty_unit would
+            # accept that silently; raising is the same discipline _eur
+            # already applies to its own stray-unit case.
+            raise ValueError(
+                f'unexpected unit in Quantity Transacted: {row["Quantity Transacted"]!r} '
+                f'(ID={row.get("ID")!r}, Timestamp={row.get("Timestamp")!r})'
+            )
 
         ts_raw = row['Timestamp']
         if not ts_raw.endswith(' UTC'):
