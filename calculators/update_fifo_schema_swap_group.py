@@ -4,6 +4,11 @@
 Idempotent: checks PRAGMA table_info before ALTER, creates the index with
 IF NOT EXISTS. Takes the database path as argv[1], defaults to config.
 
+No backup is taken before running: doc/project_guidelines.md's "idempotenti,
+con backup" is aimed at the destructive migrations code_guidelines.md §4.4
+calls out (DROP, data rewrites); ADD COLUMN is additive and non-destructive,
+so there is nothing here a backup would protect against.
+
 Usage: python3 calculators/update_fifo_schema_swap_group.py [db_path]
 """
 import os
