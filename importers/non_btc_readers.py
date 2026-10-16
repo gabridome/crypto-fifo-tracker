@@ -96,3 +96,101 @@ def read_trade_history(fh, exchange):
             'exchange': exchange,
             'ref': (row.get('Order No.') or '').strip(),
         }
+
+
+# Fiat assets never create a lot by themselves in this reader: a fiat
+# deposit/withdrawal row is bank plumbing, not a crypto leg.
+FIAT = ('EUR', 'USD', 'GBP', 'CHF')
+
+# Transaction Type labels, matched exactly rather than by substring. A
+# substring test ('Sell' in kind_raw) would also match a hypothetical label
+# like 'Failed Sell' or 'Sell cancelled' and misclassify it as a real sale;
+# a closed vocabulary only recognises the labels this reader has actually
+# seen, and anything else falls through to the final `else` and raises.
+_SELL_LABELS = ('Sell', 'Advanced Trade Sell')
+_BUY_LABELS = ('Buy', 'Advanced Trade Buy')
+
+_FIAT_RE = re.compile(r'^\s*-?\d+(?:\.\d+)?\s*$')
+
+
+def _eur(raw, field='', allow_blank=False):
+    """'€1395.0' → 1395.0. Raises on anything ambiguous, blank included.
+
+    Same discipline as split_amount: a comma cannot be told apart from a
+    decimal separator, so '€1.395,00' must raise instead of silently becoming
+    1.39500 — a thousand times wrong, straight into a tax figure. Task 2
+    shipped exactly that bug; do not reintroduce it here.
+
+    A blank cell is only 0.0 where the caller declares it legitimate
+    (`allow_blank=True`): the exports leave the fiat subtotal empty on rows
+    that have no fiat side at all, i.e. transfers. Everywhere else a blank is
+    an error, because "blank means zero" is how a real disposal gets silently
+    demoted to a transfer, or a real trade recorded with zero proceeds — the
+    same failure shape as the comma bug, moved up into business logic.
+    """
+    cleaned = str(raw).replace('€', '').replace('$', '').strip()
+    if not cleaned:
+        if allow_blank:
+            return 0.0
+        raise ValueError(f'blank {field or "fiat amount"}: a value is required on this row')
+    if not _FIAT_RE.match(cleaned):
+        raise ValueError(f'unparsable fiat amount in {field or "export"}: {raw!r}')
+    return abs(float(cleaned))
+
+
+def read_account_history(fh, exchange):
+    """Account-history export: one row per movement, per asset."""
+    for row in csv.DictReader(fh):
+        asset = (row['Asset'] or '').strip().upper()
+        if asset in FIAT:
+            continue  # fiat deposits/withdrawals are bank plumbing
+        kind_raw = (row['Transaction Type'] or '').strip()
+        qty = abs(float(row['Quantity Transacted']))
+        when = _utc(row['Timestamp'][:19], fmt='%Y-%m-%d %H:%M:%S')
+        base = {
+            'when': when, 'fee_asset': '',
+            'fee_amount': _eur(row.get('Fees and/or Spread'), field='Fees and/or Spread',
+                               allow_blank=True),
+            'exchange': exchange, 'ref': (row.get('ID') or '').strip(),
+        }
+        # The fiat side is required exactly where the row has one. A blank
+        # is tolerated only where the row has no fiat side by construction
+        # (transfers); everywhere else a blank must raise, not default to
+        # zero. This is independent of whether fiat_value ends up used below
+        # — Subtotal is validated on every row so an ambiguous value (a
+        # decimal comma) is caught even on a row where fiat_value happens
+        # not to feed into the yielded row (e.g. a Receive).
+        needs_fiat = kind_raw in ('Withdrawal',) or kind_raw in _SELL_LABELS or kind_raw in _BUY_LABELS
+        fiat_value = _eur(row['Subtotal'], field='Subtotal', allow_blank=not needs_fiat)
+        if kind_raw in ('Receive', 'Deposit'):
+            # A fiat 'Deposit' never reaches here: fiat assets are skipped
+            # above, by asset, not by label. This branch only fires for a
+            # non-fiat asset, e.g. an export variant that labels an inbound
+            # crypto transfer 'Deposit' instead of 'Receive'.
+            yield {**base, 'kind': 'TRANSFER_IN', 'give_asset': '', 'give_amount': 0.0,
+                   'take_asset': asset, 'take_amount': qty}
+        elif kind_raw in ('Send',):
+            yield {**base, 'kind': 'TRANSFER_OUT', 'give_asset': asset, 'give_amount': qty,
+                   'take_asset': '', 'take_amount': 0.0}
+        elif kind_raw in _SELL_LABELS:
+            yield {**base, 'kind': 'TRADE', 'give_asset': asset, 'give_amount': qty,
+                   'take_asset': 'EUR', 'take_amount': fiat_value}
+        elif kind_raw in _BUY_LABELS:
+            yield {**base, 'kind': 'TRADE', 'give_asset': 'EUR', 'give_amount': fiat_value,
+                   'take_asset': asset, 'take_amount': qty}
+        elif kind_raw == 'Withdrawal':
+            # Crypto leaving with a fiat subtotal is recorded as a sale: that is
+            # what it was on this account. The export cannot tell a sale from a
+            # transfer carrying a valuation, so the importer prints every row
+            # classified this way for confirmation against the bank side
+            # (decision of 2026-10-16; see task 6). A blank subtotal cannot
+            # reach this branch — _eur raises — so only a real zero means
+            # transfer.
+            if fiat_value > 0:
+                yield {**base, 'kind': 'CONVERT', 'give_asset': asset, 'give_amount': qty,
+                       'take_asset': 'EUR', 'take_amount': fiat_value}
+            else:
+                yield {**base, 'kind': 'TRANSFER_OUT', 'give_asset': asset,
+                       'give_amount': qty, 'take_asset': '', 'take_amount': 0.0}
+        else:
+            raise ValueError(f'unknown account-history type: {kind_raw!r}')

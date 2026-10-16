@@ -7,7 +7,12 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from importers.non_btc_readers import read_trade_history, split_amount, split_pair
+from importers.non_btc_readers import (
+    read_account_history,
+    read_trade_history,
+    split_amount,
+    split_pair,
+)
 
 TRADE_HISTORY = """Date(UTC),Pair,Side,Price,Executed,Amount,Fee
 2024-01-15 10:00:00,BTCUSDT,SELL,60000.00,0.00100000BTC,60.00000000USDT,0.06000000USDT
@@ -106,3 +111,87 @@ def test_split_amount_rejects_ambiguous_or_unparsable(raw):
 ])
 def test_split_pair_known_quotes(pair, base, quote):
     assert split_pair(pair) == (base, quote)
+
+
+ACCOUNT_HISTORY = """ID,Timestamp,Transaction Type,Asset,Quantity Transacted,Price Currency,Price at Transaction,Subtotal,Total (inclusive of fees and/or spread),Fees and/or Spread
+a1,2024-02-20 09:00:00 UTC,Receive,USDC,1500.0,EUR,€0.93,€1395.0,€1395.0,€0.00
+a2,2024-03-05 11:00:00 UTC,Advanced Trade Sell,USDC,2.0,EUR,€0.93,€1.86,€1.86,€0.00
+a3,2024-02-21 08:00:00 UTC,Withdrawal,USDC,-50000.0,EUR,€0.92,€46500.0,€46500.0,€0.00
+"""
+
+
+def test_account_history_classifies_receive_sell_and_withdrawal():
+    rows = list(read_account_history(io.StringIO(ACCOUNT_HISTORY), exchange='Coinbase'))
+
+    kinds = [(r['kind'], r['give_asset'], r['take_asset']) for r in rows]
+    assert kinds == [
+        ('TRANSFER_IN', '', 'USDC'),      # Receive: arrival, not an acquisition
+        ('TRADE', 'USDC', 'EUR'),         # sale against fiat
+        ('CONVERT', 'USDC', 'EUR'),       # crypto out with a fiat subtotal
+    ]
+    assert rows[0]['take_amount'] == pytest.approx(1500.0)
+    assert rows[1]['take_amount'] == pytest.approx(1.86)
+    assert rows[2]['give_amount'] == pytest.approx(50000.0)
+    assert rows[2]['take_amount'] == pytest.approx(46500.0)
+
+
+def test_account_history_refuses_a_blank_subtotal_on_a_sale():
+    """Blank must not become a zero-proceeds trade or a demoted transfer."""
+    blank_sell = ACCOUNT_HISTORY.replace(',Advanced Trade Sell,USDC,2.0,EUR,€0.93,€1.86,€1.86,€0.00',
+                                         ',Advanced Trade Sell,USDC,2.0,EUR,€0.93,,,€0.00')
+    with pytest.raises(ValueError, match='Subtotal'):
+        list(read_account_history(io.StringIO(blank_sell), exchange='Coinbase'))
+
+    blank_withdrawal = ACCOUNT_HISTORY.replace(',Withdrawal,USDC,-50000.0,EUR,€0.92,€46500.0,€46500.0,€0.00',
+                                               ',Withdrawal,USDC,-50000.0,EUR,€0.92,,,€0.00')
+    with pytest.raises(ValueError, match='Subtotal'):
+        list(read_account_history(io.StringIO(blank_withdrawal), exchange='Coinbase'))
+
+
+def test_account_history_blank_subtotal_is_fine_on_a_transfer():
+    """A Receive has no fiat side by construction: the blank is legitimate."""
+    blank_receive = ACCOUNT_HISTORY.replace(',Receive,USDC,1500.0,EUR,€0.93,€1395.0,€1395.0,€0.00',
+                                            ',Receive,USDC,1500.0,EUR,€0.93,,,€0.00')
+    rows = list(read_account_history(io.StringIO(blank_receive), exchange='Coinbase'))
+    assert rows[0]['kind'] == 'TRANSFER_IN'
+    assert rows[0]['take_amount'] == pytest.approx(1500.0)
+
+
+def test_account_history_refuses_an_ambiguous_fiat_amount():
+    """A decimal comma must raise, not silently divide by a thousand.
+
+    The replacement value is CSV-quoted ('"€1.395,00"', not '€1.395,00') so
+    the embedded comma survives as part of the Subtotal field instead of
+    being consumed by csv.DictReader as a column separator — an unquoted
+    comma here would shift every later column in the row and the ambiguous
+    value would never reach the parser as a single string.
+    """
+    bad = ACCOUNT_HISTORY.replace('€1395.0', '"€1.395,00"')
+    with pytest.raises(ValueError, match='Subtotal'):
+        list(read_account_history(io.StringIO(bad), exchange='Coinbase'))
+
+
+def test_account_history_skips_fiat_only_rows():
+    """A fiat deposit or withdrawal is bank plumbing, not a crypto leg."""
+    fiat = ACCOUNT_HISTORY.replace('Receive,USDC', 'Deposit,EUR')
+    rows = list(read_account_history(io.StringIO(fiat), exchange='Coinbase'))
+    assert all(r['take_asset'] != 'EUR' or r['give_asset'] for r in rows)
+    assert len(rows) == 2
+
+
+def test_account_history_crypto_deposit_is_also_a_transfer_in():
+    """'Deposit' is listed alongside 'Receive' for a crypto asset (some export
+    variants use it for an inbound crypto transfer rather than 'Receive').
+    Fiat 'Deposit' rows never reach this branch — they are skipped earlier,
+    by asset, not by label — so this pins the one case where the label does
+    reach it: a non-fiat asset.
+    """
+    crypto_deposit = ACCOUNT_HISTORY.replace(
+        ',Receive,USDC,1500.0,EUR,€0.93,€1395.0,€1395.0,€0.00',
+        ',Deposit,USDC,1500.0,EUR,€0.93,€1395.0,€1395.0,€0.00',
+    )
+    rows = list(read_account_history(io.StringIO(crypto_deposit), exchange='Coinbase'))
+    assert rows[0]['kind'] == 'TRANSFER_IN'
+    assert rows[0]['give_asset'] == ''
+    assert rows[0]['take_asset'] == 'USDC'
+    assert rows[0]['take_amount'] == pytest.approx(1500.0)
