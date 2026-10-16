@@ -626,6 +626,20 @@ git commit -m "feat(readers): deposit/withdrawal reader, conversions paired by m
 The §5 rules of the spec, as one pure function. It returns a list because a
 swap produces two transactions, a transfer none.
 
+**Prerequisite inside this task.** `read_account_history` (task 3) populates
+`fee_amount` but leaves `fee_asset` empty, so a consumer gets a number with no
+currency. Before writing the valuation, fix the reader to take `fee_asset` from
+the row's `Price Currency` column (the column the fee is denominated in), with
+a test that a fee of `€0.50` yields `fee_asset == 'EUR'` and `fee_amount == 0.5`.
+`read_trade_history` already carries the fee's unit from the amount suffix.
+
+**Why fees are not a detail here.** On a crypto-to-crypto swap the exchange
+takes its fee out of the asset received: the trade history reports a gross
+quantity, while what lands in the account — and what the next leg sells — is
+the net. Valuing the lot at the gross quantity creates crypto out of nothing
+and, worse, creates it with the cost basis of the whole leg, which lowers the
+cost per unit of everything downstream. The rule below handles it.
+
 **Files:**
 - Create: `importers/non_btc_valuation.py`
 - Test: `tests/test_non_btc_valuation.py`
@@ -700,6 +714,48 @@ def test_crypto_for_crypto_emits_two_linked_legs():
     assert txs[0]['swap_group_id'] == txs[1]['swap_group_id'] != None  # noqa: E711
 
 
+def test_fee_in_the_received_asset_reduces_the_lot():
+    """The exchange takes its cut out of what arrives: the lot is the net.
+
+    Gross 1000 USDT with a 2 USDT fee means 998 USDT in the account, bought
+    with the same 2 BTC. Valuing the lot at 1000 would invent 2 USDT and
+    spread the cost of the leg over a quantity that never existed.
+    """
+    txs = value_row(_row(kind='TRADE', give_asset='BTC', give_amount=2.0,
+                         take_asset='USDT', take_amount=1000.0,
+                         fee_asset='USDT', fee_amount=2.0), RATES)
+
+    buy = [t for t in txs if t['transaction_type'] == 'BUY'][0]
+    assert buy['amount'] == pytest.approx(998.0)
+    assert buy['total_value'] == pytest.approx(120000.0)   # cost unchanged: 2 BTC given up
+    assert buy['fee_amount'] == pytest.approx(0.0)         # already inside the quantity
+
+
+def test_fee_in_the_given_asset_is_part_of_the_cost():
+    """A fee charged in what you hand over is part of what the purchase cost."""
+    txs = value_row(_row(kind='CONVERT', give_asset='EUR', give_amount=10000.0,
+                         take_asset='USDC', take_amount=10700.0,
+                         fee_asset='EUR', fee_amount=25.0), RATES)
+
+    assert len(txs) == 1
+    assert txs[0]['amount'] == pytest.approx(10700.0)
+    assert txs[0]['total_value'] == pytest.approx(10025.0)
+
+
+def test_fee_in_a_third_asset_refuses():
+    """A fee paid in neither leg (a discount token) cannot be allocated here."""
+    with pytest.raises(ValueError, match='fee'):
+        value_row(_row(kind='TRADE', give_asset='BTC', give_amount=2.0,
+                       take_asset='USDT', take_amount=1000.0,
+                       fee_asset='BNB', fee_amount=0.5), RATES)
+
+
+def test_fee_without_an_asset_refuses():
+    """A fee amount with no currency is not information: it is a guess."""
+    with pytest.raises(ValueError, match='fee'):
+        value_row(_row(kind='CONVERT', fee_asset='', fee_amount=25.0), RATES)
+
+
 def test_transfer_creates_nothing():
     assert value_row(_row(kind='TRANSFER_IN', give_asset='', give_amount=0.0,
                           take_asset='USDC', take_amount=10640.0), RATES) == []
@@ -770,16 +826,34 @@ def value_row(row, rates):
 
     give_is_fiat, take_is_fiat = give in FIAT, take in FIAT
 
+    # Where the fee sits decides what it does. Taken out of what arrives, it
+    # is already missing from the account, so it reduces the quantity acquired.
+    # Charged on what you hand over, it is part of what the purchase cost. Paid
+    # in a third asset it cannot be allocated without valuing that asset too,
+    # which this function has no mandate to do: it refuses.
+    fee_asset, fee_amt = row['fee_asset'], row['fee_amount']
+    if fee_amt > DUST and not fee_asset:
+        raise ValueError(f'fee of {fee_amt} with no asset: cannot tell what was charged')
+    if fee_amt > DUST and fee_asset not in (give, take):
+        raise ValueError(
+            f'fee charged in {fee_asset}, which is neither leg ({give}/{take}): '
+            f'allocating it would need a price for {fee_asset} too'
+        )
+    if fee_amt > DUST and fee_asset == take:
+        take_amt -= fee_amt
+    give_total = give_amt + (fee_amt if fee_amt > DUST and fee_asset == give else 0.0)
+
     if give_is_fiat and not take_is_fiat:
-        value = rates.fiat_to_eur(give_amt, give, row['when'])
+        value = rates.fiat_to_eur(give_total, give, row['when'])
         return [_tx(row, 'BUY', take, take_amt, value)]
 
     if take_is_fiat and not give_is_fiat:
+        # The fee, if charged in the fiat received, is already out of take_amt.
         value = rates.fiat_to_eur(take_amt, take, row['when'])
         return [_tx(row, 'SELL', give, give_amt, value)]
 
     if not give_is_fiat and not take_is_fiat:
-        value = rates.crypto_to_eur(give, give_amt, row['when'])
+        value = rates.crypto_to_eur(give_total, give, row['when'])
         group = _swap_id(row)
         return [
             _tx(row, 'SELL', give, give_amt, value, group),
