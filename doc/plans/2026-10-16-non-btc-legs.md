@@ -1,0 +1,1259 @@
+# Non-BTC Legs Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Import the non-BTC legs (stablecoins, crypto-to-crypto swaps) that the BTC-only importers drop, with each acquisition valued where it happened, and make the crypto-to-crypto tax rule an explicit setting instead of prose.
+
+**Architecture:** Three pure readers turn the three export shapes into normalized rows; a pure valuation module turns normalized rows into transaction dicts; one additive importer writes them under a `#non-btc` source tag so the BTC ledger is untouched. A `swap_group_id` column links the two legs of a swap, and `tax_rules.swap_realizes` in `config.py` says whether a swap realizes.
+
+**Tech Stack:** Python 3.11, SQLite3, pandas (already a dependency), pytest, ruff. Spec: `doc/specs/2026-10-16-non-btc-legs-design.md`.
+
+---
+
+## Scope note, read before Task 7
+
+The spec (§7) describes both values of `swap_realizes`. This plan implements the
+parameter, the plumbing and the `True` path — today's behaviour, consistent with
+figures already filed. `False` requires a deferral engine (the acquired asset
+inherits the date and value of the asset given up) and the jurisdiction answer
+that would justify it is still open, so Task 7 makes `False` fail loudly instead
+of guessing. The data model carries `swap_group_id` from Task 1, so adding the
+deferral path later is a recalculation and not a re-import, exactly as the spec
+promises.
+
+## File structure
+
+| file | responsibility |
+|---|---|
+| `calculators/update_fifo_schema_swap_group.py` (create) | one-shot idempotent migration: `swap_group_id` + index |
+| `importers/non_btc_readers.py` (create) | three pure readers, export shape → normalized rows |
+| `importers/non_btc_valuation.py` (create) | normalized row → transaction dict, the §5 rules |
+| `importers/import_non_btc_legs.py` (create) | CLI + DB write via `import_and_verify` |
+| `config.py` (modify) | `swap_realizes` in every profile's `tax_rules` |
+| `calculators/crypto_fifo_tracker.py` (modify) | read `swap_realizes`, refuse `False` |
+| `doc/compliance.md` (create) | the evidence method, no data |
+| `doc/en/crypto_to_crypto_guide.md`, `doc/pt/crypto_to_crypto_guide.md` (modify) | assumption, not law |
+| `tests/test_non_btc_readers.py`, `tests/test_non_btc_valuation.py`, `tests/test_import_non_btc_legs.py`, `tests/test_swap_realizes.py` (create) | one test module per unit |
+
+Normalized row — the contract between readers and valuation, used by every task:
+
+```python
+# A reader yields dicts with exactly these keys.
+{
+    'when':      '2024-03-05T10:00:00+00:00',  # ISO 8601, UTC, str
+    'kind':      'TRADE',        # TRADE | CONVERT | TRANSFER_IN | TRANSFER_OUT | FEE
+    'give_asset': 'EUR',         # asset leaving (may be fiat), '' if none
+    'give_amount': 10000.0,     # positive float
+    'take_asset': 'USDC',        # asset arriving, '' if none
+    'take_amount': 10700.0,   # positive float
+    'fee_asset':  '',            # '' when no fee
+    'fee_amount': 0.0,
+    'exchange':   'Bybit',
+    'ref':        '2280000000376446136',  # exchange reference, '' if absent
+}
+```
+
+---
+
+### Task 1: `swap_group_id` column
+
+**Files:**
+- Create: `calculators/update_fifo_schema_swap_group.py`
+- Test: `tests/test_import_non_btc_legs.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+"""Non-BTC legs importer: schema, idempotency, and the BTC ledger it must not touch."""
+import os
+import sqlite3
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
+
+
+def _columns(db_path, table):
+    conn = sqlite3.connect(db_path)
+    try:
+        return [r[1] for r in conn.execute(f'PRAGMA table_info({table})')]
+    finally:
+        conn.close()
+
+
+def test_migration_adds_swap_group_id(db_path):
+    """The migration adds the column and its index, and is safe to re-run."""
+    script = os.path.join(PROJECT_ROOT, 'calculators', 'update_fifo_schema_swap_group.py')
+
+    for _ in range(2):  # idempotent: second run must not fail
+        r = subprocess.run([sys.executable, script, db_path], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+
+    assert 'swap_group_id' in _columns(db_path, 'transactions')
+
+    conn = sqlite3.connect(db_path)
+    try:
+        idx = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='transactions'")]
+    finally:
+        conn.close()
+    assert 'idx_transactions_swap_group' in idx
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `venv/bin/pytest tests/test_import_non_btc_legs.py::test_migration_adds_swap_group_id -v`
+Expected: FAIL — the script does not exist, `returncode == 2`.
+
+- [ ] **Step 3: Write the migration**
+
+```python
+#!/usr/bin/env python3
+"""Add transactions.swap_group_id — the link between the two legs of one swap.
+
+Idempotent: checks PRAGMA table_info before ALTER, creates the index with
+IF NOT EXISTS. Takes the database path as argv[1], defaults to config.
+
+Usage: python3 calculators/update_fifo_schema_swap_group.py [db_path]
+"""
+import os
+import sqlite3
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import DATABASE_PATH
+
+COLUMN = 'swap_group_id'
+INDEX = 'idx_transactions_swap_group'
+
+
+def migrate(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute('BEGIN')
+        existing = [row[1] for row in conn.execute('PRAGMA table_info(transactions)')]
+        if COLUMN in existing:
+            print(f"✓ Column '{COLUMN}' already present — nothing to do")
+        else:
+            conn.execute(f'ALTER TABLE transactions ADD COLUMN {COLUMN} TEXT')
+            print(f"✓ Column '{COLUMN}' added")
+        conn.execute(f'CREATE INDEX IF NOT EXISTS {INDEX} ON transactions({COLUMN})')
+        print(f"✓ Index '{INDEX}' present")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+if __name__ == '__main__':
+    migrate(sys.argv[1] if len(sys.argv) > 1 else DATABASE_PATH)
+```
+
+- [ ] **Step 4: Run it and watch it pass**
+
+Run: `venv/bin/pytest tests/test_import_non_btc_legs.py::test_migration_adds_swap_group_id -v`
+Expected: PASS (2 runs of the script inside the test, both exit 0).
+
+- [ ] **Step 5: Add the column to the schema source of truth**
+
+`doc/schema.sql` is the single source the tests build fixtures from
+(`doc/project_guidelines.md` §Schema DB). Add to the `transactions` table
+definition, after `record_hash`:
+
+```sql
+    swap_group_id TEXT,                            -- both legs of one swap share this
+```
+
+and after the table:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_transactions_swap_group ON transactions(swap_group_id);
+```
+
+- [ ] **Step 6: Run the whole suite** — the fixture DB now carries the column, nothing else may break.
+
+Run: `venv/bin/pytest tests/ -q`
+Expected: all green (65 at this point).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add calculators/update_fifo_schema_swap_group.py tests/test_import_non_btc_legs.py doc/schema.sql
+git commit -m "feat(schema): swap_group_id on transactions, idempotent migration"
+```
+
+---
+
+### Task 2: Trade-history reader (pair-based exports)
+
+Shape: one row per fill, a `Pair` column like `BTCUSDT`, a `Side`, and amounts
+carrying their unit as a suffix (`0.0024BTC`, `157.978248USDT`).
+
+**Files:**
+- Create: `importers/non_btc_readers.py`
+- Test: `tests/test_non_btc_readers.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+"""Readers: export shape → normalized rows. Synthetic fixtures (public repo)."""
+import io
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from importers.non_btc_readers import read_trade_history
+
+TRADE_HISTORY = """Date(UTC),Pair,Side,Price,Executed,Amount,Fee
+2024-01-15 10:00:00,BTCUSDT,SELL,60000.00,0.00100000BTC,60.00000000USDT,0.06000000USDT
+2024-01-15 10:00:01,BTCEUR,SELL,55000.00,0.00200000BTC,110.00000000EUR,0.11000000EUR
+"""
+
+
+def test_trade_history_splits_pair_into_assets():
+    rows = list(read_trade_history(io.StringIO(TRADE_HISTORY), exchange='Binance'))
+
+    assert len(rows) == 2
+    first = rows[0]
+    assert first['kind'] == 'TRADE'
+    assert first['give_asset'] == 'BTC'
+    assert first['give_amount'] == pytest.approx(0.001)
+    assert first['take_asset'] == 'USDT'
+    assert first['take_amount'] == pytest.approx(60.0)
+    assert first['fee_asset'] == 'USDT'
+    assert first['fee_amount'] == pytest.approx(0.06)
+    assert first['when'] == '2024-01-15T10:00:00+00:00'
+    assert first['exchange'] == 'Binance'
+
+
+def test_trade_history_unknown_pair_raises():
+    """A pair the reader cannot split must stop the import, not be guessed."""
+    bad = "Date(UTC),Pair,Side,Price,Executed,Amount,Fee\n2024-01-15 10:00:00,WEIRD,SELL,1,1WEIRD,1WEIRD,0WEIRD\n"
+    with pytest.raises(ValueError, match='WEIRD'):
+        list(read_trade_history(io.StringIO(bad), exchange='Binance'))
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `venv/bin/pytest tests/test_non_btc_readers.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'importers.non_btc_readers'`.
+
+- [ ] **Step 3: Write the reader**
+
+```python
+"""Readers for the non-BTC legs of exchange exports.
+
+Each reader takes an open text file and yields normalized rows (the contract is
+documented in doc/plans/2026-10-16-non-btc-legs.md). Pure functions: no DB, no
+network, no config. Unknown shapes raise ValueError — a leg guessed wrong is
+worse than an import that stops.
+"""
+import csv
+import re
+from datetime import datetime, timezone
+
+# Assets that may appear as the quote side of a pair. Longest first, so that
+# 'BTCUSDT' splits into BTC/USDT and not BTC/USD + 'T'.
+KNOWN_QUOTES = ('USDT', 'USDC', 'BUSD', 'EUR', 'USD', 'BTC', 'ETH')
+
+_AMOUNT_RE = re.compile(r'^\s*(-?[\d.,]+)\s*([A-Za-z]*)\s*$')
+
+
+def _utc(value, fmt='%Y-%m-%d %H:%M:%S'):
+    """Export timestamps are UTC without offset; emit explicit ISO 8601 UTC."""
+    return datetime.strptime(value.strip(), fmt).replace(tzinfo=timezone.utc).isoformat()
+
+
+def split_amount(raw):
+    """'0.0024BTC' → (0.0024, 'BTC'); '110.00' → (110.0, '')."""
+    m = _AMOUNT_RE.match(str(raw))
+    if not m:
+        raise ValueError(f'unparsable amount: {raw!r}')
+    number, unit = m.groups()
+    return abs(float(number.replace(',', ''))), unit.upper()
+
+
+def split_pair(pair):
+    """'BTCUSDT' → ('BTC', 'USDT'). Raises on a pair we do not recognise."""
+    pair = pair.strip().upper()
+    for quote in KNOWN_QUOTES:
+        if pair.endswith(quote) and len(pair) > len(quote):
+            return pair[: -len(quote)], quote
+    raise ValueError(f'unknown pair, cannot split into assets: {pair!r}')
+
+
+def read_trade_history(fh, exchange):
+    """Trade-history export: one row per fill, pair + side + suffixed amounts."""
+    for row in csv.DictReader(fh):
+        base, quote = split_pair(row['Pair'])
+        executed, _ = split_amount(row['Executed'])
+        amount, _ = split_amount(row['Amount'])
+        fee_amount, fee_asset = split_amount(row['Fee'] or '0')
+        side = (row['Side'] or '').strip().upper()
+        give_asset, give_amount, take_asset, take_amount = (
+            (base, executed, quote, amount) if side == 'SELL'
+            else (quote, amount, base, executed)
+        )
+        yield {
+            'when': _utc(row['Date(UTC)']),
+            'kind': 'TRADE',
+            'give_asset': give_asset,
+            'give_amount': give_amount,
+            'take_asset': take_asset,
+            'take_amount': take_amount,
+            'fee_asset': fee_asset,
+            'fee_amount': fee_amount,
+            'exchange': exchange,
+            'ref': (row.get('Order No.') or '').strip(),
+        }
+```
+
+- [ ] **Step 4: Run it and watch it pass**
+
+Run: `venv/bin/pytest tests/test_non_btc_readers.py -v`
+Expected: 2 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add importers/non_btc_readers.py tests/test_non_btc_readers.py
+git commit -m "feat(readers): trade-history reader for non-BTC legs"
+```
+
+---
+
+### Task 3: Account-history reader (per-asset rows)
+
+Shape: one row per movement with `Transaction Type`, `Asset`, `Quantity
+Transacted` and a fiat `Subtotal` — the account history of a retail exchange.
+`Receive`/`Send` are transfers, `… Sell`/`… Buy` are trades against fiat,
+`Withdrawal` of a crypto asset with a fiat subtotal is a conversion.
+
+**Files:**
+- Modify: `importers/non_btc_readers.py`
+- Test: `tests/test_non_btc_readers.py`
+
+- [ ] **Step 1: Write the failing test** (append to the test module)
+
+```python
+from importers.non_btc_readers import read_account_history
+
+ACCOUNT_HISTORY = """ID,Timestamp,Transaction Type,Asset,Quantity Transacted,Price Currency,Price at Transaction,Subtotal,Total (inclusive of fees and/or spread),Fees and/or Spread
+a1,2024-02-20 09:00:00 UTC,Receive,USDC,1500.0,EUR,€0.93,€1395.0,€1395.0,€0.00
+a2,2024-03-05 11:00:00 UTC,Advanced Trade Sell,USDC,2.0,EUR,€0.93,€1.86,€1.86,€0.00
+a3,2024-02-21 08:00:00 UTC,Withdrawal,USDC,-50000.0,EUR,€0.92,€46500.0,€46500.0,€0.00
+"""
+
+
+def test_account_history_classifies_receive_sell_and_withdrawal():
+    rows = list(read_account_history(io.StringIO(ACCOUNT_HISTORY), exchange='Coinbase'))
+
+    kinds = [(r['kind'], r['give_asset'], r['take_asset']) for r in rows]
+    assert kinds == [
+        ('TRANSFER_IN', '', 'USDC'),      # Receive: arrival, not an acquisition
+        ('TRADE', 'USDC', 'EUR'),         # sale against fiat
+        ('CONVERT', 'USDC', 'EUR'),       # crypto out with a fiat subtotal
+    ]
+    assert rows[0]['take_amount'] == pytest.approx(1500.0)
+    assert rows[1]['take_amount'] == pytest.approx(1.86)
+    assert rows[2]['give_amount'] == pytest.approx(50000.0)
+    assert rows[2]['take_amount'] == pytest.approx(46500.0)
+
+
+def test_account_history_skips_fiat_only_rows():
+    """A fiat deposit or withdrawal is bank plumbing, not a crypto leg."""
+    fiat = ACCOUNT_HISTORY.replace('Receive,USDC', 'Deposit,EUR')
+    rows = list(read_account_history(io.StringIO(fiat), exchange='Coinbase'))
+    assert all(r['take_asset'] != 'EUR' or r['give_asset'] for r in rows)
+    assert len(rows) == 2
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `venv/bin/pytest tests/test_non_btc_readers.py -k account_history -v`
+Expected: FAIL — `ImportError: cannot import name 'read_account_history'`.
+
+- [ ] **Step 3: Write the reader** (append to `importers/non_btc_readers.py`)
+
+```python
+FIAT = ('EUR', 'USD', 'GBP', 'CHF')
+
+
+def _eur(raw):
+    """'€1395.0' → 1395.0; '' → 0.0."""
+    cleaned = str(raw).replace('€', '').replace(',', '').strip()
+    return abs(float(cleaned)) if cleaned else 0.0
+
+
+def read_account_history(fh, exchange):
+    """Account-history export: one row per movement, per asset."""
+    for row in csv.DictReader(fh):
+        asset = (row['Asset'] or '').strip().upper()
+        if asset in FIAT:
+            continue  # fiat deposits/withdrawals are bank plumbing
+        kind_raw = (row['Transaction Type'] or '').strip()
+        qty = abs(float(row['Quantity Transacted']))
+        fiat_value = _eur(row['Subtotal'])
+        when = _utc(row['Timestamp'][:19], fmt='%Y-%m-%d %H:%M:%S')
+        base = {
+            'when': when, 'fee_asset': '', 'fee_amount': _eur(row.get('Fees and/or Spread')),
+            'exchange': exchange, 'ref': (row.get('ID') or '').strip(),
+        }
+        if kind_raw in ('Receive', 'Deposit'):
+            yield {**base, 'kind': 'TRANSFER_IN', 'give_asset': '', 'give_amount': 0.0,
+                   'take_asset': asset, 'take_amount': qty}
+        elif kind_raw in ('Send',):
+            yield {**base, 'kind': 'TRANSFER_OUT', 'give_asset': asset, 'give_amount': qty,
+                   'take_asset': '', 'take_amount': 0.0}
+        elif 'Sell' in kind_raw:
+            yield {**base, 'kind': 'TRADE', 'give_asset': asset, 'give_amount': qty,
+                   'take_asset': 'EUR', 'take_amount': fiat_value}
+        elif 'Buy' in kind_raw:
+            yield {**base, 'kind': 'TRADE', 'give_asset': 'EUR', 'give_amount': fiat_value,
+                   'take_asset': asset, 'take_amount': qty}
+        elif kind_raw == 'Withdrawal':
+            # Crypto leaving with a fiat subtotal is a conversion, not a transfer.
+            if fiat_value > 0:
+                yield {**base, 'kind': 'CONVERT', 'give_asset': asset, 'give_amount': qty,
+                       'take_asset': 'EUR', 'take_amount': fiat_value}
+            else:
+                yield {**base, 'kind': 'TRANSFER_OUT', 'give_asset': asset,
+                       'give_amount': qty, 'take_asset': '', 'take_amount': 0.0}
+        else:
+            raise ValueError(f'unknown account-history type: {kind_raw!r}')
+```
+
+- [ ] **Step 4: Run it and watch it pass**
+
+Run: `venv/bin/pytest tests/test_non_btc_readers.py -v`
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add importers/non_btc_readers.py tests/test_non_btc_readers.py
+git commit -m "feat(readers): account-history reader"
+```
+
+---
+
+### Task 4: Deposit/withdrawal reader (fiat↔crypto conversions)
+
+Shape: a preamble line starting with `UID:`, then `Date & Time(UTC)`, `Coin`,
+`QTY` (signed), `Type` (`Fiat`, `Deposit`, `Withdraw`, `Transfer in/out`) and a
+`Description` (`Convert`, `Deposit`, …). A conversion is two rows with the same
+timestamp to the second: fiat out, crypto in.
+
+**Files:**
+- Modify: `importers/non_btc_readers.py`
+- Test: `tests/test_non_btc_readers.py`
+
+- [ ] **Step 1: Write the failing test** (append)
+
+```python
+from importers.non_btc_readers import read_deposit_withdrawal
+
+DEPOSIT_WITHDRAWAL = """UID: 123,Company Name: ,Country: 
+Uid,Date & Time(UTC),Coin,QTY,Type,Account Balance,Description
+123,2024-03-05 10:00:00,USDC,10700.000000,Fiat,10700.000000,Convert
+123,2024-03-05 09:59:50,EUR,-10000.000000,Fiat,0.000000,Convert
+123,2024-03-05 10:15:00,USDC,-10650.000000,Withdraw,0.000000,Withdrawal
+"""
+
+
+def test_deposit_withdrawal_pairs_a_convert():
+    rows = list(read_deposit_withdrawal(io.StringIO(DEPOSIT_WITHDRAWAL), exchange='Bybit'))
+
+    convert = [r for r in rows if r['kind'] == 'CONVERT']
+    assert len(convert) == 1
+    assert convert[0]['give_asset'] == 'EUR'
+    assert convert[0]['give_amount'] == pytest.approx(10000.0)
+    assert convert[0]['take_asset'] == 'USDC'
+    assert convert[0]['take_amount'] == pytest.approx(10700.0)
+
+    out = [r for r in rows if r['kind'] == 'TRANSFER_OUT']
+    assert len(out) == 1
+    assert out[0]['give_amount'] == pytest.approx(10650.0)
+
+
+def test_deposit_withdrawal_unpaired_convert_raises():
+    """Half a conversion is a broken export: stop, do not invent the other leg."""
+    half = DEPOSIT_WITHDRAWAL.replace('123,2024-03-05 09:59:50,EUR,-10000.000000,Fiat,0.000000,Convert\n', '')
+    with pytest.raises(ValueError, match='unpaired'):
+        list(read_deposit_withdrawal(io.StringIO(half), exchange='Bybit'))
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `venv/bin/pytest tests/test_non_btc_readers.py -k deposit_withdrawal -v`
+Expected: FAIL — `ImportError: cannot import name 'read_deposit_withdrawal'`.
+
+- [ ] **Step 3: Write the reader** (append)
+
+```python
+def read_deposit_withdrawal(fh, exchange):
+    """Deposit/withdrawal export. Conversions are two rows sharing a minute."""
+    lines = fh.read().splitlines()
+    if lines and lines[0].startswith('UID'):
+        lines = lines[1:]
+    rows = list(csv.DictReader(lines))
+
+    converts, others = {}, []
+    for row in rows:
+        coin = (row['Coin'] or '').strip().upper()
+        qty = float(row['QTY'])
+        when = _utc(row['Date & Time(UTC)'])
+        desc = (row['Description'] or '').strip()
+        if desc == 'Convert':
+            # Group on the minute: the two legs of one conversion are seconds apart.
+            converts.setdefault(when[:16], []).append((coin, qty, when))
+        elif desc.startswith('Withdraw'):
+            others.append({'when': when, 'kind': 'TRANSFER_OUT', 'give_asset': coin,
+                           'give_amount': abs(qty), 'take_asset': '', 'take_amount': 0.0,
+                           'fee_asset': '', 'fee_amount': 0.0, 'exchange': exchange, 'ref': ''})
+        elif desc.startswith('Deposit') or desc.startswith('Transfer'):
+            key = 'TRANSFER_IN' if qty > 0 else 'TRANSFER_OUT'
+            others.append({'when': when, 'kind': key,
+                           'give_asset': '' if qty > 0 else coin, 'give_amount': 0.0 if qty > 0 else abs(qty),
+                           'take_asset': coin if qty > 0 else '', 'take_amount': abs(qty) if qty > 0 else 0.0,
+                           'fee_asset': '', 'fee_amount': 0.0, 'exchange': exchange, 'ref': ''})
+        else:
+            raise ValueError(f'unknown deposit/withdrawal description: {desc!r}')
+
+    for minute, legs in sorted(converts.items()):
+        given = [leg for leg in legs if leg[1] < 0]
+        taken = [leg for leg in legs if leg[1] > 0]
+        if len(given) != 1 or len(taken) != 1:
+            raise ValueError(f'unpaired convert at {minute}: {legs!r}')
+        (give_asset, give_qty, _), (take_asset, take_qty, when) = given[0], taken[0]
+        yield {'when': when, 'kind': 'CONVERT', 'give_asset': give_asset,
+               'give_amount': abs(give_qty), 'take_asset': take_asset, 'take_amount': take_qty,
+               'fee_asset': '', 'fee_amount': 0.0, 'exchange': exchange, 'ref': ''}
+
+    for row in others:
+        yield row
+```
+
+- [ ] **Step 4: Run it and watch it pass**
+
+Run: `venv/bin/pytest tests/test_non_btc_readers.py -v`
+Expected: 6 passed.
+
+- [ ] **Step 5: Run ruff and commit**
+
+```bash
+venv/bin/ruff check .
+git add importers/non_btc_readers.py tests/test_non_btc_readers.py
+git commit -m "feat(readers): deposit/withdrawal reader, conversions paired by minute"
+```
+
+---
+
+### Task 5: Valuation — normalized row → transaction dicts
+
+The §5 rules of the spec, as one pure function. It returns a list because a
+swap produces two transactions, a transfer none.
+
+**Files:**
+- Create: `importers/non_btc_valuation.py`
+- Test: `tests/test_non_btc_valuation.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+"""Valuation rules: who creates a lot, at what cost, and with which link."""
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from importers.non_btc_valuation import value_row
+
+
+class FakeRates:
+    """Stand-in for ecb_rates/crypto_prices: fixed, explicit, no network."""
+    def fiat_to_eur(self, amount, currency, when):
+        return amount if currency == 'EUR' else amount * 0.93
+
+    def crypto_to_eur(self, coin, amount, when):
+        return amount * 60000.0 if coin == 'BTC' else amount * 0.93
+
+
+RATES = FakeRates()
+
+
+def _row(**kw):
+    base = {'when': '2024-03-05T10:00:00+00:00', 'kind': 'CONVERT', 'give_asset': 'EUR',
+            'give_amount': 10000.0, 'take_asset': 'USDC', 'take_amount': 10700.0,
+            'fee_asset': '', 'fee_amount': 0.0, 'exchange': 'Bybit', 'ref': 'r1'}
+    base.update(kw)
+    return base
+
+
+def test_fiat_buys_crypto_uses_the_fiat_paid():
+    """Cost basis is what left the account, not the value at arrival elsewhere."""
+    txs = value_row(_row(), RATES)
+
+    assert len(txs) == 1
+    tx = txs[0]
+    assert tx['transaction_type'] == 'BUY'
+    assert tx['cryptocurrency'] == 'USDC'
+    assert tx['amount'] == pytest.approx(10700.0)
+    assert tx['total_value'] == pytest.approx(10000.0)
+    assert tx['price_per_unit'] == pytest.approx(10000.0 / 10700.0)
+    assert tx['swap_group_id'] is None
+
+
+def test_crypto_sold_for_fiat_is_a_sell():
+    txs = value_row(_row(kind='TRADE', give_asset='USDC', give_amount=2.0,
+                         take_asset='EUR', take_amount=1.86), RATES)
+
+    assert [t['transaction_type'] for t in txs] == ['SELL']
+    assert txs[0]['cryptocurrency'] == 'USDC'
+    assert txs[0]['total_value'] == pytest.approx(1.86)
+
+
+def test_crypto_for_crypto_emits_two_linked_legs():
+    txs = value_row(_row(kind='TRADE', give_asset='BTC', give_amount=2.0,
+                         take_asset='USDT', take_amount=120000.0, ref='o9'), RATES)
+
+    assert [t['transaction_type'] for t in txs] == ['SELL', 'BUY']
+    assert txs[0]['cryptocurrency'] == 'BTC'
+    assert txs[1]['cryptocurrency'] == 'USDT'
+    # Both legs valued at the EUR value of the asset given up.
+    assert txs[0]['total_value'] == pytest.approx(120000.0)
+    assert txs[1]['total_value'] == pytest.approx(120000.0)
+    assert txs[0]['swap_group_id'] == txs[1]['swap_group_id'] != None  # noqa: E711
+
+
+def test_transfer_creates_nothing():
+    assert value_row(_row(kind='TRANSFER_IN', give_asset='', give_amount=0.0,
+                          take_asset='USDC', take_amount=10640.0), RATES) == []
+    assert value_row(_row(kind='TRANSFER_OUT', give_asset='USDC', give_amount=10650.0,
+                          take_asset='', take_amount=0.0), RATES) == []
+
+
+def test_dust_is_dropped():
+    assert value_row(_row(take_amount=1e-9, give_amount=1e-9), RATES) == []
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `venv/bin/pytest tests/test_non_btc_valuation.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'importers.non_btc_valuation'`.
+
+- [ ] **Step 3: Write the valuation module**
+
+```python
+"""Valuation rules for non-BTC legs (spec §5).
+
+Pure: a normalized row plus a rate source in, transaction dicts out. The rate
+source is injected so tests do not need the network and so the caller decides
+whether a missing rate is fatal (it is: see import_non_btc_legs).
+"""
+import hashlib
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from calculators.crypto_fifo_tracker import DUST_THRESHOLD
+
+FIAT = ('EUR', 'USD', 'GBP', 'CHF')
+DUST = float(DUST_THRESHOLD)
+
+
+def _swap_id(row):
+    """Stable id for the two legs of one swap: same inputs, same id, always."""
+    raw = f"{row['when']}|{row['exchange']}|{row['give_asset']}|{row['give_amount']}|{row['take_asset']}|{row['take_amount']}|{row['ref']}"
+    return 'swap-' + hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
+
+
+def _tx(row, tx_type, crypto, amount, total_value, swap_group_id=None):
+    return {
+        'transaction_date': row['when'],
+        'transaction_type': tx_type,
+        'cryptocurrency': crypto,
+        'amount': amount,
+        'price_per_unit': (total_value / amount) if amount else 0.0,
+        'total_value': total_value,
+        'fee_amount': 0.0,
+        'exchange_name': row['exchange'],
+        'transaction_id': row['ref'],
+        'swap_group_id': swap_group_id,
+    }
+
+
+def value_row(row, rates):
+    """Return the transactions a normalized row produces: 0, 1 or 2."""
+    if row['kind'] in ('TRANSFER_IN', 'TRANSFER_OUT'):
+        return []  # moving your own asset is neither acquisition nor disposal
+
+    give, take = row['give_asset'], row['take_asset']
+    give_amt, take_amt = row['give_amount'], row['take_amount']
+    if max(give_amt, take_amt) <= DUST:
+        return []
+
+    give_is_fiat, take_is_fiat = give in FIAT, take in FIAT
+
+    if give_is_fiat and not take_is_fiat:
+        value = rates.fiat_to_eur(give_amt, give, row['when'])
+        return [_tx(row, 'BUY', take, take_amt, value)]
+
+    if take_is_fiat and not give_is_fiat:
+        value = rates.fiat_to_eur(take_amt, take, row['when'])
+        return [_tx(row, 'SELL', give, give_amt, value)]
+
+    if not give_is_fiat and not take_is_fiat:
+        value = rates.crypto_to_eur(give, give_amt, row['when'])
+        group = _swap_id(row)
+        return [
+            _tx(row, 'SELL', give, give_amt, value, group),
+            _tx(row, 'BUY', take, take_amt, value, group),
+        ]
+
+    return []  # fiat ↔ fiat is not a crypto leg
+```
+
+- [ ] **Step 4: Run it and watch it pass**
+
+Run: `venv/bin/pytest tests/test_non_btc_valuation.py -v`
+Expected: 5 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add importers/non_btc_valuation.py tests/test_non_btc_valuation.py
+git commit -m "feat(valuation): cost basis where the acquisition happened, swaps linked"
+```
+
+---
+
+### Task 6: The importer
+
+**Files:**
+- Create: `importers/import_non_btc_legs.py`
+- Test: `tests/test_import_non_btc_legs.py`
+
+- [ ] **Step 1: Write the failing tests** (append to the module from Task 1)
+
+```python
+import csv
+
+from importers.import_non_btc_legs import SOURCE_SUFFIX, import_non_btc_legs
+
+DEPOSIT_WITHDRAWAL = """UID: 123,Company Name: ,Country: 
+Uid,Date & Time(UTC),Coin,QTY,Type,Account Balance,Description
+123,2024-03-05 10:00:00,USDC,10700.000000,Fiat,10700.000000,Convert
+123,2024-03-05 09:59:50,EUR,-10000.000000,Fiat,0.000000,Convert
+"""
+
+
+def _seed_btc_row(db_path, source):
+    """A BTC row written by another importer, from the same file."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("""
+            INSERT INTO transactions (transaction_date, transaction_type, exchange_name,
+                cryptocurrency, amount, price_per_unit, total_value, fee_amount,
+                fee_currency, currency, source, imported_at, record_hash)
+            VALUES ('2024-02-01T09:00:00+00:00','SELL','Bybit','BTC',0.010000,50000.00,
+                    500.00,0,'EUR','EUR',?, '2026-01-01T00:00:00', 'hash-btc-1')
+        """, (source,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_import_writes_legs_without_touching_btc_rows(db_path, tmp_path, monkeypatch):
+    """The regression that matters: the #non-btc tag must not delete BTC rows."""
+    export = tmp_path / 'bybit_dw.csv'
+    export.write_text(DEPOSIT_WITHDRAWAL)
+    _seed_btc_row(db_path, export.name)
+
+    inserted = import_non_btc_legs(str(export), exchange_name='Bybit',
+                                   shape='deposit_withdrawal', db_path=db_path)
+
+    assert inserted == 1
+    conn = sqlite3.connect(db_path)
+    try:
+        btc = conn.execute("SELECT COUNT(*) FROM transactions WHERE cryptocurrency='BTC'").fetchone()[0]
+        legs = conn.execute("SELECT cryptocurrency, transaction_type, total_value, source "
+                            "FROM transactions WHERE cryptocurrency='USDC'").fetchall()
+    finally:
+        conn.close()
+
+    assert btc == 1, 'the BTC row of the same file was deleted'
+    assert legs == [('USDC', 'BUY', 10000.0, export.name + SOURCE_SUFFIX)]
+
+
+def test_import_is_idempotent(db_path, tmp_path):
+    export = tmp_path / 'bybit_dw.csv'
+    export.write_text(DEPOSIT_WITHDRAWAL)
+
+    import_non_btc_legs(str(export), 'Bybit', 'deposit_withdrawal', db_path)
+    first = sqlite3.connect(db_path).execute(
+        'SELECT record_hash FROM transactions ORDER BY id').fetchall()
+    import_non_btc_legs(str(export), 'Bybit', 'deposit_withdrawal', db_path)
+    second = sqlite3.connect(db_path).execute(
+        'SELECT record_hash FROM transactions ORDER BY id').fetchall()
+
+    assert first == second and len(first) == 1
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `venv/bin/pytest tests/test_import_non_btc_legs.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'importers.import_non_btc_legs'`.
+
+- [ ] **Step 3: Write the importer**
+
+```python
+#!/usr/bin/env python3
+"""Import the non-BTC legs of an exchange export.
+
+Additive by design: it writes only non-BTC rows, under a source tag of its own
+(`<filename>#non-btc`), so re-importing the legs can never delete the BTC rows
+that another importer wrote from the same file.
+
+Usage:
+    python3 importers/import_non_btc_legs.py <filepath> <shape> [exchange_name]
+
+    shape: trade_history | account_history | deposit_withdrawal
+"""
+import os
+import sys
+from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import DATABASE_PATH
+from importers.crypto_prices import CryptoPrices
+from importers.ecb_rates import ECBRates
+from importers.import_utils import compute_record_hash, import_and_verify
+from importers.non_btc_readers import (
+    read_account_history,
+    read_deposit_withdrawal,
+    read_trade_history,
+)
+from importers.non_btc_valuation import value_row
+
+SOURCE_SUFFIX = '#non-btc'
+
+READERS = {
+    'trade_history': read_trade_history,
+    'account_history': read_account_history,
+    'deposit_withdrawal': read_deposit_withdrawal,
+}
+
+
+class Rates:
+    """The project's rate sources behind the interface valuation expects.
+
+    A missing rate aborts the import (doc/project_guidelines.md §Conversione
+    valute): a leg valued with a guessed rate is worse than no leg.
+    """
+
+    def __init__(self):
+        self._ecb = ECBRates()
+        self._crypto = CryptoPrices()
+
+    def fiat_to_eur(self, amount, currency, when):
+        if currency == 'EUR':
+            return amount
+        if currency != 'USD':
+            raise ValueError(f'no rate source for fiat {currency}')
+        return self._ecb.usd_to_eur(amount, datetime.fromisoformat(when))
+
+    def crypto_to_eur(self, coin, amount, when):
+        value = self._crypto.crypto_to_eur(coin, amount, datetime.fromisoformat(when))
+        if value is None:
+            raise ValueError(f'no price for {coin} on {when}: import aborted')
+        return value
+
+
+def import_non_btc_legs(filepath, exchange_name, shape, db_path=None):
+    """Read one export, write its non-BTC legs. Returns the number of rows."""
+    if shape not in READERS:
+        raise ValueError(f'unknown shape {shape!r}, expected one of {sorted(READERS)}')
+
+    source = os.path.basename(filepath) + SOURCE_SUFFIX
+    imported_at = datetime.now().isoformat()
+    rates = Rates()
+
+    with open(filepath, encoding='utf-8-sig') as fh:
+        rows = list(READERS[shape](fh, exchange_name))
+
+    txs = [tx for row in rows for tx in value_row(row, rates)
+           if tx['cryptocurrency'] != 'BTC']
+
+    print(f'  {len(rows)} rows read, {len(txs)} non-BTC legs to write')
+
+    def do_inserts(conn):
+        cursor = conn.cursor()
+        for tx in txs:
+            cursor.execute("""
+                INSERT INTO transactions (
+                    transaction_date, transaction_type, exchange_name, cryptocurrency,
+                    amount, price_per_unit, total_value, fee_amount, fee_currency,
+                    currency, transaction_id, notes, source, imported_at, record_hash,
+                    swap_group_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                tx['transaction_date'], tx['transaction_type'], tx['exchange_name'],
+                tx['cryptocurrency'], tx['amount'], tx['price_per_unit'],
+                tx['total_value'], tx['fee_amount'], 'EUR', 'EUR',
+                tx['transaction_id'], f"non-BTC leg from {os.path.basename(filepath)}",
+                source, imported_at,
+                compute_record_hash(source, tx['transaction_date'], tx['transaction_type'],
+                                    tx['exchange_name'], tx['cryptocurrency'],
+                                    tx['amount'], tx['total_value'], tx['fee_amount']),
+                tx['swap_group_id'],
+            ))
+        return len(txs)
+
+    return import_and_verify(db_path or DATABASE_PATH, source, do_inserts)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 3:
+        print(__doc__)
+        sys.exit(1)
+    import_non_btc_legs(sys.argv[1], sys.argv[3] if len(sys.argv) > 3 else 'Unknown', sys.argv[2])
+```
+
+- [ ] **Step 4: Run them and watch them pass**
+
+Run: `venv/bin/pytest tests/test_import_non_btc_legs.py -v`
+Expected: 3 passed (migration + the two above).
+
+- [ ] **Step 5: Run ruff and the whole suite, then commit**
+
+```bash
+venv/bin/ruff check .
+venv/bin/pytest tests/ -q
+git add importers/import_non_btc_legs.py tests/test_import_non_btc_legs.py
+git commit -m "feat(importers): import_non_btc_legs with an additive source tag"
+```
+
+---
+
+### Task 7: `swap_realizes` as a setting
+
+**Files:**
+- Modify: `config.py` (every entry of `COUNTRY_PROFILES`, and the module-level exports near line 132)
+- Modify: `calculators/crypto_fifo_tracker.py` (`calculate_fifo_lots`, the query at line 115 and the SELL branch)
+- Test: `tests/test_swap_realizes.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+"""The crypto-to-crypto rule is a setting, and an unsupported value must fail loudly."""
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+import config
+
+
+def test_profiles_declare_swap_realizes():
+    for code, profile in config.COUNTRY_PROFILES.items():
+        assert 'swap_realizes' in profile['tax_rules'], f'{code} does not declare the rule'
+
+
+def test_module_exports_the_flag():
+    assert config.SWAP_REALIZES is True
+
+
+def test_deferral_path_refuses_instead_of_guessing(db_path, monkeypatch):
+    """swap_realizes=False needs a deferral engine we have not built: say so."""
+    from calculators.crypto_fifo_tracker import CryptoFIFOTracker
+
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(NotImplementedError, match='swap_realizes'):
+            tracker.calculate_fifo_lots('BTC')
+    finally:
+        tracker.close()
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `venv/bin/pytest tests/test_swap_realizes.py -v`
+Expected: FAIL — `KeyError: 'swap_realizes'` on the first test.
+
+- [ ] **Step 3: Add the setting to `config.py`**
+
+In each profile's `tax_rules` (PT first, then the commented templates):
+
+```python
+            "swap_realizes": True,   # crypto→crypto realizes at the swap.
+                                     # ASSUMPTION, not verified law — doc/compliance.md
+```
+
+and with the other module-level exports (after `DECLARE_EXEMPT`, line ~134):
+
+```python
+SWAP_REALIZES = _profile["tax_rules"].get("swap_realizes", True)
+```
+
+- [ ] **Step 4: Honour it in the engine**
+
+In `calculators/crypto_fifo_tracker.py`, next to the `DUST_THRESHOLD` import
+block at the top:
+
+```python
+from config import SWAP_REALIZES
+```
+
+and as the first statement of `calculate_fifo_lots` (line 107, before the
+`print`):
+
+```python
+        if not SWAP_REALIZES:
+            raise NotImplementedError(
+                'swap_realizes=False requires the deferral path (the acquired asset '
+                'inherits date and value of the asset given up), which is not '
+                'implemented. See doc/specs/2026-10-16-non-btc-legs-design.md §7.'
+            )
+```
+
+- [ ] **Step 5: Run it and watch it pass**
+
+Run: `venv/bin/pytest tests/test_swap_realizes.py -v`
+Expected: 3 passed.
+
+- [ ] **Step 6: Print the rule wherever a realized figure is printed**
+
+In `calculators/calculate_fifo.py`, in the `[4/4] Summary` block, add:
+
+```python
+    print(f"Tax rule in force: swap_realizes={SWAP_REALIZES} (config.py, profile {COUNTRY})")
+```
+
+with `from config import COUNTRY, SWAP_REALIZES` at the top of the file.
+
+- [ ] **Step 7: Run the suite and commit**
+
+```bash
+venv/bin/ruff check .
+venv/bin/pytest tests/ -q
+git add config.py calculators/crypto_fifo_tracker.py calculators/calculate_fifo.py tests/test_swap_realizes.py
+git commit -m "feat(config): swap_realizes as a declared tax rule, deferral path refused"
+```
+
+---
+
+### Task 8: Documentation
+
+**Files:**
+- Create: `doc/compliance.md`
+- Modify: `doc/en/crypto_to_crypto_guide.md` (lines 9 and 116), `doc/pt/crypto_to_crypto_guide.md` (lines 9 and 122), `doc/known_import_issues.md`, `doc/TODO.md`, `CLAUDE.md`
+
+- [ ] **Step 1: Write `doc/compliance.md`**
+
+```markdown
+# Compliance — making an import traceable
+
+Every row in `transactions` must be traceable to a document a third party can
+read. Three layers, and nothing crosses between them.
+
+## 1. The documents stay out of this repository
+
+This repo is public. Statements, conversion histories and withdrawal histories
+live in the operator's own archive, and their identifiers are never written
+into a versioned file. `data/` is gitignored as a whole; everything personal
+stays there or outside the repo.
+
+## 2. The database carries the provenance of every row
+
+- `source` — the file the row came from. Name imports after the document:
+  `YYYY-MM[-DD]_<exchange>_<what-it-is>.csv`.
+- `record_hash` — deterministic over the core fields, so a re-import of the
+  same file produces the same hashes and `import_and_verify` stays idempotent.
+- `swap_group_id` — the two legs of one swap.
+- the `/audit` page drills from a report line to the row, its source and hash.
+
+## 3. The local register links file to document
+
+`data/evidence_map.md`, one row per imported file:
+
+| import file | document in the archive | what it proves |
+|---|---|---|
+| `<filename>.csv` | `<archive reference>` | `<the leg or balance it evidences>` |
+
+A leg that exists only as a PDF is transcribed into a CSV, imported with
+`import_standard_csv.py`, and written up in `data/manual_entries_log.md`: what,
+why, the evidence, how, the effect, what is left to check.
+
+## 4. The tax rule is declared, never assumed in prose
+
+`tax_rules.swap_realizes` in `config.py` says whether a crypto-to-crypto swap
+realizes a gain. Its value is an assumption until a local tax professional
+confirms it, and every report that depends on it prints it.
+```
+
+- [ ] **Step 2: Demote the rule in both guides**
+
+`doc/en/crypto_to_crypto_guide.md`, replace line 9:
+
+```markdown
+**Whether a crypto-to-crypto swap is a taxable event depends on your
+jurisdiction**, and this tool does not decide for you: the answer is the
+setting `tax_rules.swap_realizes` in `config.py` (see `doc/compliance.md`).
+The default, `True`, treats every swap as a disposal of the asset given up —
+the common treatment, and the one this guide describes. Ask a local tax
+professional before relying on it.
+```
+
+and line 116 (stablecoin conversion):
+
+```markdown
+Same logic, under the same setting: with `swap_realizes = True` converting to a
+stablecoin is a disposal of the original crypto, and the stablecoin received
+has cost basis = value at the time of conversion. Buying a stablecoin **with
+fiat** is not a swap at all: it is an acquisition, and selling it back is a
+disposal whose result is the exchange-rate drift.
+```
+
+Mirror both in `doc/pt/crypto_to_crypto_guide.md` (lines 9 and 122), in
+Portuguese.
+
+- [ ] **Step 3: Update `doc/known_import_issues.md`**
+
+Add to the Binance table:
+
+```markdown
+| Gambe non-BTC dei trade non importate | L'importer dei trade tiene solo il lato BTC dei pair | Risolto 2026-10-16 | `import_non_btc_legs.py` con shape `trade_history` scrive l'altra gamba, collegata da `swap_group_id` |
+```
+
+and a new section:
+
+```markdown
+### Non-BTC legs (`import_non_btc_legs.py`)
+
+| Problema | Causa | Stato | Note |
+|----------|-------|-------|------|
+| Lotti stablecoin a parità 1,00 | Lotto inserito a mano senza tasso del giorno | Risolto 2026-10-16 | La valorizzazione usa il fiat effettivamente pagato sulla sede d'acquisto |
+| Lotti orfani | `purchase_transaction_id` senza riga in `transactions` | Rilevato | Il passo di verifica li segnala invece di portarli avanti |
+```
+
+- [ ] **Step 4: Tick the TODO items**
+
+In `doc/TODO.md`, mark the stablecoin and documentation items done, dated
+2026-10-16, pointing at `doc/specs/2026-10-16-non-btc-legs-design.md`.
+
+- [ ] **Step 5: Add the new files to CLAUDE.md**
+
+In the architecture section, one line for `importers/non_btc_readers.py`,
+`importers/non_btc_valuation.py`, `importers/import_non_btc_legs.py` and
+`doc/compliance.md`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add doc/compliance.md doc/en/crypto_to_crypto_guide.md doc/pt/crypto_to_crypto_guide.md doc/known_import_issues.md doc/TODO.md CLAUDE.md
+git commit -m "docs: compliance method, swap rule demoted to a declared assumption"
+```
+
+---
+
+### Task 9: Run it on the real data
+
+Not a code task: the operator runs it, with a backup and a regression check.
+Figures stay out of this repo — they go in the local register.
+
+- [ ] **Step 1: Back up the database**
+
+```bash
+cp data/crypto_fifo.db "data/backups/crypto_fifo.$(date +%Y%m%d-%H%M)-pre-non-btc-legs.db"
+```
+
+- [ ] **Step 2: Record the BTC baseline**
+
+```bash
+venv/bin/python - <<'PY'
+import sqlite3
+from config import DATABASE_PATH
+c = sqlite3.connect(f'file:{DATABASE_PATH}?mode=ro', uri=True)
+print(c.execute("""SELECT COUNT(*), ROUND(SUM(remaining_amount),8),
+                          ROUND(SUM(cost_basis*remaining_amount/original_amount),2)
+                   FROM fifo_lots WHERE cryptocurrency='BTC' AND remaining_amount>0""").fetchone())
+PY
+```
+
+Write the three numbers down: lots, BTC remaining, cost basis.
+
+- [ ] **Step 3: Migrate the schema**
+
+```bash
+venv/bin/python calculators/update_fifo_schema_swap_group.py
+```
+
+- [ ] **Step 4: Import each export, one per shape**
+
+```bash
+venv/bin/python importers/import_non_btc_legs.py data/binance_trade_history_all.csv trade_history Binance
+venv/bin/python importers/import_non_btc_legs.py data/coinbase_history.csv account_history Coinbase
+venv/bin/python importers/import_non_btc_legs.py <path-to-deposit-withdrawal-export> deposit_withdrawal Bybit
+```
+
+For a leg that exists only as a PDF: transcribe it into a CSV in the
+`template_manual_transactions.csv` shape, import it with
+`importers/import_standard_csv.py`, and write the register entry.
+
+- [ ] **Step 5: Recalculate and check the baseline did not move**
+
+```bash
+venv/bin/python calculators/calculate_fifo.py
+```
+
+Re-run Step 2. The three BTC numbers **must be identical**. If they moved,
+restore the backup and stop: the importer touched the BTC ledger, which is the
+one thing it may not do.
+
+- [ ] **Step 6: Write the register entries**
+
+`data/evidence_map.md` — one row per imported file, with the archive reference.
+`data/manual_entries_log.md` — one entry for any transcription, with effect
+(transactions before → after, lots, realized per year).
+
+- [ ] **Step 7: Open the questions the numbers raise**
+
+Realized results of a past tax year have changed. That is a question for the
+tax professional before any amended return, together with the one that decides
+`swap_realizes`.
+
+---
+
+## Self-review
+
+**Spec coverage:** §3 → Task 1. §4 readers → Tasks 2-4, importer → Task 6. §5
+valuation → Task 5. §6 evidence → Task 8 (`doc/compliance.md`) and Task 9
+(registers). §7 setting → Task 7, with the deferral path explicitly deferred
+and declared in the Scope note. §8 "what does not change" → the regression
+tests in Tasks 6 and 9. §9 testing → the test steps of every task. §10 risks →
+Task 9 steps 5 and 7.
+
+**Placeholders:** the only angle bracket left is `<path-to-deposit-withdrawal-export>`
+in Task 9, which is an operator path that cannot live in a public repo.
+
+**Type consistency:** the normalized row keys are defined once at the top and
+used verbatim in Tasks 2-5; `value_row(row, rates)` has the same signature in
+Task 5 and Task 6; `rates` implements `fiat_to_eur` and `crypto_to_eur` in both
+the test fake and the production `Rates`; `SOURCE_SUFFIX` is defined in Task 6
+and imported by its test.
