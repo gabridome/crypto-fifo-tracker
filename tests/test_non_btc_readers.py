@@ -416,3 +416,35 @@ def test_deposit_withdrawal_type_and_description_disagree_raises():
     with pytest.raises(ValueError, match='unexpected Description') as exc_info:
         list(read_deposit_withdrawal(io.StringIO(bad), exchange='Bybit'))
     assert 'Coin=' in str(exc_info.value) and 'Time=' in str(exc_info.value)
+
+
+def test_deposit_withdrawal_convert_just_over_the_window_raises():
+    """A real pair 121s apart is split, and each half raises rather than
+    being silently dropped or half-recorded."""
+    data = (
+        'UID: 1,Company Name: ,Country: \n'
+        'Uid,Date & Time(UTC),Coin,QTY,Type,Account Balance,Description\n'
+        '1,2024-01-01 00:00:00,EUR,-1000.000000,Fiat,0.000000,Convert\n'
+        '1,2024-01-01 00:02:01,USDC,1070.000000,Fiat,1070.000000,Convert\n'
+    )
+    with pytest.raises(ValueError, match='unpaired') as exc_info:
+        list(read_deposit_withdrawal(io.StringIO(data), exchange='Bybit'))
+    assert 'EUR' in str(exc_info.value)
+
+
+def test_deposit_withdrawal_two_conversions_inside_the_window_raise():
+    """Two legitimate conversions whose legs fall within the window must not
+    be mismatched into an invented pair: the group cannot resolve, so it
+    raises and names both coins."""
+    data = (
+        'UID: 1,Company Name: ,Country: \n'
+        'Uid,Date & Time(UTC),Coin,QTY,Type,Account Balance,Description\n'
+        '1,2024-01-01 00:00:00,EUR,-1000.000000,Fiat,0.000000,Convert\n'
+        '1,2024-01-01 00:01:00,USDC,1070.000000,Fiat,1070.000000,Convert\n'
+        '1,2024-01-01 00:01:50,GBP,-200.000000,Fiat,0.000000,Convert\n'
+        '1,2024-01-01 00:02:40,USDT,214.000000,Fiat,214.000000,Convert\n'
+    )
+    with pytest.raises(ValueError, match='unpaired') as exc_info:
+        list(read_deposit_withdrawal(io.StringIO(data), exchange='Bybit'))
+    message = str(exc_info.value)
+    assert 'EUR' in message and 'USDT' in message

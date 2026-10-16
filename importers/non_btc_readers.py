@@ -287,15 +287,31 @@ _TYPE_DIRECTIONS = {
 }
 VALID_TYPES = ('FIAT',) + tuple(_TYPE_DIRECTIONS)
 
-# The two legs of one conversion are documented as seconds apart, but the
-# fixture itself shows them straddling a minute boundary (09:59:50 and
-# 10:00:00) — truncating the timestamp to the minute would put them in two
-# different buckets and report both as unpaired. Clustering by the actual
-# gap to the previous leg, sorted chronologically, survives that: a
-# 10-second gap stays inside one cluster; a gap bigger than this window
-# starts a new one, so two genuinely unrelated conversions a few minutes
-# apart are not merged just because they share a calendar minute.
+# The observed gap between the two legs of one conversion is on the order of
+# seconds — the fixture's own pair is 10 seconds apart and straddles a minute
+# boundary (09:59:50 / 10:00:00), which is exactly what a truncated-minute
+# bucket gets wrong. This window is deliberately an order of magnitude wider
+# than that observed gap, so a boundary straddle cannot split a real pair.
+# It is a judgement call, not a figure derived from any specification or
+# from a real export (none is reproduced here — this repo is public).
+# Both ways of getting the window wrong still end in a raise, never an
+# invented conversion: too narrow splits one real pair into two one-leg
+# clusters, each reported as unpaired; too wide merges two unrelated
+# conversions into one cluster whose leg count cannot resolve to one each
+# way, also reported as unpaired, naming both coins.
 MAX_CONVERT_GAP_SECONDS = 120
+
+
+def _locator(row):
+    """The (Coin=, Time=) locator shared by every raise in this reader.
+
+    Coin is read the same way the main loop reads it — stripped and
+    upper-cased — so an error message never disagrees with the row it is
+    describing; building the locator twice, slightly differently, is how
+    that drift happens.
+    """
+    coin = (row.get('Coin') or '').strip().upper()
+    return f'(Coin={coin!r}, Time={row.get("Date & Time(UTC)")!r})'
 
 
 def _signed_qty(raw, row):
@@ -310,9 +326,7 @@ def _signed_qty(raw, row):
     """
     amount, unit = split_amount(raw)
     if unit:
-        raise ValueError(f'unexpected unit in QTY: {raw!r} '
-                          f'(Coin={row.get("Coin")!r}, '
-                          f'Time={row.get("Date & Time(UTC)")!r})')
+        raise ValueError(f'unexpected unit in QTY: {raw!r} {_locator(row)}')
     return -amount if str(raw).strip().startswith('-') else amount
 
 
@@ -327,6 +341,14 @@ def _cluster_converts(legs):
     cluster that ends up with anything other than exactly one leg each way
     still raises in the caller, naming the coins and the time, never the
     amounts.
+
+    Known limitation: each leg is compared to the *previous* leg, not to the
+    cluster's start, so a run of three or more conversions in quick
+    succession — each leg within the window of its neighbour, but the whole
+    run spanning much more than the window — collapses into a single
+    cluster, which then raises on the leg count. That is still safe (it
+    raises rather than mispairing), but such a file cannot be imported as-is;
+    it has to be split by hand into smaller chunks first.
     """
     ordered = sorted(legs, key=lambda leg: leg[2])
     groups = []
@@ -349,7 +371,15 @@ def read_deposit_withdrawal(fh, exchange):
     both have been seen. Everything is then sorted by `when` before yielding,
     so the output is chronological regardless of the order Convert pairs
     happened to resolve in — useful to anything downstream that assumes a
-    reader's rows arrive in time order, as the other two readers's do.
+    reader's rows arrive in time order, as the other two readers's do. This
+    means the whole file is held in memory at once (O(n) in row count),
+    unlike `read_trade_history` and `read_account_history`, which stream one
+    row at a time — a deliberate tradeoff for this shape, not an oversight.
+
+    The 'Account Balance' column is read by nothing in this function. It is
+    the natural signal for a future integrity check — does the balance move
+    by exactly the row's quantity, for that asset, row over row — but no
+    such check exists yet.
     """
     lines = fh.read().splitlines()
     if lines and lines[0].startswith('UID'):
@@ -364,7 +394,7 @@ def read_deposit_withdrawal(fh, exchange):
         when = _utc(row['Date & Time(UTC)'])
         desc = (row['Description'] or '').strip()
         type_raw = (row['Type'] or '').strip().upper()
-        locator = f'(Coin={coin!r}, Time={row.get("Date & Time(UTC)")!r})'
+        locator = _locator(row)
 
         if type_raw not in VALID_TYPES:
             raise ValueError(f'unknown Type {row["Type"]!r} {locator}')
