@@ -97,15 +97,21 @@ def test_fee_in_the_given_asset_is_part_of_the_cost():
 
 def test_fee_in_a_third_asset_refuses():
     """A fee paid in neither leg (a discount token) cannot be allocated here."""
-    with pytest.raises(ValueError, match='fee'):
+    with pytest.raises(ValueError, match='neither leg'):
         value_row(_row(kind='TRADE', give_asset='BTC', give_amount=2.0,
                        take_asset='USDT', take_amount=1000.0,
                        fee_asset='BNB', fee_amount=0.5), RATES)
 
 
 def test_fee_without_an_asset_refuses():
-    """A fee amount with no currency is not information: it is a guess."""
-    with pytest.raises(ValueError, match='fee'):
+    """A fee amount with no currency is not information: it is a guess.
+
+    This must raise on its own guard, not merely fall through to the "fee in
+    a third asset" one below it: a blank fee_asset also satisfies
+    `fee_asset not in (give, take)`, so without this exact match a passing
+    test here would not prove the blank-asset guard is reachable at all.
+    """
+    with pytest.raises(ValueError, match='no asset'):
         value_row(_row(kind='CONVERT', fee_asset='', fee_amount=25.0), RATES)
 
 

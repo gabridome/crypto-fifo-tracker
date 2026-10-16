@@ -95,6 +95,13 @@ def value_row(row, rates, row_ref=''):
     # in a third asset it cannot be allocated without valuing that asset too,
     # which this function has no mandate to do: it refuses.
     fee_asset, fee_amt = row['fee_asset'], row['fee_amount']
+    # Order matters: '' not in (give, take) is also true, so a blank
+    # fee_asset satisfies the membership check below too. This guard must
+    # run first, or it is dead code — the membership guard would catch a
+    # blank fee_asset first and report it as "neither leg" instead of "no
+    # asset", which is a worse message for the same row. Do not reorder
+    # these two without checking that each one's own test still needs it
+    # (see the mutation check noted in the two tests' commit message).
     if fee_amt > DUST and not fee_asset:
         raise ValueError(f'fee of {fee_amt} with no asset: cannot tell what was charged')
     if fee_amt > DUST and fee_asset not in (give, take):
