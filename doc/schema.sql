@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     -- Source tracking (added March 2026)
     source TEXT,              -- CSV filename or 'web_manual_entry'
     imported_at TEXT,         -- ISO timestamp of import
-    record_hash TEXT          -- SHA256 for dedup and audit
+    record_hash TEXT,         -- SHA256 for dedup and audit
+    swap_group_id TEXT                             -- both legs of one swap share this
 );
 
 -- FIFO lots table
@@ -69,6 +70,7 @@ CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(transaction_typ
 CREATE INDEX IF NOT EXISTS idx_transactions_source ON transactions(source);
 CREATE INDEX IF NOT EXISTS idx_transactions_hash ON transactions(record_hash);
 CREATE INDEX IF NOT EXISTS idx_transactions_imported_at ON transactions(imported_at);
+CREATE INDEX IF NOT EXISTS idx_transactions_swap_group ON transactions(swap_group_id);
 CREATE INDEX IF NOT EXISTS idx_fifo_lots_crypto ON fifo_lots(cryptocurrency);
 CREATE INDEX IF NOT EXISTS idx_fifo_lots_remaining ON fifo_lots(remaining_amount);
 CREATE INDEX IF NOT EXISTS idx_sale_matches_crypto ON sale_lot_matches(cryptocurrency);
