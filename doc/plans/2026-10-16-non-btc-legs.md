@@ -996,7 +996,7 @@ def test_zero_proceeds_withdrawals_are_listed_too(db_path, tmp_path, capsys):
                         shape='account_history', db_path=db_path)
 
     err = capsys.readouterr().err
-    assert 'recorded as a TRANSFER' in err
+    assert 'recorded as non-taxable' in err
     assert '25.00000000 USDC' in err
 
 
@@ -1131,16 +1131,19 @@ def import_non_btc_legs(filepath, exchange_name, shape, db_path=None):
             print(f"      {r['when'][:10]}  {r['give_amount']:.8f} {r['give_asset']} "
                   f"→ {r['take_amount']:.2f} {r['take_asset']}", file=sys.stderr)
 
-    # The opposite misclassification deserves the same net. A withdrawal whose
+    # The opposite misclassification deserves a net too. A withdrawal whose
     # proceeds are zero is recorded as a transfer, and a real disposal whose
     # value merely *rounds* to zero is indistinguishable from one that genuinely
-    # had no fiat side. Only one of the two directions had a safety net; now
-    # both do.
+    # had no fiat side. This list cannot be narrowed to the doubtful rows: which
+    # label produced a TRANSFER_OUT — a plain Send, or a withdrawal whose fiat
+    # subtotal came back blank — is a fact of the reader's classification and is
+    # not carried in the normalized row. So it names the whole class and says so,
+    # rather than claiming a precision it does not have.
     zero_out = [r for r in rows
                 if r['kind'] == 'TRANSFER_OUT' and r['give_amount'] > 0 and not r['take_asset']]
     if zero_out:
-        print(f'  ⚠ {len(zero_out)} withdrawal row(s) recorded as a TRANSFER (no proceeds) — '
-              f'confirm none of them was a sale:', file=sys.stderr)
+        print(f'  ⚠ {len(zero_out)} outgoing transfer(s) recorded as non-taxable — '
+              f'none of these produced a disposal; confirm that is right:', file=sys.stderr)
         for r in zero_out:
             print(f"      {r['when'][:10]}  {r['give_amount']:.8f} {r['give_asset']} out",
                   file=sys.stderr)
