@@ -364,3 +364,55 @@ def test_deposit_withdrawal_unpaired_convert_raises():
     half = DEPOSIT_WITHDRAWAL.replace('123,2024-03-05 09:59:50,EUR,-10000.000000,Fiat,0.000000,Convert\n', '')
     with pytest.raises(ValueError, match='unpaired'):
         list(read_deposit_withdrawal(io.StringIO(half), exchange='Bybit'))
+
+
+def _dw_row(qty, type_, description, coin='USDC', when='2024-03-05 10:15:00'):
+    return (
+        'UID: 123,Company Name: ,Country: \n'
+        'Uid,Date & Time(UTC),Coin,QTY,Type,Account Balance,Description\n'
+        f'123,{when},{coin},{qty},{type_},0.000000,{description}\n'
+    )
+
+
+def test_deposit_withdrawal_withdraw_with_positive_qty_raises():
+    """A Withdraw row claiming an inflow contradicts its own Type column."""
+    bad = _dw_row('10650.000000', 'Withdraw', 'Withdrawal')
+    with pytest.raises(ValueError, match='contradicts') as exc_info:
+        list(read_deposit_withdrawal(io.StringIO(bad), exchange='Bybit'))
+    assert 'Coin=' in str(exc_info.value) and 'Time=' in str(exc_info.value)
+
+
+def test_deposit_withdrawal_deposit_with_negative_qty_raises():
+    """A Deposit row claiming an outflow contradicts its own Type column."""
+    bad = _dw_row('-500.000000', 'Deposit', 'Deposit')
+    with pytest.raises(ValueError, match='contradicts') as exc_info:
+        list(read_deposit_withdrawal(io.StringIO(bad), exchange='Bybit'))
+    assert 'Coin=' in str(exc_info.value) and 'Time=' in str(exc_info.value)
+
+
+def test_deposit_withdrawal_unknown_type_raises():
+    """A Type this reader does not recognise must stop the import."""
+    bad = _dw_row('-500.000000', 'Staking', 'Reward')
+    with pytest.raises(ValueError, match='unknown Type') as exc_info:
+        list(read_deposit_withdrawal(io.StringIO(bad), exchange='Bybit'))
+    assert 'Coin=' in str(exc_info.value) and 'Time=' in str(exc_info.value)
+
+
+def test_deposit_withdrawal_fiat_type_with_non_convert_description_raises():
+    """A Fiat-typed row this reader cannot recognise (not a Convert leg)
+    must raise rather than being silently folded into the Convert pool.
+    """
+    bad = _dw_row('-500.000000', 'Fiat', 'Interest', coin='EUR')
+    with pytest.raises(ValueError, match='unexpected Description') as exc_info:
+        list(read_deposit_withdrawal(io.StringIO(bad), exchange='Bybit'))
+    assert 'Coin=' in str(exc_info.value) and 'Time=' in str(exc_info.value)
+
+
+def test_deposit_withdrawal_type_and_description_disagree_raises():
+    """A Withdraw row labelled as a Transfer in its own Description is
+    internally inconsistent — Type alone is not enough to classify it.
+    """
+    bad = _dw_row('-500.000000', 'Withdraw', 'Transfer out')
+    with pytest.raises(ValueError, match='unexpected Description') as exc_info:
+        list(read_deposit_withdrawal(io.StringIO(bad), exchange='Bybit'))
+    assert 'Coin=' in str(exc_info.value) and 'Time=' in str(exc_info.value)
