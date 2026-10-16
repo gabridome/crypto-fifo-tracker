@@ -369,6 +369,13 @@ def test_account_history_classifies_receive_sell_and_withdrawal():
     assert rows[2]['take_amount'] == pytest.approx(46500.0)
 
 
+def test_account_history_refuses_an_ambiguous_fiat_amount():
+    """A decimal comma must raise, not silently divide by a thousand."""
+    bad = ACCOUNT_HISTORY.replace('€1395.0', '€1.395,00')
+    with pytest.raises(ValueError, match='Subtotal'):
+        list(read_account_history(io.StringIO(bad), exchange='Coinbase'))
+
+
 def test_account_history_skips_fiat_only_rows():
     """A fiat deposit or withdrawal is bank plumbing, not a crypto leg."""
     fiat = ACCOUNT_HISTORY.replace('Receive,USDC', 'Deposit,EUR')
@@ -388,10 +395,27 @@ Expected: FAIL — `ImportError: cannot import name 'read_account_history'`.
 FIAT = ('EUR', 'USD', 'GBP', 'CHF')
 
 
-def _eur(raw):
-    """'€1395.0' → 1395.0; '' → 0.0."""
-    cleaned = str(raw).replace('€', '').replace(',', '').strip()
-    return abs(float(cleaned)) if cleaned else 0.0
+_FIAT_RE = re.compile(r'^\s*-?\d+(?:\.\d+)?\s*$')
+
+
+def _eur(raw, field=''):
+    """'€1395.0' → 1395.0; '' → 0.0. Raises on anything ambiguous.
+
+    Same discipline as split_amount: a comma cannot be told apart from a
+    decimal separator, so '€1.395,00' must raise instead of silently becoming
+    1.39500 — a thousand times wrong, straight into a tax figure. Task 2
+    shipped exactly that bug; do not reintroduce it here.
+
+    An empty cell is 0.0, because the exports leave the fiat subtotal blank on
+    rows with no fiat side (a transfer). Every other unparsable value raises,
+    naming the field.
+    """
+    cleaned = str(raw).replace('€', '').replace('$', '').strip()
+    if not cleaned:
+        return 0.0
+    if not _FIAT_RE.match(cleaned):
+        raise ValueError(f'unparsable fiat amount in {field or "export"}: {raw!r}')
+    return abs(float(cleaned))
 
 
 def read_account_history(fh, exchange):
@@ -402,10 +426,10 @@ def read_account_history(fh, exchange):
             continue  # fiat deposits/withdrawals are bank plumbing
         kind_raw = (row['Transaction Type'] or '').strip()
         qty = abs(float(row['Quantity Transacted']))
-        fiat_value = _eur(row['Subtotal'])
+        fiat_value = _eur(row['Subtotal'], field='Subtotal')
         when = _utc(row['Timestamp'][:19], fmt='%Y-%m-%d %H:%M:%S')
         base = {
-            'when': when, 'fee_asset': '', 'fee_amount': _eur(row.get('Fees and/or Spread')),
+            'when': when, 'fee_asset': '', 'fee_amount': _eur(row.get('Fees and/or Spread'), field='Fees and/or Spread'),
             'exchange': exchange, 'ref': (row.get('ID') or '').strip(),
         }
         if kind_raw in ('Receive', 'Deposit'):
