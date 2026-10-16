@@ -64,7 +64,18 @@
   BTC ma non l'acquisto della stablecoin: nessun lotto, e le vendite di stablecoin
   restano non matchate. Servono gli export dell'exchange dove stanno e le gambe
   stablecoin dei trade Binance. Attenzione ai lotti inseriti a mano con parità 1,00
-  verso EUR: va usato il tasso ECB del giorno.
+  verso EUR: va usato il tasso ECB del giorno. Attenzione anche al caso **fiat →
+  stablecoin → fiat** (comprare stablecoin con euro per spostare liquidità fra
+  exchange): non è uno swap crypto-to-crypto, sono un acquisto e una cessione di
+  cripto-attività, e la differenza di cambio è un risultato fiscale da registrare.
+- [ ] **Documentazione: verificare la regola fiscale su crypto-to-crypto.**
+  `doc/en/crypto_to_crypto_guide.md` afferma "Every crypto-to-crypto swap is a
+  taxable event ... including Portugal". Da verificare con un fiscalista
+  portoghese: il regime cripto dell'art. 10.º CIRS ha una norma specifica sulla
+  **permuta** fra cripto-attività, e se non c'è realizzo al momento dello scambio
+  cambiano sia gli eventi imponibili sia il **periodo di detenzione** che decide
+  l'esenzione oltre i 365 giorni. Finché non è verificata, la guida va marcata come
+  assunzione, non come regola. Riguarda anche `doc/pt/crypto_to_crypto_guide.md`.
 - [ ] **Vendite senza lotto d'acquisto** (es. coin da fork del 2017): quattro SELL non
   matchati, nessun cost basis. Decidere come trattarli nel report IRS.
 - [ ] **Riconciliazione con il custode** — i lotti aperti del tracker vanno confrontati
