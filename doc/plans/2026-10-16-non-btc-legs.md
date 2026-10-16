@@ -1242,7 +1242,8 @@ git commit -m "feat(importers): import_non_btc_legs with an additive source tag"
 
 **Files:**
 - Modify: `config.py` (every entry of `COUNTRY_PROFILES`, and the module-level exports near line 132)
-- Modify: `calculators/crypto_fifo_tracker.py` (`calculate_fifo_lots`, the query at line 115 and the SELL branch)
+- Modify: `calculators/crypto_fifo_tracker.py` (the imports only — tasks 9-11 are what act on the flag)
+- Modify: `calculators/calculate_fifo.py` (print the rule in force)
 - Test: `tests/test_swap_realizes.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -1293,7 +1294,9 @@ In each profile's `tax_rules` (PT first, then the commented templates):
 and with the other module-level exports (after `DECLARE_EXEMPT`, line ~134):
 
 ```python
-SWAP_REALIZES = _profile["tax_rules"].get("swap_realizes", True)
+# No .get() default: a profile that forgets to declare the rule must fail at
+# import, not silently inherit someone else's tax treatment.
+SWAP_REALIZES = _profile["tax_rules"]["swap_realizes"]
 ```
 
 - [ ] **Step 4: Let the engine read it**
@@ -1329,7 +1332,7 @@ with `from config import COUNTRY, SWAP_REALIZES` at the top of the file.
 venv/bin/ruff check .
 venv/bin/pytest tests/ -q
 git add config.py calculators/crypto_fifo_tracker.py calculators/calculate_fifo.py tests/test_swap_realizes.py
-git commit -m "feat(config): swap_realizes as a declared tax rule, deferral path refused"
+git commit -m "feat(config): swap_realizes as a declared tax rule"
 ```
 
 ---
