@@ -626,12 +626,13 @@ git commit -m "feat(readers): deposit/withdrawal reader, conversions paired by m
 The §5 rules of the spec, as one pure function. It returns a list because a
 swap produces two transactions, a transfer none.
 
-**Prerequisite inside this task.** `read_account_history` (task 3) populates
-`fee_amount` but leaves `fee_asset` empty, so a consumer gets a number with no
-currency. Before writing the valuation, fix the reader to take `fee_asset` from
-the row's `Price Currency` column (the column the fee is denominated in), with
-a test that a fee of `€0.50` yields `fee_asset == 'EUR'` and `fee_amount == 0.5`.
-`read_trade_history` already carries the fee's unit from the amount suffix.
+**What the readers already guarantee you.** Both readers carry the fee's own
+currency in `fee_asset` and the fiat leg's real currency in `give_asset` /
+`take_asset` — the account-history reader reads it from the row's
+`Price Currency` column and refuses an unknown one (fixed in task 3 after
+review). So `value_row` may trust that a fiat asset code is the real one and
+must convert it when it is not the reporting currency; it must never assume
+EUR.
 
 **Why fees are not a detail here.** On a crypto-to-crypto swap the exchange
 takes its fee out of the asset received: the trade history reports a gross
@@ -952,6 +953,23 @@ def test_convert_rows_are_listed_for_confirmation(db_path, tmp_path, capsys):
     assert '50000.00000000 USDC' in err
 
 
+def test_zero_proceeds_withdrawals_are_listed_too(db_path, tmp_path, capsys):
+    """The transfer side of the fork gets the same confirmation list."""
+    export = tmp_path / 'account_history.csv'
+    export.write_text(
+        'ID,Timestamp,Transaction Type,Asset,Quantity Transacted,Price Currency,'
+        'Price at Transaction,Subtotal,Total (inclusive of fees and/or spread),Fees and/or Spread\n'
+        'w2,2024-02-22 08:00:00 UTC,Withdrawal,USDC,-25.0,EUR,€0.00,€0.00,€0.00,€0.00\n'
+    )
+
+    import_non_btc_legs(str(export), exchange_name='Coinbase',
+                        shape='account_history', db_path=db_path)
+
+    err = capsys.readouterr().err
+    assert 'recorded as a TRANSFER' in err
+    assert '25.00000000 USDC' in err
+
+
 def test_import_is_idempotent(db_path, tmp_path):
     export = tmp_path / 'bybit_dw.csv'
     export.write_text(DEPOSIT_WITHDRAWAL)
@@ -1065,6 +1083,20 @@ def import_non_btc_legs(filepath, exchange_name, shape, db_path=None):
         for r in converts:
             print(f"      {r['when'][:10]}  {r['give_amount']:.8f} {r['give_asset']} "
                   f"→ {r['take_amount']:.2f} {r['take_asset']}", file=sys.stderr)
+
+    # The opposite misclassification deserves the same net. A withdrawal whose
+    # proceeds are zero is recorded as a transfer, and a real disposal whose
+    # value merely *rounds* to zero is indistinguishable from one that genuinely
+    # had no fiat side. Only one of the two directions had a safety net; now
+    # both do.
+    zero_out = [r for r in rows
+                if r['kind'] == 'TRANSFER_OUT' and r['give_amount'] > 0 and not r['take_asset']]
+    if zero_out:
+        print(f'  ⚠ {len(zero_out)} withdrawal row(s) recorded as a TRANSFER (no proceeds) — '
+              f'confirm none of them was a sale:', file=sys.stderr)
+        for r in zero_out:
+            print(f"      {r['when'][:10]}  {r['give_amount']:.8f} {r['give_asset']} out",
+                  file=sys.stderr)
 
     def do_inserts(conn):
         cursor = conn.cursor()
