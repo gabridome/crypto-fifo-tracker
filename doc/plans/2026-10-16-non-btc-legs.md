@@ -369,6 +369,28 @@ def test_account_history_classifies_receive_sell_and_withdrawal():
     assert rows[2]['take_amount'] == pytest.approx(46500.0)
 
 
+def test_account_history_refuses_a_blank_subtotal_on_a_sale():
+    """Blank must not become a zero-proceeds trade or a demoted transfer."""
+    blank_sell = ACCOUNT_HISTORY.replace(',Advanced Trade Sell,USDC,2.0,EUR,€0.93,€1.86,€1.86,€0.00',
+                                         ',Advanced Trade Sell,USDC,2.0,EUR,€0.93,,,€0.00')
+    with pytest.raises(ValueError, match='Subtotal'):
+        list(read_account_history(io.StringIO(blank_sell), exchange='Coinbase'))
+
+    blank_withdrawal = ACCOUNT_HISTORY.replace(',Withdrawal,USDC,-50000.0,EUR,€0.92,€46500.0,€46500.0,€0.00',
+                                               ',Withdrawal,USDC,-50000.0,EUR,€0.92,,,€0.00')
+    with pytest.raises(ValueError, match='Subtotal'):
+        list(read_account_history(io.StringIO(blank_withdrawal), exchange='Coinbase'))
+
+
+def test_account_history_blank_subtotal_is_fine_on_a_transfer():
+    """A Receive has no fiat side by construction: the blank is legitimate."""
+    blank_receive = ACCOUNT_HISTORY.replace(',Receive,USDC,1500.0,EUR,€0.93,€1395.0,€1395.0,€0.00',
+                                            ',Receive,USDC,1500.0,EUR,€0.93,,,€0.00')
+    rows = list(read_account_history(io.StringIO(blank_receive), exchange='Coinbase'))
+    assert rows[0]['kind'] == 'TRANSFER_IN'
+    assert rows[0]['take_amount'] == pytest.approx(1500.0)
+
+
 def test_account_history_refuses_an_ambiguous_fiat_amount():
     """A decimal comma must raise, not silently divide by a thousand."""
     bad = ACCOUNT_HISTORY.replace('€1395.0', '€1.395,00')
@@ -398,21 +420,26 @@ FIAT = ('EUR', 'USD', 'GBP', 'CHF')
 _FIAT_RE = re.compile(r'^\s*-?\d+(?:\.\d+)?\s*$')
 
 
-def _eur(raw, field=''):
-    """'€1395.0' → 1395.0; '' → 0.0. Raises on anything ambiguous.
+def _eur(raw, field='', allow_blank=False):
+    """'€1395.0' → 1395.0. Raises on anything ambiguous, blank included.
 
     Same discipline as split_amount: a comma cannot be told apart from a
     decimal separator, so '€1.395,00' must raise instead of silently becoming
     1.39500 — a thousand times wrong, straight into a tax figure. Task 2
     shipped exactly that bug; do not reintroduce it here.
 
-    An empty cell is 0.0, because the exports leave the fiat subtotal blank on
-    rows with no fiat side (a transfer). Every other unparsable value raises,
-    naming the field.
+    A blank cell is only 0.0 where the caller declares it legitimate
+    (`allow_blank=True`): the exports leave the fiat subtotal empty on rows
+    that have no fiat side at all, i.e. transfers. Everywhere else a blank is
+    an error, because "blank means zero" is how a real disposal gets silently
+    demoted to a transfer, or a real trade recorded with zero proceeds — the
+    same failure shape as the comma bug, moved up into business logic.
     """
     cleaned = str(raw).replace('€', '').replace('$', '').strip()
     if not cleaned:
-        return 0.0
+        if allow_blank:
+            return 0.0
+        raise ValueError(f'blank {field or "fiat amount"}: a value is required on this row')
     if not _FIAT_RE.match(cleaned):
         raise ValueError(f'unparsable fiat amount in {field or "export"}: {raw!r}')
     return abs(float(cleaned))
@@ -426,12 +453,18 @@ def read_account_history(fh, exchange):
             continue  # fiat deposits/withdrawals are bank plumbing
         kind_raw = (row['Transaction Type'] or '').strip()
         qty = abs(float(row['Quantity Transacted']))
-        fiat_value = _eur(row['Subtotal'], field='Subtotal')
         when = _utc(row['Timestamp'][:19], fmt='%Y-%m-%d %H:%M:%S')
         base = {
-            'when': when, 'fee_asset': '', 'fee_amount': _eur(row.get('Fees and/or Spread'), field='Fees and/or Spread'),
+            'when': when, 'fee_asset': '',
+            'fee_amount': _eur(row.get('Fees and/or Spread'), field='Fees and/or Spread',
+                               allow_blank=True),
             'exchange': exchange, 'ref': (row.get('ID') or '').strip(),
         }
+        # The fiat side is required exactly where the row has one. Asking for it
+        # on a transfer would reject a legitimately blank cell; defaulting it to
+        # zero on a trade or a withdrawal would invent a figure.
+        needs_fiat = kind_raw in ('Withdrawal',) or 'Sell' in kind_raw or 'Buy' in kind_raw
+        fiat_value = _eur(row['Subtotal'], field='Subtotal') if needs_fiat else 0.0
         if kind_raw in ('Receive', 'Deposit'):
             yield {**base, 'kind': 'TRANSFER_IN', 'give_asset': '', 'give_amount': 0.0,
                    'take_asset': asset, 'take_amount': qty}
@@ -445,7 +478,13 @@ def read_account_history(fh, exchange):
             yield {**base, 'kind': 'TRADE', 'give_asset': 'EUR', 'give_amount': fiat_value,
                    'take_asset': asset, 'take_amount': qty}
         elif kind_raw == 'Withdrawal':
-            # Crypto leaving with a fiat subtotal is a conversion, not a transfer.
+            # Crypto leaving with a fiat subtotal is recorded as a sale: that is
+            # what it was on this account. The export cannot tell a sale from a
+            # transfer carrying a valuation, so the importer prints every row
+            # classified this way for confirmation against the bank side
+            # (decision of 2026-10-16; see task 6). A blank subtotal cannot
+            # reach this branch — _eur raises — so only a real zero means
+            # transfer.
             if fiat_value > 0:
                 yield {**base, 'kind': 'CONVERT', 'give_asset': asset, 'give_amount': qty,
                        'take_asset': 'EUR', 'take_amount': fiat_value}
@@ -822,6 +861,23 @@ def test_import_writes_legs_without_touching_btc_rows(db_path, tmp_path, monkeyp
     assert legs == [('USDC', 'BUY', 10000.0, export.name + SOURCE_SUFFIX)]
 
 
+def test_convert_rows_are_listed_for_confirmation(db_path, tmp_path, capsys):
+    """A withdrawal recorded as a sale must be announced, never silent."""
+    export = tmp_path / 'account_history.csv'
+    export.write_text(
+        'ID,Timestamp,Transaction Type,Asset,Quantity Transacted,Price Currency,'
+        'Price at Transaction,Subtotal,Total (inclusive of fees and/or spread),Fees and/or Spread\n'
+        'w1,2024-02-21 08:00:00 UTC,Withdrawal,USDC,-50000.0,EUR,€0.92,€46500.0,€46500.0,€0.00\n'
+    )
+
+    import_non_btc_legs(str(export), exchange_name='Coinbase',
+                        shape='account_history', db_path=db_path)
+
+    err = capsys.readouterr().err
+    assert 'recorded as a SALE' in err
+    assert '50000.00000000 USDC' in err
+
+
 def test_import_is_idempotent(db_path, tmp_path):
     export = tmp_path / 'bybit_dw.csv'
     export.write_text(DEPOSIT_WITHDRAWAL)
@@ -923,6 +979,18 @@ def import_non_btc_legs(filepath, exchange_name, shape, db_path=None):
            if tx['cryptocurrency'] != 'BTC']
 
     print(f'  {len(rows)} rows read, {len(txs)} non-BTC legs to write')
+
+    # A crypto withdrawal carrying a fiat subtotal is recorded as a sale (see
+    # the reader): the export cannot tell that from a transfer with a
+    # valuation attached, so every such row is printed for confirmation
+    # against the bank side instead of passing unnoticed.
+    converts = [r for r in rows if r['kind'] == 'CONVERT']
+    if converts:
+        print(f'  ⚠ {len(converts)} withdrawal row(s) recorded as a SALE — confirm each '
+              f'against the receiving account:', file=sys.stderr)
+        for r in converts:
+            print(f"      {r['when'][:10]}  {r['give_amount']:.8f} {r['give_asset']} "
+                  f"→ {r['take_amount']:.2f} {r['take_asset']}", file=sys.stderr)
 
     def do_inserts(conn):
         cursor = conn.cursor()
