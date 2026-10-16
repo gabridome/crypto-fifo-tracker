@@ -3,6 +3,16 @@
 Pure: a normalized row plus a rate source in, transaction dicts out. The rate
 source is injected so tests do not need the network and so the caller decides
 whether a missing rate is fatal (it is: see import_non_btc_legs).
+
+`rates` must provide `fiat_to_eur(amount, currency, when)` and
+`crypto_to_eur(coin, amount, when)` — note the argument order differs
+between the two (amount first, then currency; vs. coin first, then
+amount). An earlier draft of this module called `crypto_to_eur` with those
+two swapped; it surfaced only because the test double's own parameter names
+made the mismatch a TypeError instead of a silently wrong value. Verified
+against the real sources, not just the double: `importers/ecb_rates.py`
+(`usd_to_eur(self, usd_amount, date)`) and `importers/crypto_prices.py`
+(`crypto_to_eur(self, coin, amount, date)`).
 """
 import hashlib
 import os
@@ -116,7 +126,15 @@ def value_row(row, rates, row_ref=''):
     if take_is_fiat and not give_is_fiat:
         # The fee, if charged in the fiat received, is already out of take_amt.
         value = rates.fiat_to_eur(take_amt, take, row['when'])
-        return [_tx(row, 'SELL', give, give_amt, value)]
+        # A fee charged in the asset given up also left the account, exactly
+        # like the trade itself: paying a fee in USDC is a disposal of USDC.
+        # So the quantity disposed is give_total (the gross), not give_amt —
+        # recording the smaller figure here would silently keep part of the
+        # fee's quantity off the books, and FIFO would eventually run out of
+        # lots to consume for it. The fee does not reduce the proceeds in
+        # `value`: it was never taken out of the fiat side, only out of the
+        # crypto side's accounting. Do not "simplify" this back to give_amt.
+        return [_tx(row, 'SELL', give, give_total, value)]
 
     if not give_is_fiat and not take_is_fiat:
         if not row_ref:
@@ -127,8 +145,13 @@ def value_row(row, rates, row_ref=''):
             )
         value = rates.crypto_to_eur(give, give_total, row['when'])
         group = _swap_id(row, row_ref)
+        # Same rule as the crypto-to-fiat SELL below: a fee in the asset
+        # given up is itself a disposal of that asset, so give_total (the
+        # gross) is what left the account and what gets recorded — not
+        # give_amt. The BUY leg is unaffected: this fee was never in the
+        # asset received, so take_amt only changes when fee_asset == take.
         return [
-            _tx(row, 'SELL', give, give_amt, value, group),
+            _tx(row, 'SELL', give, give_total, value, group),
             _tx(row, 'BUY', take, take_amt, value, group),
         ]
 

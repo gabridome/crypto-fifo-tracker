@@ -160,6 +160,47 @@ def test_different_row_ref_gives_different_swap_ids():
     assert txs_a[0]['swap_group_id'] != txs_b[0]['swap_group_id']
 
 
+def test_fee_in_the_given_asset_is_also_part_of_the_disposal_crypto_to_crypto():
+    """A fee charged in BTC left the account in BTC, same as the trade itself.
+
+    The disposed quantity is the gross (give_amount + fee), not just the part
+    that made it into the other leg's valuation: the account lost
+    give_amount + fee of BTC, so that is what was sold. Recording the
+    disposal as the smaller give_amount would use a quantity the account
+    never actually kept that much of, overstating the per-unit sale price
+    of the asset given up.
+    """
+    txs = value_row(_row(kind='TRADE', give_asset='BTC', give_amount=2.0,
+                         take_asset='USDT', take_amount=120000.0,
+                         fee_asset='BTC', fee_amount=0.01),
+                     RATES, row_ref='file.csv#8')
+
+    sell = [t for t in txs if t['transaction_type'] == 'SELL'][0]
+    buy = [t for t in txs if t['transaction_type'] == 'BUY'][0]
+    assert sell['amount'] == pytest.approx(2.01)
+    assert sell['total_value'] == pytest.approx(2.01 * 60000.0)
+    # The BUY leg is untouched: this fee was never in the asset received.
+    assert buy['amount'] == pytest.approx(120000.0)
+    assert buy['total_value'] == pytest.approx(2.01 * 60000.0)
+
+
+def test_fee_in_the_given_asset_is_also_part_of_the_disposal_crypto_to_fiat():
+    """Same rule for a sale: the fee in the asset sold is part of what was sold.
+
+    The proceeds are what actually arrived in fiat — the fee does not reduce
+    them, because it was never taken out of the fiat side. It only changes
+    how much crypto is recorded as disposed.
+    """
+    txs = value_row(_row(kind='TRADE', give_asset='USDC', give_amount=2.0,
+                         take_asset='EUR', take_amount=1.86,
+                         fee_asset='USDC', fee_amount=0.05), RATES)
+
+    assert len(txs) == 1
+    assert txs[0]['transaction_type'] == 'SELL'
+    assert txs[0]['amount'] == pytest.approx(2.05)
+    assert txs[0]['total_value'] == pytest.approx(1.86)  # proceeds unaffected by the fee
+
+
 def test_same_row_ref_gives_the_same_swap_id_across_calls():
     """Stability across re-imports: the same row, re-read, must link the same way."""
     row = _row(kind='TRADE', give_asset='BTC', give_amount=2.0,
