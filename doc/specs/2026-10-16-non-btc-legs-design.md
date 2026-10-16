@@ -108,6 +108,10 @@ The rules, in the order the importer applies them:
 | crypto sold for fiat | the fiat actually received, same conversion rule as above | consumes lots, FIFO |
 | transfer between venues (same owner) | not an acquisition and not a disposal | no lot, no match |
 | network fee paid in the asset moved | reduces the quantity transferred | no lot |
+| trading fee charged in the asset **received** | reduces the quantity acquired; the value of the leg does not change | the lot is the net |
+| trading fee charged in the asset **given up** | increases the quantity disposed of — paying a fee in an asset is a disposal of it — while the proceeds stay what actually arrived | lot at the full quantity received |
+| trading fee charged in a third asset | refused: allocating it would need a price for that asset too | — |
+| a fee that consumes the whole leg it is taken from | refused: it would attach a real value to a zero quantity | — |
 | quantity below `DUST_THRESHOLD` | skipped, counted in the import log | no |
 
 Two consequences worth stating, because they are where a hand-made entry goes
@@ -119,6 +123,9 @@ wrong:
 - the quantity that creates the lot is the quantity **acquired**, while the
   quantity that arrives elsewhere is net of network fees. The two differ, and
   the difference is not a loss: it is a fee on a transfer.
+- a fee paid in the asset being given up is part of what left the account, so
+  it belongs to the **quantity** disposed of and not to the value. Lowering the
+  value instead would leave a lot whose per-unit price never happened.
 
 ## 6. Evidence and traceability
 
