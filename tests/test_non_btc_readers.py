@@ -195,3 +195,101 @@ def test_account_history_crypto_deposit_is_also_a_transfer_in():
     assert rows[0]['give_asset'] == ''
     assert rows[0]['take_asset'] == 'USDC'
     assert rows[0]['take_amount'] == pytest.approx(1500.0)
+
+
+USD_ACCOUNT_HISTORY = """ID,Timestamp,Transaction Type,Asset,Quantity Transacted,Price Currency,Price at Transaction,Subtotal,Total (inclusive of fees and/or spread),Fees and/or Spread
+u1,2024-04-01 12:00:00 UTC,Advanced Trade Sell,USDC,3.0,USD,$1.00,$3.00,$3.00,$0.00
+"""
+
+
+def test_account_history_fiat_leg_follows_price_currency_column():
+    """The fiat side must come from the row, not be hardcoded to EUR — a
+    USD subtotal saved as 'EUR' would be the right digits, wrong currency.
+    """
+    rows = list(read_account_history(io.StringIO(USD_ACCOUNT_HISTORY), exchange='Coinbase'))
+    assert rows[0]['take_asset'] == 'USD'
+    assert rows[0]['take_amount'] == pytest.approx(3.0)
+
+
+def test_account_history_refuses_an_unrecognised_price_currency():
+    """A Price Currency this reader does not know must stop the import,
+    not be guessed at or silently passed through.
+    """
+    bad = USD_ACCOUNT_HISTORY.replace(',USD,', ',XXX,')
+    with pytest.raises(ValueError, match='Price Currency'):
+        list(read_account_history(io.StringIO(bad), exchange='Coinbase'))
+
+
+def test_account_history_fee_asset_matches_price_currency():
+    """A fee is quoted in the row's own fiat currency, read from the same
+    'Price Currency' column — not invented as EUR. Convention: fee_asset
+    carries that currency even when fee_amount is zero, since the currency
+    is still well-defined on a zero fee; only the amount is zero.
+    """
+    fee = ACCOUNT_HISTORY.replace(
+        ',Advanced Trade Sell,USDC,2.0,EUR,€0.93,€1.86,€1.86,€0.00',
+        ',Advanced Trade Sell,USDC,2.0,EUR,€0.93,€1.86,€1.86,€0.50',
+    )
+    rows = list(read_account_history(io.StringIO(fee), exchange='Coinbase'))
+    assert rows[1]['fee_asset'] == 'EUR'
+    assert rows[1]['fee_amount'] == pytest.approx(0.5)
+    # A zero fee still carries its currency — only the amount is zero.
+    assert rows[0]['fee_asset'] == 'EUR'
+    assert rows[0]['fee_amount'] == pytest.approx(0.0)
+
+
+def test_account_history_malformed_quantity_raises_with_field_named():
+    """Quantity Transacted goes through the same grammar as every other
+    amount in this module (split_amount), so a comma is refused here too,
+    and the error names the field rather than just the raw value.
+    """
+    bad = ACCOUNT_HISTORY.replace(
+        ',Advanced Trade Sell,USDC,2.0,EUR,€0.93,€1.86,€1.86,€0.00',
+        ',Advanced Trade Sell,USDC,"2,0",EUR,€0.93,€1.86,€1.86,€0.00',
+    )
+    with pytest.raises(ValueError, match='Quantity Transacted'):
+        list(read_account_history(io.StringIO(bad), exchange='Coinbase'))
+
+
+def test_account_history_send_is_transfer_out():
+    """No existing test built a Send row: TRANSFER_OUT had zero coverage."""
+    send = ACCOUNT_HISTORY.replace(
+        ',Receive,USDC,1500.0,EUR,€0.93,€1395.0,€1395.0,€0.00',
+        ',Send,USDC,1500.0,EUR,€0.93,,,€0.00',
+    )
+    rows = list(read_account_history(io.StringIO(send), exchange='Coinbase'))
+    assert rows[0]['kind'] == 'TRANSFER_OUT'
+    assert rows[0]['give_asset'] == 'USDC'
+    assert rows[0]['give_amount'] == pytest.approx(1500.0)
+    assert rows[0]['take_asset'] == ''
+    assert rows[0]['take_amount'] == pytest.approx(0.0)
+
+
+def test_account_history_buy_inverts_legs():
+    """No existing test built a Buy row: swapping give/take in that branch
+    would have passed the suite before this test existed.
+    """
+    buy = ACCOUNT_HISTORY.replace(
+        ',Advanced Trade Sell,USDC,2.0,EUR,€0.93,€1.86,€1.86,€0.00',
+        ',Advanced Trade Buy,USDC,2.0,EUR,€0.93,€1.86,€1.86,€0.00',
+    )
+    rows = list(read_account_history(io.StringIO(buy), exchange='Coinbase'))
+    buy_row = rows[1]
+    assert buy_row['kind'] == 'TRADE'
+    assert buy_row['give_asset'] == 'EUR'
+    assert buy_row['give_amount'] == pytest.approx(1.86)
+    assert buy_row['take_asset'] == 'USDC'
+    assert buy_row['take_amount'] == pytest.approx(2.0)
+
+
+def test_account_history_timestamp_without_utc_suffix_raises():
+    """A fixed-width slice would silently misparse a differently-shaped
+    timestamp into the wrong instant; splitting on the literal ' UTC'
+    suffix means an unrecognised shape raises instead.
+    """
+    bad = ACCOUNT_HISTORY.replace(
+        'a1,2024-02-20 09:00:00 UTC,Receive',
+        'a1,2024-02-20 09:00:00,Receive',
+    )
+    with pytest.raises(ValueError, match='Timestamp'):
+        list(read_account_history(io.StringIO(bad), exchange='Coinbase'))

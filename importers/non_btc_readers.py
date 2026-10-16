@@ -99,7 +99,8 @@ def read_trade_history(fh, exchange):
 
 
 # Fiat assets never create a lot by themselves in this reader: a fiat
-# deposit/withdrawal row is bank plumbing, not a crypto leg.
+# deposit/withdrawal row is bank plumbing, not a crypto leg. It also doubles
+# as the set of currencies the 'Price Currency' column is allowed to name.
 FIAT = ('EUR', 'USD', 'GBP', 'CHF')
 
 # Transaction Type labels, matched exactly rather than by substring. A
@@ -110,16 +111,18 @@ FIAT = ('EUR', 'USD', 'GBP', 'CHF')
 _SELL_LABELS = ('Sell', 'Advanced Trade Sell')
 _BUY_LABELS = ('Buy', 'Advanced Trade Buy')
 
-_FIAT_RE = re.compile(r'^\s*-?\d+(?:\.\d+)?\s*$')
-
 
 def _eur(raw, field='', allow_blank=False):
     """'€1395.0' → 1395.0. Raises on anything ambiguous, blank included.
 
-    Same discipline as split_amount: a comma cannot be told apart from a
-    decimal separator, so '€1.395,00' must raise instead of silently becoming
-    1.39500 — a thousand times wrong, straight into a tax figure. Task 2
-    shipped exactly that bug; do not reintroduce it here.
+    Delegates the number grammar to split_amount instead of re-encoding
+    "unambiguous decimal" in a second regex: a comma cannot be told apart
+    from a decimal separator, so '€1.395,00' must raise instead of silently
+    becoming 1.39500 — a thousand times wrong, straight into a tax figure.
+    Task 2 shipped exactly that bug via a different code path; routing both
+    through the same grammar means a future fix to the rule cannot land in
+    one and miss the other. split_amount also rejects scientific notation,
+    which a bespoke fiat regex previously did not forbid explicitly.
 
     A blank cell is only 0.0 where the caller declares it legitimate
     (`allow_blank=True`): the exports leave the fiat subtotal empty on rows
@@ -133,22 +136,70 @@ def _eur(raw, field='', allow_blank=False):
         if allow_blank:
             return 0.0
         raise ValueError(f'blank {field or "fiat amount"}: a value is required on this row')
-    if not _FIAT_RE.match(cleaned):
-        raise ValueError(f'unparsable fiat amount in {field or "export"}: {raw!r}')
-    return abs(float(cleaned))
+    try:
+        amount, unit = split_amount(cleaned)
+    except ValueError:
+        raise ValueError(f'unparsable fiat amount in {field or "export"}: {raw!r}') from None
+    if unit:
+        raise ValueError(f'unexpected unit in fiat amount in {field or "export"}: {raw!r}')
+    return amount
 
 
 def read_account_history(fh, exchange):
-    """Account-history export: one row per movement, per asset."""
+    """Account-history export: one row per movement, per asset.
+
+    Columns read as row[...] ('Asset', 'Transaction Type', 'Quantity
+    Transacted', 'Timestamp', 'Subtotal') are assumed present in every
+    export of this shape — a missing one means this is not the export this
+    reader targets, and KeyError should say so loudly. Columns read as
+    row.get(...) ('ID', 'Price Currency', 'Fees and/or Spread') are the ones
+    known to vary across export variants or to be legitimately absent, and
+    default to '' rather than raising.
+    """
     for row in csv.DictReader(fh):
         asset = (row['Asset'] or '').strip().upper()
         if asset in FIAT:
             continue  # fiat deposits/withdrawals are bank plumbing
+
+        # The fiat side of this row — EUR, USD, GBP or CHF — comes from the
+        # export, never from an assumption. Saving a USD subtotal tagged
+        # 'EUR' is exactly the silent mislabelling doc/project_guidelines.md
+        # §Conversione valute forbids, and the valuation layer (task 5) is
+        # built to receive the real currency code and convert it, not to be
+        # handed 'EUR' unconditionally.
+        fiat_ccy = (row.get('Price Currency') or '').strip().upper()
+        if fiat_ccy not in FIAT:
+            raise ValueError(f'unexpected Price Currency {row.get("Price Currency")!r} '
+                             f'(ID={row.get("ID")!r})')
+
         kind_raw = (row['Transaction Type'] or '').strip()
-        qty = abs(float(row['Quantity Transacted']))
-        when = _utc(row['Timestamp'][:19], fmt='%Y-%m-%d %H:%M:%S')
+
+        try:
+            qty, _unit = split_amount(row['Quantity Transacted'])
+        except ValueError as exc:
+            raise ValueError(
+                f'unparsable Quantity Transacted: {row["Quantity Transacted"]!r} '
+                f'(ID={row.get("ID")!r}, Timestamp={row.get("Timestamp")!r})'
+            ) from exc
+
+        ts_raw = row['Timestamp']
+        if not ts_raw.endswith(' UTC'):
+            # A fixed-width slice ([:19]) would silently misparse a timestamp
+            # with fractional seconds or a different suffix into the wrong
+            # instant. Splitting on the literal suffix instead means a shape
+            # we don't recognise raises here, rather than landing quietly on
+            # the wrong second.
+            raise ValueError(
+                f'unexpected Timestamp format (expected a " UTC" suffix): {ts_raw!r} '
+                f'(ID={row.get("ID")!r})'
+            )
+        when = _utc(ts_raw[: -len(' UTC')], fmt='%Y-%m-%d %H:%M:%S')
+
         base = {
-            'when': when, 'fee_asset': '',
+            'when': when,
+            # Same column, same currency as the fiat leg: a fee is quoted in
+            # the venue's fiat, not invented as EUR.
+            'fee_asset': fiat_ccy,
             'fee_amount': _eur(row.get('Fees and/or Spread'), field='Fees and/or Spread',
                                allow_blank=True),
             'exchange': exchange, 'ref': (row.get('ID') or '').strip(),
@@ -174,9 +225,9 @@ def read_account_history(fh, exchange):
                    'take_asset': '', 'take_amount': 0.0}
         elif kind_raw in _SELL_LABELS:
             yield {**base, 'kind': 'TRADE', 'give_asset': asset, 'give_amount': qty,
-                   'take_asset': 'EUR', 'take_amount': fiat_value}
+                   'take_asset': fiat_ccy, 'take_amount': fiat_value}
         elif kind_raw in _BUY_LABELS:
-            yield {**base, 'kind': 'TRADE', 'give_asset': 'EUR', 'give_amount': fiat_value,
+            yield {**base, 'kind': 'TRADE', 'give_asset': fiat_ccy, 'give_amount': fiat_value,
                    'take_asset': asset, 'take_amount': qty}
         elif kind_raw == 'Withdrawal':
             # Crypto leaving with a fiat subtotal is recorded as a sale: that is
@@ -188,9 +239,12 @@ def read_account_history(fh, exchange):
             # transfer.
             if fiat_value > 0:
                 yield {**base, 'kind': 'CONVERT', 'give_asset': asset, 'give_amount': qty,
-                       'take_asset': 'EUR', 'take_amount': fiat_value}
+                       'take_asset': fiat_ccy, 'take_amount': fiat_value}
             else:
                 yield {**base, 'kind': 'TRANSFER_OUT', 'give_asset': asset,
                        'give_amount': qty, 'take_asset': '', 'take_amount': 0.0}
         else:
-            raise ValueError(f'unknown account-history type: {kind_raw!r}')
+            raise ValueError(
+                f'unknown account-history type: {kind_raw!r} '
+                f'(ID={row.get("ID")!r}, Timestamp={row.get("Timestamp")!r})'
+            )
