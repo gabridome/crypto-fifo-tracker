@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from importers.non_btc_readers import read_trade_history, split_pair
+from importers.non_btc_readers import read_trade_history, split_amount, split_pair
 
 TRADE_HISTORY = """Date(UTC),Pair,Side,Price,Executed,Amount,Fee
 2024-01-15 10:00:00,BTCUSDT,SELL,60000.00,0.00100000BTC,60.00000000USDT,0.06000000USDT
@@ -65,6 +65,31 @@ def test_trade_history_unknown_side_raises(side):
     bad = f"Date(UTC),Pair,Side,Price,Executed,Amount,Fee\n2024-01-15 10:00:00,BTCUSDT,{side},60000.00,0.001BTC,60.0USDT,0.0USDT\n"
     with pytest.raises(ValueError, match='Side'):
         list(read_trade_history(io.StringIO(bad), exchange='Binance'))
+
+
+def test_split_amount_plain_and_suffixed():
+    assert split_amount('0.00100000BTC') == (pytest.approx(0.001), 'BTC')
+    assert split_amount('110.00') == (pytest.approx(110.0), '')
+
+
+def test_split_amount_negative_is_made_positive():
+    """The contract is positive amounts; sign must be read before calling."""
+    assert split_amount('-0.5BTC') == (pytest.approx(0.5), 'BTC')
+
+
+@pytest.mark.parametrize('raw', [
+    '1.234,56',  # decimal comma — indistinguishable from thousands grouping, refused
+    '1,234.56',  # thousands grouping — refused too, deliberately, same reason
+    '',
+    '1.63934E-5',  # scientific notation (seen in Price columns) — not parsed here
+])
+def test_split_amount_rejects_ambiguous_or_unparsable(raw):
+    """A comma could be a decimal separator or a thousands separator — guessing
+    wrong silently corrupts a tax figure by a factor of ~1000, so any comma
+    is refused outright rather than interpreted either way.
+    """
+    with pytest.raises(ValueError):
+        split_amount(raw)
 
 
 @pytest.mark.parametrize('pair,base,quote', [

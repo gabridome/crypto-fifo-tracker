@@ -17,21 +17,39 @@ KNOWN_QUOTES = ('USDT', 'USDC', 'BUSD', 'EUR', 'USD', 'BTC', 'ETH')
 
 VALID_SIDES = ('BUY', 'SELL')
 
-_AMOUNT_RE = re.compile(r'^\s*(-?[\d.,]+)\s*([A-Za-z]*)\s*$')
+_AMOUNT_RE = re.compile(r'^\s*(-?\d+(?:\.\d+)?)\s*([A-Za-z]*)\s*$')
 
 
 def _utc(value, fmt='%Y-%m-%d %H:%M:%S'):
-    """Export timestamps are UTC without offset; emit explicit ISO 8601 UTC."""
+    """Export timestamps are UTC without offset; emit explicit ISO 8601 UTC.
+
+    Stamps the given UTC wall-clock time with ``.replace(tzinfo=...)`` rather
+    than converting it. Every format seen so far carries no offset, so this is
+    safe; a future format parsed with ``%z`` would need its offset applied
+    (e.g. via ``astimezone``), not discarded by this replace.
+    """
     return datetime.strptime(value.strip(), fmt).replace(tzinfo=timezone.utc).isoformat()
 
 
 def split_amount(raw):
-    """'0.0024BTC' → (0.0024, 'BTC'); '110.00' → (110.0, '')."""
+    """'0.0024BTC' → (0.0024, 'BTC'); '110.00' → (110.0, '').
+
+    Always returns a positive amount regardless of the sign in `raw` — a
+    caller that needs the sign (e.g. to tell a deposit from a withdrawal)
+    must read it from `raw` itself before calling this.
+
+    Rejects any comma outright rather than guessing whether it is a decimal
+    separator or a thousands separator: '1.234,56' and '1,234.56' both raise.
+    None of the exports this project imports ever use a comma in a number,
+    so nothing real is lost, and a wrong guess here would be a silently
+    wrong tax figure. Scientific notation ('1.63934E-5', as seen in some
+    Price columns) is also rejected — not a shape this function parses.
+    """
     m = _AMOUNT_RE.match(str(raw))
     if not m:
         raise ValueError(f'unparsable amount: {raw!r}')
     number, unit = m.groups()
-    return abs(float(number.replace(',', ''))), unit.upper()
+    return abs(float(number)), unit.upper()
 
 
 def split_pair(pair):
@@ -63,7 +81,8 @@ def read_trade_history(fh, exchange):
         else:
             raise ValueError(
                 f"unknown Side {row['Side']!r}: expected one of {VALID_SIDES} "
-                f"(row {row!r}) — a guessed leg is worse than a stopped import"
+                f"(Date(UTC)={row.get('Date(UTC)')!r}, Order No.={row.get('Order No.')!r}) "
+                f"— a guessed leg is worse than a stopped import"
             )
         yield {
             'when': _utc(row['Date(UTC)']),
