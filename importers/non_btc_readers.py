@@ -270,3 +270,171 @@ def read_account_history(fh, exchange):
                 f'unknown account-history type: {kind_raw!r} '
                 f'(ID={row.get("ID")!r}, Timestamp={row.get("Timestamp")!r})'
             )
+
+
+# Deposit/withdrawal export: 'Type' names the direction where it has one,
+# 'Description' is the finer label ('Convert', 'Withdrawal', ...). Both are
+# checked rather than trusting one and ignoring the other: a 'Withdraw' row
+# with a positive quantity, or a Type/Description pair that disagree, is a
+# contradictory row, not a row this reader gets to interpret by picking a
+# side. 'FIAT' carries no fixed direction of its own — it marks either leg
+# of a Convert, one leg negative (given up) and one positive (received).
+_TYPE_DIRECTIONS = {
+    'DEPOSIT': 1,
+    'WITHDRAW': -1,
+    'TRANSFER IN': 1,
+    'TRANSFER OUT': -1,
+}
+VALID_TYPES = ('FIAT',) + tuple(_TYPE_DIRECTIONS)
+
+# The two legs of one conversion are documented as seconds apart, but the
+# fixture itself shows them straddling a minute boundary (09:59:50 and
+# 10:00:00) — truncating the timestamp to the minute would put them in two
+# different buckets and report both as unpaired. Clustering by the actual
+# gap to the previous leg, sorted chronologically, survives that: a
+# 10-second gap stays inside one cluster; a gap bigger than this window
+# starts a new one, so two genuinely unrelated conversions a few minutes
+# apart are not merged just because they share a calendar minute.
+MAX_CONVERT_GAP_SECONDS = 120
+
+
+def _signed_qty(raw, row):
+    """The quantity of a deposit/withdrawal row, sign included.
+
+    Here the sign *is* the direction — negative leaves the account, positive
+    enters it — so this cannot use `split_amount` directly: that helper returns
+    a positive amount by contract. It reuses its grammar, which refuses an
+    ambiguous comma, a stray unit and scientific notation, and then puts the
+    sign back. A bare `float()` would accept shapes the rest of the module
+    rejects, and this column decides whether an asset came in or went out.
+    """
+    amount, unit = split_amount(raw)
+    if unit:
+        raise ValueError(f'unexpected unit in QTY: {raw!r} '
+                          f'(Coin={row.get("Coin")!r}, '
+                          f'Time={row.get("Date & Time(UTC)")!r})')
+    return -amount if str(raw).strip().startswith('-') else amount
+
+
+def _cluster_converts(legs):
+    """Group Convert legs — (coin, signed qty, iso timestamp) — by elapsed gap.
+
+    A merged global bucket keyed on a truncated minute can silently cross-wire
+    two unrelated conversions whose legs happen to fall into the same bucket
+    with a balanced (1 out, 1 in) count — a wrong CONVERT row that never
+    raises. Sorting chronologically and splitting on an actual elapsed-time
+    gap avoids the minute-boundary failure without introducing that risk: a
+    cluster that ends up with anything other than exactly one leg each way
+    still raises in the caller, naming the coins and the time, never the
+    amounts.
+    """
+    ordered = sorted(legs, key=lambda leg: leg[2])
+    groups = []
+    for leg in ordered:
+        if groups:
+            prev_when = datetime.fromisoformat(groups[-1][-1][2])
+            gap = (datetime.fromisoformat(leg[2]) - prev_when).total_seconds()
+            if gap <= MAX_CONVERT_GAP_SECONDS:
+                groups[-1].append(leg)
+                continue
+        groups.append([leg])
+    return groups
+
+
+def read_deposit_withdrawal(fh, exchange):
+    """Deposit/withdrawal export. A conversion is two Convert legs close in time.
+
+    Rows are read in full before anything is yielded, because a Convert's two
+    legs can appear in either order and a CONVERT row cannot be built until
+    both have been seen. Everything is then sorted by `when` before yielding,
+    so the output is chronological regardless of the order Convert pairs
+    happened to resolve in — useful to anything downstream that assumes a
+    reader's rows arrive in time order, as the other two readers's do.
+    """
+    lines = fh.read().splitlines()
+    if lines and lines[0].startswith('UID'):
+        lines = lines[1:]
+    rows = list(csv.DictReader(lines))
+
+    convert_legs = []
+    out_rows = []
+    for row in rows:
+        coin = (row['Coin'] or '').strip().upper()
+        qty = _signed_qty(row['QTY'], row)
+        when = _utc(row['Date & Time(UTC)'])
+        desc = (row['Description'] or '').strip()
+        type_raw = (row['Type'] or '').strip().upper()
+        locator = f'(Coin={coin!r}, Time={row.get("Date & Time(UTC)")!r})'
+
+        if type_raw not in VALID_TYPES:
+            raise ValueError(f'unknown Type {row["Type"]!r} {locator}')
+
+        if type_raw == 'FIAT':
+            if desc != 'Convert':
+                raise ValueError(
+                    f'Type=Fiat with unexpected Description {desc!r} {locator}')
+            convert_legs.append((coin, qty, when))
+            continue
+
+        # The sign is not inferred from the row's purpose — it is checked
+        # against the direction 'Type' itself claims. A 'Withdraw' row with
+        # a positive QTY, or a 'Deposit' with a negative one, contradicts
+        # its own Type column and must stop the import, exactly like an
+        # unknown Side in read_trade_history: a guessed direction is worse
+        # than no direction at all.
+        expected_sign = _TYPE_DIRECTIONS[type_raw]
+        actual_sign = 1 if qty > 0 else (-1 if qty < 0 else 0)
+        if actual_sign != expected_sign:
+            raise ValueError(
+                f'Type={row["Type"]!r} contradicts the sign of QTY {locator}')
+
+        if type_raw == 'DEPOSIT':
+            if not desc.startswith('Deposit'):
+                raise ValueError(
+                    f'Type=Deposit with unexpected Description {desc!r} {locator}')
+            kind = 'TRANSFER_IN'
+        elif type_raw == 'WITHDRAW':
+            if not desc.startswith('Withdraw'):
+                raise ValueError(
+                    f'Type=Withdraw with unexpected Description {desc!r} {locator}')
+            kind = 'TRANSFER_OUT'
+        else:
+            # TRANSFER IN / TRANSFER OUT — Description is checked the same
+            # way as Deposit/Withdraw: 'Type' and 'Description' must agree,
+            # not just 'Type' alone, or a row where the export itself is
+            # internally inconsistent would pass silently.
+            if not desc.startswith('Transfer'):
+                raise ValueError(
+                    f'Type={row["Type"]!r} with unexpected Description {desc!r} {locator}')
+            kind = 'TRANSFER_IN' if type_raw == 'TRANSFER IN' else 'TRANSFER_OUT'
+
+        if kind == 'TRANSFER_IN':
+            out_rows.append({'when': when, 'kind': kind, 'give_asset': '', 'give_amount': 0.0,
+                              'take_asset': coin, 'take_amount': abs(qty),
+                              'fee_asset': '', 'fee_amount': 0.0,
+                              'exchange': exchange, 'ref': ''})
+        else:
+            out_rows.append({'when': when, 'kind': kind, 'give_asset': coin,
+                              'give_amount': abs(qty), 'take_asset': '', 'take_amount': 0.0,
+                              'fee_asset': '', 'fee_amount': 0.0,
+                              'exchange': exchange, 'ref': ''})
+
+    for group in _cluster_converts(convert_legs):
+        given = [leg for leg in group if leg[1] < 0]
+        taken = [leg for leg in group if leg[1] > 0]
+        if len(given) != 1 or len(taken) != 1:
+            # Named: the cluster's time and the coins involved. Never the
+            # quantities — this is exactly the kind of message that ends up
+            # pasted into a GitHub issue on a public repo.
+            coins = sorted({leg[0] for leg in group})
+            raise ValueError(
+                f'unpaired convert near {group[0][2]}: '
+                f'{len(given)} leg(s) out, {len(taken)} leg(s) in, coins={coins!r}')
+        (give_asset, give_qty, _), (take_asset, take_qty, when) = given[0], taken[0]
+        out_rows.append({'when': when, 'kind': 'CONVERT', 'give_asset': give_asset,
+                          'give_amount': abs(give_qty), 'take_asset': take_asset,
+                          'take_amount': take_qty, 'fee_asset': '', 'fee_amount': 0.0,
+                          'exchange': exchange, 'ref': ''})
+
+    out_rows.sort(key=lambda r: r['when'])
+    yield from out_rows

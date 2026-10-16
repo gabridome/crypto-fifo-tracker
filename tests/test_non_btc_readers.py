@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from importers.non_btc_readers import (
     read_account_history,
+    read_deposit_withdrawal,
     read_trade_history,
     split_amount,
     split_pair,
@@ -321,3 +322,45 @@ def test_account_history_timestamp_without_utc_suffix_raises():
     )
     with pytest.raises(ValueError, match='Timestamp'):
         list(read_account_history(io.StringIO(bad), exchange='Coinbase'))
+
+
+DEPOSIT_WITHDRAWAL = """UID: 123,Company Name: ,Country: 
+Uid,Date & Time(UTC),Coin,QTY,Type,Account Balance,Description
+123,2024-03-05 10:00:00,USDC,10700.000000,Fiat,10700.000000,Convert
+123,2024-03-05 09:59:50,EUR,-10000.000000,Fiat,0.000000,Convert
+123,2024-03-05 10:15:00,USDC,-10650.000000,Withdraw,0.000000,Withdrawal
+"""
+
+
+def test_deposit_withdrawal_pairs_a_convert():
+    rows = list(read_deposit_withdrawal(io.StringIO(DEPOSIT_WITHDRAWAL), exchange='Bybit'))
+
+    convert = [r for r in rows if r['kind'] == 'CONVERT']
+    assert len(convert) == 1
+    assert convert[0]['give_asset'] == 'EUR'
+    assert convert[0]['give_amount'] == pytest.approx(10000.0)
+    assert convert[0]['take_asset'] == 'USDC'
+    assert convert[0]['take_amount'] == pytest.approx(10700.0)
+
+    out = [r for r in rows if r['kind'] == 'TRANSFER_OUT']
+    assert len(out) == 1
+    assert out[0]['give_amount'] == pytest.approx(10650.0)
+
+
+def test_deposit_withdrawal_sign_is_the_direction():
+    """The sign decides in or out, and the module's grammar still applies."""
+    from importers.non_btc_readers import _signed_qty
+
+    assert _signed_qty('-10650.5', {}) == pytest.approx(-10650.5)
+    assert _signed_qty('10700.25', {}) == pytest.approx(10700.25)
+    with pytest.raises(ValueError, match='QTY'):
+        _signed_qty('-1500.0BTC', {})
+    with pytest.raises(ValueError):
+        _signed_qty('1.234,56', {})
+
+
+def test_deposit_withdrawal_unpaired_convert_raises():
+    """Half a conversion is a broken export: stop, do not invent the other leg."""
+    half = DEPOSIT_WITHDRAWAL.replace('123,2024-03-05 09:59:50,EUR,-10000.000000,Fiat,0.000000,Convert\n', '')
+    with pytest.raises(ValueError, match='unpaired'):
+        list(read_deposit_withdrawal(io.StringIO(half), exchange='Bybit'))
