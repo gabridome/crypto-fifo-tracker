@@ -548,6 +548,18 @@ def test_deposit_withdrawal_pairs_a_convert():
     assert out[0]['give_amount'] == pytest.approx(10650.0)
 
 
+def test_deposit_withdrawal_sign_is_the_direction():
+    """The sign decides in or out, and the module's grammar still applies."""
+    from importers.non_btc_readers import _signed_qty
+
+    assert _signed_qty('-10650.5', {}) == pytest.approx(-10650.5)
+    assert _signed_qty('10700.25', {}) == pytest.approx(10700.25)
+    with pytest.raises(ValueError, match='QTY'):
+        _signed_qty('-1500.0BTC', {})
+    with pytest.raises(ValueError):
+        _signed_qty('1.234,56', {})
+
+
 def test_deposit_withdrawal_unpaired_convert_raises():
     """Half a conversion is a broken export: stop, do not invent the other leg."""
     half = DEPOSIT_WITHDRAWAL.replace('123,2024-03-05 09:59:50,EUR,-10000.000000,Fiat,0.000000,Convert\n', '')
@@ -563,6 +575,24 @@ Expected: FAIL — `ImportError: cannot import name 'read_deposit_withdrawal'`.
 - [ ] **Step 3: Write the reader** (append)
 
 ```python
+def _signed_qty(raw, row):
+    """The quantity of a deposit/withdrawal row, sign included.
+
+    Here the sign *is* the direction — negative leaves the account, positive
+    enters it — so this cannot use `split_amount` directly: that helper returns
+    a positive amount by contract. It reuses its grammar, which refuses an
+    ambiguous comma, a stray unit and scientific notation, and then puts the
+    sign back. A bare `float()` would accept shapes the rest of the module
+    rejects, and this column decides whether an asset came in or went out.
+    """
+    amount, unit = split_amount(raw)
+    if unit:
+        raise ValueError(f'unexpected unit in QTY: {raw!r} '
+                         f'(Coin={row.get("Coin")!r}, '
+                         f'Time={row.get("Date & Time(UTC)")!r})')
+    return -amount if str(raw).strip().startswith('-') else amount
+
+
 def read_deposit_withdrawal(fh, exchange):
     """Deposit/withdrawal export. Conversions are two rows sharing a minute."""
     lines = fh.read().splitlines()
@@ -573,7 +603,7 @@ def read_deposit_withdrawal(fh, exchange):
     converts, others = {}, []
     for row in rows:
         coin = (row['Coin'] or '').strip().upper()
-        qty = float(row['QTY'])
+        qty = _signed_qty(row['QTY'], row)
         when = _utc(row['Date & Time(UTC)'])
         desc = (row['Description'] or '').strip()
         if desc == 'Convert':
