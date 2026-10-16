@@ -10,6 +10,8 @@ import pandas as pd
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from config import SWAP_REALIZES  # noqa: F401 — read by tasks 9-11, not yet; re-exported for monkeypatch.setattr
+
 
 DUST_THRESHOLD = Decimal('1e-8')  # Single threshold for all dust comparisons
 

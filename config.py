@@ -36,6 +36,8 @@ COUNTRY_PROFILES = {
             "short_term_rate": 0.28,
             # Whether long-term gains must still be declared (even if exempt)
             "declare_exempt": True,
+            "swap_realizes": True,   # crypto→crypto realizes at the swap.
+                                     # ASSUMPTION, not verified law — doc/compliance.md
         },
         "report": {
             # Tax form names for exempt and taxable gains
@@ -66,6 +68,7 @@ COUNTRY_PROFILES = {
     #         "exempt_holding_days": 0,  # Italy: no holding period exemption
     #         "short_term_rate": 0.26,   # 26% flat rate on all crypto gains
     #         "declare_exempt": False,
+    #         "swap_realizes": True,    # ASSUMPTION, not verified law — doc/compliance.md
     #     },
     #     "report": {
     #         "exempt_form": None,
@@ -88,6 +91,7 @@ COUNTRY_PROFILES = {
     #         "exempt_holding_days": 365,   # 1 year holding = tax free
     #         "short_term_rate": None,      # Germany: taxed at personal income rate
     #         "declare_exempt": True,
+    #         "swap_realizes": True,        # ASSUMPTION, not verified law — doc/compliance.md
     #     },
     #     "report": {
     #         "exempt_form": "Anlage SO (exempt)",
@@ -132,6 +136,10 @@ TIMEZONE = _profile["timezone"]
 EXEMPT_HOLDING_DAYS = _profile["tax_rules"]["exempt_holding_days"]
 SHORT_TERM_RATE = _profile["tax_rules"]["short_term_rate"]
 DECLARE_EXEMPT = _profile["tax_rules"]["declare_exempt"]
+
+# No .get() default: a profile that forgets to declare the rule must fail at
+# import, not silently inherit someone else's tax treatment.
+SWAP_REALIZES = _profile["tax_rules"]["swap_realizes"]
 
 EXEMPT_FORM = _profile["report"]["exempt_form"]
 TAXABLE_FORM = _profile["report"]["taxable_form"]
