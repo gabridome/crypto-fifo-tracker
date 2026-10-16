@@ -126,16 +126,33 @@ class _FakeRates:
     tests use it, which is a required adaptation of the task's own verbatim
     test calls (none of which pass `rates=` as written).
 
-    `crypto_to_eur` uses a fixed rate (2.0) rather than refusing outright:
-    the swap_group_id end-to-end test below needs a real crypto-to-crypto
-    leg to price, and the fixed rate is enough to prove the two legs link —
-    no test here asserts a specific valuation figure from it.
+    `crypto_to_eur` raises rather than quietly pricing something: none of
+    the fixtures using this base class produce a crypto-to-crypto row, so a
+    reader regression that accidentally emitted one here must fail loudly,
+    not get valued at some number nobody asked for. The one test that does
+    need a real crypto-to-crypto leg priced uses `_FakeRatesWithCrypto`
+    below instead of weakening this guard for everyone.
     """
 
     def fiat_to_eur(self, amount, currency, when):
         if currency != 'EUR':
             raise AssertionError(f'unexpected fiat currency in test fixture: {currency!r}')
         return amount
+
+    def crypto_to_eur(self, coin, amount, when):
+        raise AssertionError('crypto_to_eur should not be called by these fixtures')
+
+
+class _FakeRatesWithCrypto(_FakeRates):
+    """_FakeRates, plus a crypto_to_eur that actually prices a swap.
+
+    Scoped to the one test that needs it (test_crypto_to_crypto_swap_round_
+    trips_swap_group_id) rather than loosening the shared base class, which
+    would cost every other test its "a crypto-to-crypto row here is a bug"
+    guard. The rate (2.0) is arbitrary — no test asserts a specific
+    valuation figure from it, only that the two legs share one
+    swap_group_id.
+    """
 
     def crypto_to_eur(self, coin, amount, when):
         return amount * 2.0
@@ -329,7 +346,7 @@ def test_crypto_to_crypto_swap_round_trips_swap_group_id(db_path, tmp_path):
     )
 
     inserted = import_non_btc_legs(str(export), 'Bybit', 'trade_history', db_path,
-                                    rates=_FakeRates())
+                                    rates=_FakeRatesWithCrypto())
 
     assert inserted == 2
     conn = sqlite3.connect(db_path)
