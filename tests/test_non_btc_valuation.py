@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from importers.non_btc_valuation import value_row
+from importers.non_btc_valuation import _apply_fee, value_row
 
 
 class FakeRates:
@@ -216,3 +216,33 @@ def test_same_row_ref_gives_the_same_swap_id_across_calls():
     second = value_row(row, RATES, row_ref='file.csv#3')
 
     assert first[0]['swap_group_id'] == second[0]['swap_group_id']
+
+
+def test_apply_fee_no_fee_is_a_passthrough():
+    assert _apply_fee('BTC', 2.0, 'USDT', 1000.0, '', 0.0) == (1000.0, 2.0)
+
+
+def test_apply_fee_in_the_received_asset_reduces_it():
+    take, give_total = _apply_fee('BTC', 2.0, 'USDT', 1000.0, 'USDT', 2.0)
+    assert (take, give_total) == (998.0, 2.0)
+
+
+def test_apply_fee_in_the_given_asset_inflates_the_disposal():
+    take, give_total = _apply_fee('BTC', 2.0, 'USDT', 1000.0, 'BTC', 0.01)
+    assert take == 1000.0
+    assert give_total == pytest.approx(2.01)
+
+
+def test_apply_fee_refuses_a_blank_asset():
+    with pytest.raises(ValueError, match='no asset'):
+        _apply_fee('BTC', 2.0, 'USDT', 1000.0, '', 5.0)
+
+
+def test_apply_fee_refuses_a_third_asset():
+    with pytest.raises(ValueError, match='neither leg'):
+        _apply_fee('BTC', 2.0, 'USDT', 1000.0, 'BNB', 0.5)
+
+
+def test_apply_fee_refuses_consuming_the_whole_leg():
+    with pytest.raises(ValueError, match='consumes the whole'):
+        _apply_fee('BTC', 2.0, 'USDT', 1000.0, 'USDT', 1000.0)

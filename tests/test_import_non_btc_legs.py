@@ -1,8 +1,9 @@
 """Non-BTC legs importer: schema, idempotency, and the BTC ledger it must not touch.
 
-The importer and the BTC-ledger non-regression cases this docstring promises
-land with later tasks of the non-btc-legs plan; this file currently only
-covers the swap_group_id migration (task 1).
+Covers the swap_group_id migration (task 1) and, from task 6, the importer
+itself: the source-tag isolation that keeps a re-import from ever deleting a
+BTC row written from the same file, the warnings for a withdrawal recorded
+as a sale or a zero-proceeds transfer, and idempotency.
 """
 import os
 import re
@@ -15,6 +16,8 @@ import tempfile
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from importers.import_non_btc_legs import SOURCE_SUFFIX, import_non_btc_legs  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
 SCHEMA_FILE = os.path.join(PROJECT_ROOT, 'doc', 'schema.sql')
@@ -110,6 +113,123 @@ def pre_migration_db():
     yield path
 
     shutil.rmtree(tmp_dir)
+
+
+class _FakeRates:
+    """No-network rate source for these tests: EUR passes through unchanged.
+
+    None of the fixtures below price anything other than a plain EUR leg —
+    there is no USD-denominated row and no crypto-to-crypto swap among them.
+    Constructing the real `Rates()` anyway would still build an `ECBRates`
+    and a `CryptoPrices`, which read CSV caches by a path relative to the
+    working directory and may reach out to the network when the cache looks
+    stale (see import_non_btc_legs.Rates). A unit test must not depend on
+    either, which is exactly why `import_non_btc_legs` takes a `rates=`
+    seam — these tests use it, which is a required adaptation of the task's
+    own verbatim test calls (none of which pass `rates=` as written).
+    """
+
+    def fiat_to_eur(self, amount, currency, when):
+        if currency != 'EUR':
+            raise AssertionError(f'unexpected fiat currency in test fixture: {currency!r}')
+        return amount
+
+    def crypto_to_eur(self, coin, amount, when):
+        raise AssertionError('crypto_to_eur should not be called by these fixtures')
+
+
+def _seed_btc_row(db_path, source):
+    """A BTC row written by another importer, from the same file."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("""
+            INSERT INTO transactions (transaction_date, transaction_type, exchange_name,
+                cryptocurrency, amount, price_per_unit, total_value, fee_amount,
+                fee_currency, currency, source, imported_at, record_hash)
+            VALUES ('2024-02-01T09:00:00+00:00','SELL','Bybit','BTC',0.010000,50000.00,
+                    500.00,0,'EUR','EUR',?, '2026-01-01T00:00:00', 'hash-btc-1')
+        """, (source,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+DEPOSIT_WITHDRAWAL = """UID: 123,Company Name: ,Country:
+Uid,Date & Time(UTC),Coin,QTY,Type,Account Balance,Description
+123,2024-03-05 10:00:00,USDC,10700.000000,Fiat,10700.000000,Convert
+123,2024-03-05 09:59:50,EUR,-10000.000000,Fiat,0.000000,Convert
+"""
+
+
+def test_import_writes_legs_without_touching_btc_rows(db_path, tmp_path, monkeypatch):
+    """The regression that matters: the #non-btc tag must not delete BTC rows."""
+    export = tmp_path / 'bybit_dw.csv'
+    export.write_text(DEPOSIT_WITHDRAWAL)
+    _seed_btc_row(db_path, export.name)
+
+    inserted = import_non_btc_legs(str(export), exchange_name='Bybit',
+                                    shape='deposit_withdrawal', db_path=db_path,
+                                    rates=_FakeRates())
+
+    assert inserted == 1
+    conn = sqlite3.connect(db_path)
+    try:
+        btc = conn.execute("SELECT COUNT(*) FROM transactions WHERE cryptocurrency='BTC'").fetchone()[0]
+        legs = conn.execute("SELECT cryptocurrency, transaction_type, total_value, source "
+                             "FROM transactions WHERE cryptocurrency='USDC'").fetchall()
+    finally:
+        conn.close()
+
+    assert btc == 1, 'the BTC row of the same file was deleted'
+    assert legs == [('USDC', 'BUY', 10000.0, export.name + SOURCE_SUFFIX)]
+
+
+def test_convert_rows_are_listed_for_confirmation(db_path, tmp_path, capsys):
+    """A withdrawal recorded as a sale must be announced, never silent."""
+    export = tmp_path / 'account_history.csv'
+    export.write_text(
+        'ID,Timestamp,Transaction Type,Asset,Quantity Transacted,Price Currency,'
+        'Price at Transaction,Subtotal,Total (inclusive of fees and/or spread),Fees and/or Spread\n'
+        'w1,2024-02-21 08:00:00 UTC,Withdrawal,USDC,-50000.0,EUR,€0.92,€46500.0,€46500.0,€0.00\n'
+    )
+
+    import_non_btc_legs(str(export), exchange_name='Coinbase',
+                         shape='account_history', db_path=db_path, rates=_FakeRates())
+
+    err = capsys.readouterr().err
+    assert 'recorded as a SALE' in err
+    assert '50000.00000000 USDC' in err
+
+
+def test_zero_proceeds_withdrawals_are_listed_too(db_path, tmp_path, capsys):
+    """The transfer side of the fork gets the same confirmation list."""
+    export = tmp_path / 'account_history.csv'
+    export.write_text(
+        'ID,Timestamp,Transaction Type,Asset,Quantity Transacted,Price Currency,'
+        'Price at Transaction,Subtotal,Total (inclusive of fees and/or spread),Fees and/or Spread\n'
+        'w2,2024-02-22 08:00:00 UTC,Withdrawal,USDC,-25.0,EUR,€0.00,€0.00,€0.00,€0.00\n'
+    )
+
+    import_non_btc_legs(str(export), exchange_name='Coinbase',
+                         shape='account_history', db_path=db_path, rates=_FakeRates())
+
+    err = capsys.readouterr().err
+    assert 'recorded as a TRANSFER' in err
+    assert '25.00000000 USDC' in err
+
+
+def test_import_is_idempotent(db_path, tmp_path):
+    export = tmp_path / 'bybit_dw.csv'
+    export.write_text(DEPOSIT_WITHDRAWAL)
+
+    import_non_btc_legs(str(export), 'Bybit', 'deposit_withdrawal', db_path, rates=_FakeRates())
+    first = sqlite3.connect(db_path).execute(
+        'SELECT record_hash FROM transactions ORDER BY id').fetchall()
+    import_non_btc_legs(str(export), 'Bybit', 'deposit_withdrawal', db_path, rates=_FakeRates())
+    second = sqlite3.connect(db_path).execute(
+        'SELECT record_hash FROM transactions ORDER BY id').fetchall()
+
+    assert first == second and len(first) == 1
 
 
 def test_migration_adds_swap_group_id(pre_migration_db):
