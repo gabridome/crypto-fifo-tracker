@@ -1829,6 +1829,17 @@ git commit -m "feat(fifo): deferred swap consumes lots without realizing, record
 
 ### Task 10: Take side — lots that inherit date and cost
 
+Idempotency on this side needs nothing new, and the reason is worth stating
+because a reviewer will ask. The engine already clears `fifo_lots` and
+`sale_lot_matches` for the crypto it is about to process (`crypto_fifo_tracker.py:141-142`),
+so inherited lots are rewritten from scratch on every pass. Do **not** reach for
+the `swap_lot_transfers` unique index as a guard: it cannot see a re-run,
+because the lots come back with new ids and the pair differs (measured, see the
+comment on that index). And note the asymmetry on purpose: the engine deletes
+transfers by `from_cryptocurrency`, so processing the take side never destroys
+the rows it is there to read.
+
+
 **Files:**
 - Modify: `calculators/crypto_fifo_tracker.py` (BUY branch, line ~141)
 - Test: `tests/test_swap_deferral.py`
