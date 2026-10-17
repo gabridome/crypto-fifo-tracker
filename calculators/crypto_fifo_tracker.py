@@ -247,6 +247,17 @@ class CryptoFIFOTracker:
         # Fatal only under deferral, where those lots are built; on the default
         # path nothing reads either value and the already-declared figures must
         # not be stopped by a defect that cannot reach them.
+        #
+        # This is a defensive guard, not a live defect: checked upstream
+        # (2026-10-17), importers/non_btc_valuation.py:value_row returns exactly
+        # one SELL and one BUY per crypto-to-crypto row, is called once per row,
+        # and folds that row's unique row_ref into the group id. Importing the
+        # same file twice cannot produce it either — under the same source name
+        # the exact-match delete_by_source clears the old rows first, under a
+        # different one the row_ref differs and so does the group. What can
+        # produce it is a hand-edited row, or a future reader that groups
+        # several fills under one order id. The cost of letting it through is
+        # the asset received inheriting the same cost basis once per leg.
         conflicts = []
         for group, assets in take_legs.items():
             if len(assets) < 2:
