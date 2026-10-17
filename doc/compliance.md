@@ -89,13 +89,21 @@ the tax professional before any amended return.
 
 The banner names the setting **configured when the report is printed** — which
 is not necessarily the rule that produced the figures on record. It therefore
-checks: handed the report's database connection, it compares the setting against
-positive evidence in the data (a deferred swap disposal can only come from a
-`False` run, a realized one only from a `True` run) and, where the two
-contradict each other, says so in a block that cannot be skimmed past, names how
-much of the data is affected, and gives the two ways out — recalculate, or read
-the figures under the rule they were born under. A report that prints that block
-is not fit to file from.
+checks. Handed the report's database connection, it compares the setting against
+three kinds of positive evidence in the data: a deferred swap disposal and a lot
+that inherited its acquisition date and cost can only come from a `False` run, a
+realized swap disposal only from a `True` one. Where any of them contradicts the
+setting, it says so in a block that cannot be skimmed past, names which evidence
+fired and how much of the data is affected, and gives the two ways out —
+recalculate, or read the figures under the rule they were born under. A report
+that prints that block is not fit to file from.
+
+What a clean line establishes, and no more: that no disposal and no inherited lot
+**on record** contradicts the setting named. Two limits, both stated in the code
+and recorded in `doc/TODO.md`: a swap made on the same day as the purchase it
+consumed inherits that same day, so its lot is indistinguishable from an ordinary
+one; and on a database older than the `swap_group_id` migration nothing is
+identifiable as a swap leg at all, so the line is clean for want of evidence.
 
 ### What `sale_lot_matches` is, and is not
 

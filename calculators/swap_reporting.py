@@ -26,14 +26,28 @@ disposal that actually deferred has rows in `swap_lot_transfers` for its swap
 group; the engine refuses a deferred disposal it cannot cover with lots, so
 there is no completed deferral without them.
 
-**Both directions.** `deferred_disposals` and `realized_swap_disposals` are a
-pair, and each is evidence of the rule that wrote it: only a
-`swap_realizes = False` run defers a swap disposal, only a `True` run realizes
-one. `config.tax_rule_banner()` compares the configured setting against both,
-because the dangerous state is symmetric — figures from a `False` run under a
-setting now `True`, and figures from a `True` run under a setting now `False`.
-The engine's DELETE is per cryptocurrency, so a database recalculated for only
-some assets after a change of the setting holds both at once.
+**Three kinds of evidence, and what they establish together.** Each is a trace
+of the rule that wrote it: only a `swap_realizes = False` run defers a swap
+disposal (`deferred_disposals`) or builds a lot that inherited its acquisition
+date and cost (`inherited_lots`); only a `True` run realizes a swap disposal
+(`realized_swap_disposals`). Found together, all three clean, they establish
+that **no disposal and no inherited lot on record contradicts the setting
+named** — which is what `config.tax_rule_banner()` asserts, and no more than
+that.
+
+Two disposal evidences are not enough on their own, and this was measured, not
+reasoned: both look only at the leg that gives up. An asset *received* and left
+unrecalculated after a change of the setting keeps its inherited lots in
+`fifo_lots`, and the engine's `DELETE FROM swap_lot_transfers` — which runs
+under `True` as well — takes away the last standing trace the moment the give
+side is recomputed. `inherited_lots` is what sees that state.
+
+**The limit of the third evidence, stated.** It recognises an inherited lot by
+its acquisition date differing from the date of the swap's BUY leg. A swap that
+happened on the same day as the purchase it consumed inherits that same day, so
+the two dates coincide and the lot is indistinguishable from an ordinary one.
+The evidence is therefore **sufficient and not necessary**: finding one proves
+a deferred run wrote it, finding none does not prove none exists.
 """
 
 ZERO = {'count': 0, 'amount': 0.0, 'total_value': 0.0}
@@ -50,11 +64,21 @@ _SWAP_DISPOSALS = """
 """
 
 # It deferred: no row in the register of realized gains, and transfers on
-# record for its group — which only a swap_realizes = False run writes.
+# record for its group FROM THIS LEG'S OWN ASSET — which only a
+# swap_realizes = False run writes.
+#
+# `s.from_cryptocurrency = t.cryptocurrency` is defensive, not a live fix: on
+# the group alone, a group carrying two SELL legs in different assets would
+# report the second as deferred on the first one's transfer. The importer
+# cannot produce that — verified upstream 2026-10-17: value_row emits exactly
+# one SELL and one BUY per normalized row, row_ref is unique per row and folded
+# into the group id, and no other file writes the column. Kept because the
+# alternative is a count that is wrong without being loud.
 _DEFERRED = """      AND NOT EXISTS (SELECT 1 FROM sale_lot_matches m
                       WHERE m.sale_transaction_id = t.id)
       AND EXISTS (SELECT 1 FROM swap_lot_transfers s
-                  WHERE s.swap_group_id = t.swap_group_id)
+                  WHERE s.swap_group_id = t.swap_group_id
+                    AND s.from_cryptocurrency = t.cryptocurrency)
 """
 
 # It realized: a row in that register — which only a swap_realizes = True run
@@ -108,12 +132,53 @@ def realized_swap_disposals(conn, cryptocurrency=None, year=None):
     one, found where the setting says it should not be, means the figures were
     produced under the other rule and the setting changed afterwards.
 
-    Not symmetric by accident — the engine's DELETE is per cryptocurrency, so a
-    database recalculated for only some assets after a change of the setting
-    carries both kinds at once, and a guard covering one direction would pass
-    it in silence.
+    Where this one is found under a setting of `False`, it establishes that the
+    rows it counts came from a `True` run: the engine writes a match row for a
+    swap leg on that path only.
     """
     return _count(conn, _REALIZED, cryptocurrency, year)
+
+
+# A lot whose acquisition came from a swap's BUY leg but whose purchase_date is
+# not that transaction's date: the engine writes that only on the deferral path,
+# where the date travels from the lot consumed on the other side. See the limit
+# in this module's docstring.
+_INHERITED_LOTS = """
+    SELECT COUNT(*), COALESCE(SUM(l.original_amount), 0)
+    FROM fifo_lots l
+    JOIN transactions t ON l.purchase_transaction_id = t.id
+    WHERE t.transaction_type = 'BUY'
+      AND t.swap_group_id IS NOT NULL AND t.swap_group_id <> ''
+      AND l.purchase_date <> t.transaction_date
+"""
+
+
+def inherited_lots(conn):
+    """Lots that took their acquisition date and cost across a deferred swap.
+
+    The evidence the two disposal counts cannot give, because it lives on the
+    asset **received**: `{'count': int, 'amount': float}`.
+
+    No `cryptocurrency` or `year` filter, deliberately. The asset here is the
+    one received, not the one given up, so the same argument name would mean the
+    opposite of what it means in the other two functions — and a lot has no
+    disposal year to filter on. The only caller needs the count.
+
+    `amount` sums `original_amount` across whatever cryptocurrencies inherited,
+    so it is **not a quantity in any unit** and must not be printed aggregated.
+    It is here for a caller that has narrowed to one asset itself.
+    """
+    if not _has_column(conn, 'transactions', 'swap_group_id'):
+        return {'count': 0, 'amount': 0.0}
+    if not _has_table(conn, 'fifo_lots'):
+        return {'count': 0, 'amount': 0.0}
+
+    cur = conn.execute(_INHERITED_LOTS)
+    try:
+        count, amount = cur.fetchone()
+    finally:
+        cur.close()
+    return {'count': count, 'amount': float(amount)}
 
 
 def _count(conn, evidence, cryptocurrency=None, year=None):
@@ -126,8 +191,15 @@ def _count(conn, evidence, cryptocurrency=None, year=None):
     deferred half only, and is checked there — checking it here would answer
     zero for the realized half on a database that predates the migration,
     hiding the very disagreement the banner exists to name.
+
+    `sale_lot_matches` is the other shared prerequisite: both evidences read it,
+    and without it neither a realized nor a deferred disposal can be on record,
+    so zero is again the true answer. Unguarded, a report would raise on its
+    first line instead of printing.
     """
     if not _has_column(conn, 'transactions', 'swap_group_id'):
+        return dict(ZERO)
+    if not _has_table(conn, 'sale_lot_matches'):
         return dict(ZERO)
 
     sql = _SWAP_DISPOSALS + evidence

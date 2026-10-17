@@ -19,10 +19,15 @@ import sys
 from contextlib import redirect_stdout
 
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
+SCHEMA_FILE = os.path.join(PROJECT_ROOT, 'doc', 'schema.sql')
 sys.path.insert(0, PROJECT_ROOT)
 
+import pytest  # noqa: E402
+
 from calculators.crypto_fifo_tracker import CryptoFIFOTracker  # noqa: E402
-from calculators.swap_reporting import deferred_disposals, realized_swap_disposals  # noqa: E402
+from calculators.swap_reporting import (  # noqa: E402
+    deferred_disposals, inherited_lots, realized_swap_disposals,
+)
 
 DRIVER = os.path.join(PROJECT_ROOT, 'calculators', 'calculate_fifo.py')
 CLAUDE_MD = os.path.join(PROJECT_ROOT, 'CLAUDE.md')
@@ -99,6 +104,50 @@ def _realizing_db(db_path):
     _seed_one_plain_and_one_swap_sale(db_path)
     _run_engine(db_path, 'ETH', 'USDT')
     return db_path
+
+
+# doc/schema.sql with the swap_group_id column and its index stripped out —
+# the one shape tests/conftest.py's db_path fixture cannot give us, because it
+# builds from the real schema, which has the column. Same patterns and the same
+# loud failure as tests/test_import_non_btc_legs.py:42-90: if either stops
+# matching (a reformat of the schema, say) this raises instead of quietly
+# handing back a schema that still has the column, which would turn the test
+# below back into the false positive it exists to replace.
+_COLUMN_BLOCK = re.compile(
+    r"    record_hash TEXT,(?P<comment>[^\n]*)\n"
+    r"    swap_group_id TEXT[^\n]*\n"
+)
+_INDEX_LINE = re.compile(
+    r"CREATE INDEX IF NOT EXISTS idx_transactions_swap_group "
+    r"ON transactions\(swap_group_id\);\n"
+)
+
+
+@pytest.fixture
+def pre_swap_column_db(tmp_path):
+    with open(SCHEMA_FILE) as f:
+        schema = f.read()
+
+    schema, n = _COLUMN_BLOCK.subn(r"    record_hash TEXT\g<comment>\n", schema)
+    assert n == 1, (
+        'Could not find the swap_group_id column line in doc/schema.sql — update '
+        '_COLUMN_BLOCK to match the current schema; otherwise this fixture '
+        'silently stops exercising the missing-column path.'
+    )
+    schema, n = _INDEX_LINE.subn('', schema)
+    assert n == 1, (
+        'Could not find the idx_transactions_swap_group index line in '
+        'doc/schema.sql — update _INDEX_LINE to match the current schema.'
+    )
+
+    path = str(tmp_path / 'pre_swap_column.db')
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(schema)
+        conn.commit()
+    finally:
+        conn.close()
+    return path
 
 
 def _connect(db_path):
@@ -263,12 +312,16 @@ def test_the_count_can_be_narrowed_to_one_year(db_path, monkeypatch):
         conn.close()
 
 
-def test_a_database_without_the_swap_tables_answers_zero_instead_of_raising(db_path):
+def test_a_database_without_the_transfers_table_answers_zero_instead_of_raising(db_path):
     """Reports run on databases older than the migrations; they must still print.
 
-    Zero is not a swallowed error here: a database with no `swap_lot_transfers`
-    table and no `swap_group_id` column cannot hold a deferred disposal, so
-    zero is the true answer.
+    Zero is not a swallowed error here: without `swap_lot_transfers` no run
+    under deferral was ever possible — the engine refuses that combination — so
+    no disposal can have deferred.
+
+    This covers the TABLE only. The `swap_group_id` column has its own test
+    below, with its own fixture: the docstring here used to claim both while
+    dropping only the table, which left the column guard with no test at all.
     """
     conn = sqlite3.connect(db_path)
     try:
@@ -277,6 +330,182 @@ def test_a_database_without_the_swap_tables_answers_zero_instead_of_raising(db_p
         assert deferred_disposals(conn)['count'] == 0
     finally:
         conn.close()
+
+
+def test_a_database_without_the_swap_group_column_answers_zero_for_every_evidence(pre_swap_column_db):
+    """The guard that had no test, and the failure it prevents.
+
+    Without `transactions.swap_group_id` a row cannot be identified as a swap
+    leg at all, so zero is the true answer. Unguarded, `realized_swap_disposals`
+    has no table check in front of it, so the banner raises
+    `sqlite3.OperationalError` at the *end* of generate_annual_summary.py —
+    after every section has already printed — turning a report into a traceback
+    on its last line.
+
+    Every other database in this file is built from the real doc/schema.sql,
+    which has the column, so no other test here can reach this.
+    """
+    conn = sqlite3.connect(pre_swap_column_db)
+    try:
+        assert 'swap_group_id' not in [
+            r[1] for r in conn.execute('PRAGMA table_info(transactions)')
+        ], 'the fixture must actually be missing the column'
+        assert deferred_disposals(conn)['count'] == 0
+        assert realized_swap_disposals(conn)['count'] == 0
+        assert inherited_lots(conn)['count'] == 0
+        assert config.tax_rule_banner(conn) == TODAYS_LINE, \
+            'and the banner still prints, rather than raising on its own line'
+    finally:
+        conn.close()
+
+
+def test_a_database_without_sale_lot_matches_answers_zero_for_both_disposal_evidences(db_path):
+    """Both disposal queries read that table; without it they would raise.
+
+    A report would then die at its *start* rather than halfway, which is less
+    dangerous and still wrong: zero is the true answer, because a database with
+    no register of realized gains has neither a realized nor a deferred
+    disposal on record.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute('DROP TABLE sale_lot_matches')
+        conn.commit()
+        assert deferred_disposals(conn)['count'] == 0
+        assert realized_swap_disposals(conn)['count'] == 0
+        assert config.tax_rule_banner(conn) == TODAYS_LINE
+    finally:
+        conn.close()
+
+
+def test_the_disposal_evidences_only_look_at_sell_legs(db_path, monkeypatch):
+    """Keeps `transaction_type = 'SELL'` from becoming load-bearing by accident.
+
+    Adding `s.from_cryptocurrency = t.cryptocurrency` to the deferred evidence
+    made the SELL filter redundant for every state the engine produces — the
+    BUY leg of a swap is the asset *received*, which is never the asset a
+    transfer came from. Measured: without this test, deleting the SELL filter
+    broke nothing.
+
+    It is kept because the function counts *disposals*, and the clause is what
+    makes the query say that. The state where it still bites is a group whose
+    BUY leg is in the same asset as its SELL leg: that leg would then be
+    counted as a disposal that deferred, and its `amount` and `total_value`
+    added to the EUR figure a report prints. Hand-built — the importer cannot
+    make a group give up and receive the same asset, and the engine's
+    multiple-BUY-leg guard would refuse this database before calculating it.
+    This query is not the engine, and a report runs on what is on record.
+    """
+    _deferred_db(db_path, monkeypatch)
+
+    conn = _connect(db_path)
+    try:
+        _tx(conn, transaction_date='2024-06-15T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3200.0, total_value=3200.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='h8', swap_group_id='swap-1')
+        result = deferred_disposals(conn)
+    finally:
+        conn.close()
+
+    assert result['count'] == 1, 'a BUY leg is an acquisition, never a disposal'
+    assert result['total_value'] == 3200.0, \
+        'and its value must not be added to the proceeds a report reconciles'
+
+
+def test_the_inherited_evidence_only_looks_at_lots_acquired_by_a_buy(db_path):
+    """Defensive, and marked as such — it has no live path.
+
+    `fifo_lots.purchase_transaction_id` points at a BUY by construction: the
+    engine builds lots in its BUY branches only. What can break that is a
+    stale pointer — ids are AUTOINCREMENT, so a transaction deleted and
+    re-imported comes back with a new id and a lot left behind can end up
+    pointing at a different row (the stale-lot family already in doc/TODO.md).
+    Landing on a SELL that carries a swap_group_id and a different date would
+    count as an inherited lot and raise a warning with nothing behind it.
+
+    A false warning is not a harmless warning here: this banner is a fiscal
+    safety device, and one that cries wolf is one a reader learns to scroll
+    past.
+    """
+    conn = _connect(db_path)
+    try:
+        sell_id = _tx(conn, transaction_date='2024-06-15T15:00:00+00:00',
+                      transaction_type='SELL', cryptocurrency='ETH', amount=1.0,
+                      price_per_unit=3200.0, total_value=3200.0, fee_currency='EUR',
+                      currency='EUR', exchange_name='Test', source='seed',
+                      imported_at='2026-01-01T00:00:00', record_hash='s1',
+                      swap_group_id='swap-stale')
+        # A lot pointing at that SELL, with a date that differs from it.
+        conn.execute("""INSERT INTO fifo_lots
+            (purchase_transaction_id, cryptocurrency, purchase_date, original_amount,
+             remaining_amount, purchase_price_per_unit, cost_basis, purchase_fee_total,
+             exchange_name)
+            VALUES (?, 'ETH', '2020-01-10T10:00:00+00:00', 1.0, 1.0, 1000.0, 1000.0, 0, 'Test')""",
+            (sell_id,))
+        conn.commit()
+        result = inherited_lots(conn)
+        banner = config.tax_rule_banner(conn)
+    finally:
+        conn.close()
+
+    assert result['count'] == 0, \
+        'a lot whose acquisition row is a SELL is a broken pointer, not an inheritance'
+    assert banner == TODAYS_LINE, 'and it must not raise a warning with nothing behind it'
+
+
+def test_a_database_without_fifo_lots_answers_zero_for_the_inherited_evidence(db_path):
+    """The third evidence's own prerequisite, in the shape of the other two.
+
+    `fifo_lots` is where an inherited lot lives, so without that table none can
+    be on record and zero is the true answer. Unguarded the banner would raise
+    instead of printing — the same failure the other guards prevent, on the
+    third query.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute('DROP TABLE fifo_lots')
+        conn.commit()
+        assert inherited_lots(conn)['count'] == 0
+        assert config.tax_rule_banner(conn) == TODAYS_LINE
+    finally:
+        conn.close()
+
+
+def test_the_deferred_evidence_requires_the_transfer_to_come_from_this_asset(db_path, monkeypatch):
+    """Defensive, and marked as such.
+
+    `EXISTS (... WHERE s.swap_group_id = t.swap_group_id)` alone does not check
+    that the transfer came from the asset *this* leg gave up, so a group with
+    two SELL legs in different assets would report a disposal that deferred
+    nothing. Not producible by the importer — verified upstream 2026-10-17:
+    `non_btc_valuation.value_row` emits exactly one SELL and one BUY per
+    normalized row, `row_ref` is unique per row and folded into the group id,
+    and no other file writes the column. Built by hand here for that reason.
+    """
+    _deferred_db(db_path, monkeypatch)
+
+    conn = _connect(db_path)
+    try:
+        # A second SELL leg in a different asset, sharing the group. Its own
+        # asset never deferred: the transfer on record is ETH's.
+        _tx(conn, transaction_date='2024-06-15T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='BTC', amount=0.1, price_per_unit=50000.0, total_value=5000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='h9',
+            swap_group_id='swap-1')
+        assert conn.execute(
+            'SELECT from_cryptocurrency FROM swap_lot_transfers'
+        ).fetchone()[0] == 'ETH'
+        result = deferred_disposals(conn)
+        btc_only = deferred_disposals(conn, cryptocurrency='BTC')
+    finally:
+        conn.close()
+
+    assert btc_only['count'] == 0, \
+        'the BTC leg gave up nothing that deferred: the transfer on record is ETH-side'
+    assert result['count'] == 1, 'only the ETH leg actually deferred'
+    assert result['total_value'] == 3200.0, 'and the BTC leg must not be added in'
 
 
 # ---- report 1: calculators/generate_annual_summary.py ----
@@ -646,3 +875,204 @@ def test_the_banner_still_warns_on_a_database_that_predates_the_transfers_table(
         'and the missing table is no reason to stay silent about it'
     )
     assert 'realized a gain' in banner
+
+
+# ---- the third kind of evidence: a lot that inherited its date and cost ----
+#
+# The first two look only at the leg that GIVES UP. An asset RECEIVED and
+# calculated under the other rule leaves no trace in either: its inherited lots
+# live in `fifo_lots`, and the moment the give side is recalculated the
+# `DELETE FROM swap_lot_transfers` — which runs under `True` as well — removes
+# the last standing evidence. Measured below.
+
+def _partially_recalculated_db(db_path, monkeypatch):
+    """The state the first two kinds of evidence cannot see.
+
+    A full deferred run, then only the asset GIVEN UP recalculated under the
+    declared rule. The give side now realizes, its transfers are deleted, and
+    the asset received keeps the lots it inherited: the same cost basis counted
+    on both sides, and an acquisition date that exempts a disposal the declared
+    rule would tax.
+
+    Built with the engine, twice, exactly as a shell session reaches it —
+    `calculate_fifo_lots('ETH')` is how one asset gets recomputed by hand.
+    """
+    _seed_one_plain_and_one_swap_sale(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+    _run_engine(db_path, 'ETH', 'USDT')
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', True)
+    _run_engine(db_path, 'ETH')  # the give side only
+    return db_path
+
+
+def test_the_partially_recalculated_state_is_invisible_to_the_first_two_evidences(db_path, monkeypatch):
+    """Pins why a third kind of evidence was needed, not just that it exists.
+
+    If this test ever fails because the counts stopped being zero, the third
+    evidence may have become redundant — check before removing it.
+    """
+    _partially_recalculated_db(db_path, monkeypatch)
+
+    conn = _connect(db_path)
+    try:
+        assert conn.execute('SELECT COUNT(*) FROM swap_lot_transfers').fetchone()[0] == 0, \
+            'recalculating the give side deletes them, under either rule'
+        assert deferred_disposals(conn)['count'] == 0, \
+            'the give side realized: nothing looks deferred any more'
+        assert realized_swap_disposals(conn)['count'] == 1, \
+            'and what it realized agrees with the setting now in force'
+        # ...while the asset received still carries deferral in its lots.
+        stranded = conn.execute("""
+            SELECT l.cryptocurrency, l.purchase_date, l.cost_basis
+            FROM fifo_lots l JOIN transactions t ON l.purchase_transaction_id = t.id
+            WHERE l.purchase_date <> t.transaction_date
+        """).fetchall()
+    finally:
+        conn.close()
+
+    assert len(stranded) == 1 and stranded[0]['cryptocurrency'] == 'USDT', \
+        'the received asset keeps an inherited lot: EUR 1,000 of cost basis and a ' \
+        '2020 acquisition date, against a BUY leg dated 2024'
+
+
+def test_inherited_lots_separates_the_four_states(db_path, monkeypatch):
+    """One evidence, four states, measured rather than argued."""
+    _seed_one_plain_and_one_swap_sale(db_path)
+
+    conn = _connect(db_path)
+    try:
+        assert inherited_lots(conn)['count'] == 0, 'uncalculated database'
+    finally:
+        conn.close()
+
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+    _run_engine(db_path, 'ETH', 'USDT')
+    conn = _connect(db_path)
+    try:
+        assert inherited_lots(conn)['count'] == 1, 'clean deferred run'
+    finally:
+        conn.close()
+
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', True)
+    _run_engine(db_path, 'ETH')
+    conn = _connect(db_path)
+    try:
+        assert inherited_lots(conn)['count'] == 1, \
+            'partial state: the only evidence left, and the one that matters'
+    finally:
+        conn.close()
+
+    _run_engine(db_path, 'USDT')  # finish the recalculation
+    conn = _connect(db_path)
+    try:
+        assert inherited_lots(conn)['count'] == 0, 'clean True run'
+    finally:
+        conn.close()
+
+
+def test_the_banner_shouts_on_the_partially_recalculated_state(db_path, monkeypatch):
+    """The blocker. A silent banner here heads figures that double-count a cost
+    basis and move a taxable gain into the exempt column of Anexo G1."""
+    _partially_recalculated_db(db_path, monkeypatch)
+    assert config.SWAP_REALIZES is True
+
+    conn = _connect(db_path)
+    try:
+        banner = config.tax_rule_banner(conn)
+    finally:
+        conn.close()
+
+    assert 'THE SETTING AND THE DATA DISAGREE' in banner, (
+        'the asset received still holds lots built under deferral; a clean line '
+        'here tells the reader the setting and the data agree, which nothing has '
+        'established'
+    )
+    assert '1 lot(s) whose acquisition date and cost were inherited' in banner, \
+        'it must name which evidence fired, because the fix differs per evidence'
+    assert 'swap_realizes=False' in banner
+
+
+def test_the_banner_stays_silent_once_the_recalculation_is_finished(db_path, monkeypatch):
+    """The partial state is the defect; the finished one is not.
+
+    Without this the warning could fire on every database that has ever seen a
+    swap, which is the same as not firing at all.
+    """
+    _partially_recalculated_db(db_path, monkeypatch)
+    _run_engine(db_path, 'USDT')  # the asset received, under the setting in force
+
+    conn = _connect(db_path)
+    try:
+        assert config.tax_rule_banner(conn) == TODAYS_LINE
+    finally:
+        conn.close()
+
+
+# ---- the aggregate notes must not add up quantities of different assets ----
+
+def _two_deferred_swaps_in_different_assets(db_path):
+    """0.5 BTC swapped for USDT and 2 ETH swapped for DAI, same day.
+
+    Two deferred disposals whose quantities are not in the same unit — which is
+    what the aggregate notes were printing as one eight-decimal figure.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='BTC', amount=1.0, price_per_unit=10000.0, total_value=10000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='b1')
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=2.0, price_per_unit=1000.0, total_value=2000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='b2')
+        _tx(conn, transaction_date='2024-06-15T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='BTC', amount=0.5, price_per_unit=50000.0, total_value=25000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='b3',
+            swap_group_id='swap-btc')
+        _tx(conn, transaction_date='2024-06-15T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=25000.0, price_per_unit=1.0, total_value=25000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='b4',
+            swap_group_id='swap-btc')
+        _tx(conn, transaction_date='2024-06-15T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=2.0, price_per_unit=1600.0, total_value=3200.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='b5',
+            swap_group_id='swap-eth')
+        _tx(conn, transaction_date='2024-06-15T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='DAI', amount=3200.0, price_per_unit=1.0, total_value=3200.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='b6',
+            swap_group_id='swap-eth')
+    finally:
+        conn.close()
+    return db_path
+
+
+def test_the_aggregate_notes_do_not_add_up_quantities_of_different_assets(db_path, monkeypatch):
+    """0.5 BTC plus 2 ETH is not 2.5 of anything.
+
+    Printed to eight decimals, next to the per-asset quantities the reader is
+    trying to reconcile, inside a note that exists to stop a wrong
+    reconciliation. Count and EUR only — the model is the totals line.
+    """
+    _two_deferred_swaps_in_different_assets(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+    _run_engine(db_path, 'BTC', 'ETH', 'USDT', 'DAI')
+
+    output = _annual_summary(db_path)
+    sales = _section(output, 'VENDITE')
+    fifo = _section(output, 'RISULTATO FIFO')
+
+    assert '2.50000000' not in output, \
+        'the sum of a BTC quantity and an ETH quantity must not be printed at all'
+    assert 'unità' not in sales + fifo, \
+        'no aggregate quantity in the notes: there is no unit it could be in'
+    for section in (sales, fifo):
+        assert 'differite' in section and ': 2' in section, 'the count stays'
+        assert '28,200.00' in section, 'and the EUR total, which is one unit'
+    # Per-asset quantities, which ARE in a unit, must be untouched.
+    assert '0.50000000' in sales and '2.00000000' in sales, \
+        'the per-cryptocurrency rows still carry their own quantities'

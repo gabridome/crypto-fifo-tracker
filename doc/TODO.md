@@ -113,7 +113,19 @@
   `calculate_fifo.py`/`generate_irs_report.py`/`generate_annual_summary.py` lo
   raggiunge — **compreso il blocco di avviso** che quel banner stampa quando
   l'impostazione e i dati non concordano, che è la cosa che meno di tutte può
-  restare su un canale che la web UI butta. Importa **adesso**, non "prima che": dopo i task 9-11
+  restare su un canale che la web UI butta.
+  **Misurato il 2026-10-17 leggendo il codice e l'output, non avviando Flask:**
+  il blocco d'avviso è **949 caratteri su 21 righe**, la finestra della web app
+  è `[-500:]` (`web/app.py:1317` per il FIFO, `:1471` per il report), quindi non
+  ci sta **su nessun percorso**; e su `returncode == 0` (`:1314-1315`,
+  `:1468-1469`) lo stdout viene scartato del tutto. Nei due report misurati il
+  blocco comincia a 1.483 e a 1.021 caratteri dalla fine dell'output, cioè
+  interamente fuori dalla coda anche se ci stesse. Nessun altro canale lo
+  mostra: le sole altre letture di `result.stdout` in `web/app.py` (`:1015`,
+  `:1055`) sono sui percorsi di import e non eseguono questi script, e nessun
+  template legge l'output di un sottoprocesso. **Conclusione: l'avviso non
+  raggiunge l'utente della web UI**, su nessun percorso. Chi chiude questa voce
+  tratti il blocco d'avviso come il caso da far passare per primo. Importa **adesso**, non "prima che": dopo i task 9-11
   `swap_realizes=False` cambia le date, e un utente della web UI non ha modo di
   scoprire sotto quale regola sono state calcolate le cifre che legge.
 - [x] ~~**`calculators/crypto_fifo_tracker.py`: import `SWAP_REALIZES` non letto**~~
@@ -243,13 +255,28 @@ queste voci la usi, invece di riscrivere la query.
   `swap_realizes = False` per misurare l'altra regola, poi tornare a `True`).
   Chiuso 2026-10-17: il docstring dice il vero, la funzione prende una
   connessione opzionale e, quando ce l'ha, confronta l'impostazione con la
-  **prova positiva** nel database (`deferred_disposals` e
-  `realized_swap_disposals` in `calculators/swap_reporting.py`). In disaccordo
-  stampa un blocco che non si scorre via, dice quanta parte dei dati è
-  coinvolta e le due vie d'uscita (ricalcolare, o leggere le cifre sotto la
-  regola con cui sono nate). Tutti e tre i chiamanti passano la connessione.
-  **Nessuna cifra si muove e il percorso di default pulito stampa la riga di
-  prima**, verificato eseguendo i tre report, non dedotto.
+  **prova positiva** nel database (`calculators/swap_reporting.py`). In
+  disaccordo stampa un blocco che non si scorre via, dice quale prova è
+  scattata, quanta parte dei dati è coinvolta e le due vie d'uscita
+  (ricalcolare, o leggere le cifre sotto la regola con cui sono nate). Tutti e
+  tre i chiamanti passano la connessione. **Nessuna cifra si muove e il
+  percorso di default pulito stampa la riga di prima**, verificato eseguendo i
+  tre report, non dedotto.
+  Le prove sono **tre**, e la terza è arrivata dal quality review: le prime due
+  (`deferred_disposals`, `realized_swap_disposals`) guardano solo la gamba che
+  **cede**, quindi non vedevano lo stato in cui si ricalcola solo l'asset
+  ceduto dopo un cambio d'impostazione — i lotti **ereditati** dall'asset
+  ricevuto restano in `fifo_lots`, e il `DELETE FROM swap_lot_transfers`, che
+  gira anche sotto `True`, porta via l'ultima traccia. Riprodotto: giro
+  differito completo, poi `calculate_fifo_lots('ETH')` sotto `True` — la gamba
+  che cede realizza, i trasferimenti spariscono, e il lotto USDT conserva
+  €1.000 di costo d'acquisto e una data del 2020 contro una gamba BUY del 2024.
+  Lo stesso costo contato da due lati e una plusvalenza tassabile spostata nella
+  colonna esente dell'Anexo G1, sotto una riga pulita. `inherited_lots` lo vede.
+  **Limite della terza prova, dichiarato**: una permuta avvenuta lo stesso
+  giorno dell'acquisto consumato eredita quello stesso giorno, quindi le due
+  date coincidono e il lotto è indistinguibile da uno ordinario — la prova è
+  **sufficiente e non necessaria**.
 
 ## Limiti noti — non difetti aperti
 
@@ -285,6 +312,20 @@ queste voci la usi, invece di riscrivere la query.
   driver invece di chiamarlo, e il task 12 presidia la riga «Deferred swap
   disposals» con un'asserzione sul sorgente. (Dal code review del task 9,
   2026-10-17.)
+- **Su un database anteriore alla migrazione `swap_group_id` il banner tace
+  anche sotto `False`.** Senza quella colonna nessuna riga è identificabile come
+  gamba di permuta, quindi tutte e tre le prove leggono zero e la riga esce
+  pulita — per **mancanza di prove**, non per mancanza di contraddizione. Lì
+  nessun giro differito è stato possibile (il motore lo rifiuta senza la tabella
+  `swap_lot_transfers`), quindi con l'impostazione a `False` il banner nomina
+  una regola che provabilmente non ha prodotto nessuna di quelle cifre. Non lo
+  si trasforma in un allarme: la prova è categorica in una sola direzione e il
+  caso scatta solo sotto la regola non di default, su un database che il motore
+  rifiuterebbe comunque di ricalcolare. **Il problema è il silenzio
+  indistinguibile dall'accordo**, ed è questo che sta scritto nel docstring di
+  `config.tax_rule_banner` — una riga pulita stabilisce che nessuna cessione e
+  nessun lotto ereditato *sul registro* contraddice l'impostazione, non che
+  l'impostazione ha prodotto quelle cifre.
 - **`doc/pt/audit_trail_guide (1).md`** è un duplicato di
   `doc/pt/audit_trail_guide.md` (stessa lunghezza), evidentemente un download
   ripetuto. Da rimuovere, previa conferma di quale dei due è il buono.

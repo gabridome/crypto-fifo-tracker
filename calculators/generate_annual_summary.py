@@ -102,8 +102,15 @@ def main():
         print(f"\n  Nessuna vendita nel {year}")
 
     if deferred['count']:
+        # Conteggio ed euro, nessuna quantità: `deferred['amount']` somma unità
+        # di criptovalute diverse, quindi mezzo BTC più due ETH farebbero 2,5 di
+        # niente — stampato a otto decimali accanto alle quantità per asset che
+        # il lettore sta riconciliando, dentro la nota che esiste per impedirgli
+        # una riconciliazione sbagliata. Gli euro sono una sola unità: è il
+        # modello della riga dei totali più sotto. Nel driver la quantità resta,
+        # perché lì è di una sola cripto e porta il suo ticker.
         print(f"\n  ⚠️  Permute differite comprese in questa sezione: {deferred['count']:,} "
-              f"({deferred['amount']:.8f} unità, €{deferred['total_value']:,.2f})")
+              f"(€{deferred['total_value']:,.2f} di controvalore)")
         print("      Questa sezione legge `transactions`, quindi le conta. RISULTATO FIFO")
         print("      e DETTAGLIO PER EXCHANGE leggono `sale_lot_matches`, dove una permuta")
         print("      differita non ha nessuna riga: non realizza, quindi non c'è nulla da")
@@ -177,7 +184,7 @@ def main():
 
     if deferred['count']:
         print(f"\n  ⚠️  Permute differite NON comprese in questa sezione: {deferred['count']:,} "
-              f"({deferred['amount']:.8f} unità, €{deferred['total_value']:,.2f} di controvalore)")
+              f"(€{deferred['total_value']:,.2f} di controvalore)")
         print("      Contate invece in VENDITE qui sopra. Una permuta differita non è un")
         print("      evento tassabile: la data e il costo d'acquisto dei lotti consumati")
         print("      passano all'asset ricevuto (`swap_lot_transfers`), e la plusvalenza")

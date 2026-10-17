@@ -89,11 +89,15 @@ SQLite DB (data/crypto_fifo.db)
     │
     │                              calculators/swap_reporting.py
     │                              deferred_disposals() / realized_swap_disposals()
+    │                              / inherited_lots()
     │                              - the one definition of what a reader of
     │                                sale_lot_matches cannot see
-    │                              - evidence of the rule that wrote the data,
-    │                                which config.tax_rule_banner(conn) checks
-    │                                the configured setting against
+    │                              - three traces of the rule that wrote the
+    │                                data, which config.tax_rule_banner(conn)
+    │                                checks the configured setting against;
+    │                                inherited_lots() is the only one that sees
+    │                                the asset RECEIVED, hence a partial
+    │                                recalculation after a change of setting
     │
     ▼
 calculators/generate_irs_report.py

@@ -229,12 +229,24 @@ def tax_rule_banner(conn=None) -> str:
     three callers, and corrected in task 12.
 
     Hand over `conn` and the banner also says what the **database** shows, from
-    positive evidence (`calculators/swap_reporting.py`): a deferred swap
-    disposal can only be written by a `swap_realizes = False` run, a realized
-    one only by a `True` run. Where that contradicts the configured setting,
-    the figures this line heads were produced under the other rule and the
-    setting changed afterwards — so the banner says so loudly and says what to
-    do about it, because those figures go on a tax return.
+    three kinds of positive evidence in `calculators/swap_reporting.py`: a
+    deferred swap disposal and an inherited lot can only be written by a
+    `swap_realizes = False` run, a realized swap disposal only by a `True` one.
+    Where any of them contradicts the configured setting, the figures this line
+    heads were produced under the other rule and the setting changed afterwards
+    — so the banner says so loudly, names which evidence fired, and says what
+    to do, because those figures go on a tax return.
+
+    A clean line therefore establishes that no disposal and no inherited lot on
+    record contradicts the setting named. It does not establish more than that:
+    the inherited-lot evidence cannot see a swap that happened on the same day
+    as the purchase it consumed (see that module's docstring), and on a database
+    older than the `swap_group_id` migration nothing is identifiable as a swap
+    leg at all, so all three read zero and the line is clean for want of
+    evidence rather than for want of a contradiction. That last case is a
+    silence indistinguishable from agreement, and it is recorded in
+    `doc/TODO.md` rather than turned into an alarm: it can only arise under the
+    non-default rule, on a database the engine would refuse to recalculate.
 
     No connection, no claim about data: the return value is then exactly the
     single line it has always been, and so is the clean case — a database whose
@@ -250,46 +262,51 @@ def tax_rule_banner(conn=None) -> str:
     # §4.2 — importing config must never fail). Only a caller that hands over a
     # connection needs it, and every such caller already has PROJECT_ROOT on
     # sys.path because it imports config from there.
-    from calculators.swap_reporting import deferred_disposals, realized_swap_disposals
+    import textwrap
+
+    from calculators.swap_reporting import (
+        deferred_disposals, inherited_lots, realized_swap_disposals,
+    )
 
     deferred = deferred_disposals(conn)['count']
     realized = realized_swap_disposals(conn)['count']
+    inherited = inherited_lots(conn)['count']
 
-    # A list, though only one of the two branches below can ever fire: they are
-    # gated on opposite values of SWAP_REALIZES. The database can hold both
-    # kinds at once — the engine's DELETE is per cryptocurrency, so a partial
-    # recalculation after a change of the setting leaves evidence of both rules
-    # — but only the kind that contradicts the setting now in force is worth a
-    # warning. The list keeps the two directions side by side, where it is
-    # visible that neither is missing.
+    # A list, and more than one entry does occur: the first two branches below
+    # are both evidence of a deferred run and both fire on a clean deferred
+    # database read under a setting of True. The third is gated on the opposite
+    # value, so it never joins them. Each is named separately because the fix
+    # differs — a stale disposal and a stranded inherited lot are recalculated
+    # from different sides.
     found = []
     if SWAP_REALIZES and deferred:
-        found.append(
-            f"{deferred:,} deferred swap disposal(s), which only a "
-            f"swap_realizes=False run can write"
-        )
+        found.append(f"{deferred:,} deferred swap disposal(s)")
+    if SWAP_REALIZES and inherited:
+        found.append(f"{inherited:,} lot(s) whose acquisition date and cost were "
+                     f"inherited across a swap")
     if not SWAP_REALIZES and realized:
-        found.append(
-            f"{realized:,} swap disposal(s) that realized a gain, which only a "
-            f"swap_realizes=True run can write"
-        )
+        found.append(f"{realized:,} swap disposal(s) that realized a gain")
 
     if found:
         other = not SWAP_REALIZES
         rule = '!!! '
-        bar = rule + '=' * 68
-        out = [line, bar,
-               rule + ' THE SETTING AND THE DATA DISAGREE',
-               rule,
-               rule + f' config.py is set to swap_realizes={SWAP_REALIZES}, but the database holds']
+        body = [rule + ' THE SETTING AND THE DATA DISAGREE',
+                rule,
+                rule + f' config.py is set to swap_realizes={SWAP_REALIZES}, but the database holds']
         for item in found:
-            out.append(rule + f' {item}.')
-        out += [
+            # Wrapped: an item longer than the frame reads as a formatting
+            # accident, and a warning that looks accidental is one a reader
+            # discounts.
+            body += textwrap.wrap(item + '.', width=62,
+                                  initial_indent=rule + '   ',
+                                  subsequent_indent=rule + '   ')
+        body += [
             rule,
+            rule + f' Only a swap_realizes={other} run writes those.',
+            rule + ' So the figures above do not all come from the setting named above.',
             # Not "the figures above were not produced by this setting": on a
             # database recalculated for only some cryptocurrencies, some of
             # them were. The counted rows are the ones that were not.
-            rule + ' So the figures above do not all come from the setting named above.',
             rule + f' The rows counted here were produced under swap_realizes={other},',
             rule + ' and the setting changed afterwards.',
             rule,
@@ -297,12 +314,15 @@ def tax_rule_banner(conn=None) -> str:
             rule + '   - run calculators/calculate_fifo.py, which recalculates every',
             rule + '     cryptocurrency under the setting now in force; or',
             rule + f'   - read them under swap_realizes={other} — the rule they were born under —',
-            rule + '     and do not mix them with figures produced by this setting.',
+            rule + "     and do not mix them with figures produced by this setting.",
             rule,
             rule + ' Do not file a tax return from a report that printed this.',
-            bar,
         ]
-        return '\n'.join(out)
+        # The frame is measured from the content, not a constant: a line that
+        # sticks out of its own box is how this went wrong the first time, and
+        # the texts here vary with the setting and the counts.
+        bar = rule + '=' * (max(len(b) for b in body) - len(rule))
+        return '\n'.join([line, bar] + body + [bar])
 
     # Agreement. Only the non-default rule gets a confirming line: under
     # deferral a reader is entitled to see that it actually reached the data,
