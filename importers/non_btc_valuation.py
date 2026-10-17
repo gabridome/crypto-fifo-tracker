@@ -45,6 +45,16 @@ def _swap_id(row, row_ref):
     shared lot-inheritance key once `swap_group_id` starts carrying cost
     basis across a deferred swap (tasks 8+). `row_ref` is the one thing
     guaranteed to differ row to row, so it is folded into the hash too.
+
+    This function is also the one place the swap_lot_transfers UNIQUE
+    index (swap_group_id, source_fifo_lot_id) in doc/schema.sql relies on:
+    that index assumes one swap_group_id maps to exactly one SELL (hence
+    each source lot is drawn into it at most once). That holds as long as
+    one normalized row produces one swap_group_id, as it does here. A
+    reader that grouped differently — e.g. folding several fills of the
+    same pair under one order id into a single row before this function
+    sees it — would give one swap_group_id more than one SELL, and the
+    index's assumption would need re-checking, not just this docstring.
     """
     raw = (f"{row['when']}|{row['exchange']}|{row['give_asset']}|{row['give_amount']}"
            f"|{row['take_asset']}|{row['take_amount']}|{row['ref']}|{row_ref}")

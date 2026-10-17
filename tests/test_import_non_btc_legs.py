@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from importers.import_non_btc_legs import SOURCE_SUFFIX, import_non_btc_legs  # noqa: E402
-from conftest import _columns, _index_columns, _index_names  # noqa: E402
+from tests.schema_helpers import _columns, _index_columns, _index_names  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
 SCHEMA_FILE = os.path.join(PROJECT_ROOT, 'doc', 'schema.sql')

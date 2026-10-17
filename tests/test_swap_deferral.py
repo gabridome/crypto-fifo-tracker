@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from conftest import _columns, _index_columns, _index_names  # noqa: E402
+from tests.schema_helpers import _columns, _index_columns, _index_names  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
 SCHEMA_FILE = os.path.join(PROJECT_ROOT, 'doc', 'schema.sql')
@@ -91,6 +91,13 @@ def _params(row):
              row['amount_from'], row['cost_basis'])
 
 
+INDEX_NAMES = (
+    'idx_swap_lot_transfers_group',
+    'idx_swap_lot_transfers_from',
+    'idx_swap_lot_transfers_unique_group_lot',
+)
+
+
 def test_migration_creates_swap_lot_transfers(tmp_path):
     """Exercise the real transition: a database that does not have the table yet."""
     db = _pre_migration_db(str(tmp_path / 'pre_migration.db'))
@@ -101,9 +108,8 @@ def test_migration_creates_swap_lot_transfers(tmp_path):
     assert _columns(db, TABLE) == EXPECTED_COLUMNS
 
     idx = _index_names(db, TABLE)
-    assert 'idx_swap_lot_transfers_group' in idx
-    assert 'idx_swap_lot_transfers_from' in idx
-    assert 'idx_swap_lot_transfers_unique_group_lot' in idx
+    for name in INDEX_NAMES:
+        assert name in idx, f'migration did not create index {name}'
     assert _index_columns(db, 'idx_swap_lot_transfers_group') == ['swap_group_id'], (
         'the group index must target the column it is named after'
     )
@@ -136,13 +142,6 @@ def test_all_columns_except_id_are_not_null(tmp_path):
         assert notnull == 1, f'{name} should be NOT NULL'
 
 
-INDEX_NAMES = (
-    'idx_swap_lot_transfers_group',
-    'idx_swap_lot_transfers_from',
-    'idx_swap_lot_transfers_unique_group_lot',
-)
-
-
 def _normalize_sql(sql):
     """Strip SQL comments and collapse whitespace for a structural compare.
 
@@ -157,18 +156,20 @@ def _normalize_sql(sql):
 
 
 def _table_and_index_sql(db_path):
-    """The verbatim CREATE statements sqlite_master stored for the table and its indexes."""
+    """The verbatim CREATE statements sqlite_master stored for the table and
+    *every* index it has — not a fixed list of expected names. An index
+    that exists in only one of the two copies is itself a drift (a
+    constraint one database enforces and the other doesn't), and a fixed
+    name list would walk straight past it instead of catching it.
+    """
     conn = sqlite3.connect(db_path)
     try:
         table_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)
         ).fetchone()[0]
-        index_sql = {
-            name: conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,)
-            ).fetchone()[0]
-            for name in INDEX_NAMES
-        }
+        index_sql = dict(conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=?", (TABLE,)
+        ).fetchall())
     finally:
         conn.close()
     return table_sql, index_sql
@@ -176,8 +177,9 @@ def _table_and_index_sql(db_path):
 
 def test_schema_sql_and_migration_agree_on_ddl(tmp_path):
     """The two copies of the DDL (doc/schema.sql and the migration script)
-    must describe the exact same table and indexes — CHECKs and foreign
-    keys included, not just the columns PRAGMA table_info reports.
+    must describe the exact same table and the exact same set of indexes
+    — CHECKs, foreign keys and uniqueness included, not just the columns
+    PRAGMA table_info reports.
 
     tests/conftest.py's db_path fixture and a fresh install build from
     doc/schema.sql; the migration script never runs for them. A CHECK or a
@@ -204,13 +206,35 @@ def test_schema_sql_and_migration_agree_on_ddl(tmp_path):
     _run_migration(migrated_db)
     migration_table_sql, migration_index_sql = _table_and_index_sql(migrated_db)
 
+    # This comparison is exact after stripping comments and collapsing
+    # whitespace, so a difference of pure formatting (e.g.
+    # "CHECK (amount_from > 0)" vs. "CHECK (amount_from>0)") also trips it
+    # — deliberately: better a false alarm from a cosmetic rewrite than a
+    # missed CHECK or foreign key.
     assert _normalize_sql(schema_table_sql) == _normalize_sql(migration_table_sql), (
         'doc/schema.sql and update_fifo_schema_swap_transfers.py have drifted on the '
-        'swap_lot_transfers CREATE TABLE statement (columns, CHECKs or foreign keys)'
+        'swap_lot_transfers CREATE TABLE statement — a column, a CHECK, a foreign key, '
+        'or just formatting'
     )
-    for name in INDEX_NAMES:
-        assert _normalize_sql(schema_index_sql[name]) == _normalize_sql(migration_index_sql[name]), (
-            f'doc/schema.sql and update_fifo_schema_swap_transfers.py have drifted on {name}'
+
+    schema_names = set(schema_index_sql)
+    migration_names = set(migration_index_sql)
+    assert schema_names == migration_names, (
+        'doc/schema.sql and update_fifo_schema_swap_transfers.py disagree on which '
+        f'indexes exist for {TABLE}: only in doc/schema.sql: '
+        f'{sorted(schema_names - migration_names)}; only in the migration: '
+        f'{sorted(migration_names - schema_names)}'
+    )
+    for name in sorted(schema_names):
+        schema_sql = schema_index_sql.get(name)
+        migration_sql = migration_index_sql.get(name)
+        assert schema_sql is not None, f'{name} missing from doc/schema.sql'
+        assert migration_sql is not None, (
+            f'{name} missing from update_fifo_schema_swap_transfers.py'
+        )
+        assert _normalize_sql(schema_sql) == _normalize_sql(migration_sql), (
+            f'doc/schema.sql and update_fifo_schema_swap_transfers.py have drifted on '
+            f'{name} — columns, uniqueness, or just formatting'
         )
 
 
