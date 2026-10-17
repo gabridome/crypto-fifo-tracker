@@ -109,6 +109,16 @@ class CryptoFIFOTracker:
 
         print(f"\nCalculating FIFO for {cryptocurrency}...")
 
+        # transactions.swap_group_id is read by the query below in every mode,
+        # so task 1's migration is a prerequisite of this engine, not an option.
+        if 'swap_group_id' not in [r[1] for r in
+                                   self.cursor.execute('PRAGMA table_info(transactions)')]:
+            raise ValueError(
+                'This database has no transactions.swap_group_id column, which the '
+                'FIFO engine now reads to tell a swap apart from a plain disposal. '
+                'Run: python3 calculators/update_fifo_schema_swap_group.py <db>'
+            )
+
         # swap_lot_transfers is NOT self-created here, unlike fifo_lots and
         # sale_lot_matches: a further copy of its DDL would be a further thing
         # that can drift from doc/schema.sql, and its CHECK constraints cannot

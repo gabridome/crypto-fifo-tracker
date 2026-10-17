@@ -344,7 +344,9 @@ def _tx(conn, **kw):
             'price_per_unit', 'total_value', 'fee_amount', 'fee_currency', 'currency',
             'exchange_name', 'source', 'imported_at', 'record_hash', 'swap_group_id')
     row = {c: kw.get(c) for c in cols}
-    row.setdefault('fee_amount', 0)
+    # kw.get() has already put the key there as None, so setdefault would be a
+    # no-op: this is what actually makes the fee 0 rather than NULL.
+    row['fee_amount'] = row['fee_amount'] or 0
     cur = conn.execute(
         f"INSERT INTO transactions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
         tuple(row[c] for c in cols))
@@ -499,3 +501,85 @@ def test_realizing_swap_still_produces_a_match(db_path):
 
     assert gain == 2000.0
     assert transfers == 0
+
+
+def _db_without_swap_group_column(db_path):
+    """A DB from the real doc/schema.sql, then with transactions.swap_group_id removed.
+
+    Built from the whole schema and then narrowed, for the same reason as
+    _pre_migration_db: every other column and table is then exactly what a
+    fresh install has, and only the one thing this fixture is about is
+    missing. ALTER TABLE DROP COLUMN needs SQLite >= 3.35 and refuses while
+    an index still references the column, so idx_transactions_swap_group goes
+    first; both facts are checked here rather than assumed, so an
+    environment where the drop silently did nothing cannot make this test
+    pass for the wrong reason.
+    """
+    if sqlite3.sqlite_version_info < (3, 35):
+        pytest.skip(f'ALTER TABLE DROP COLUMN needs SQLite >= 3.35, '
+                    f'this is {sqlite3.sqlite_version}')
+    conn = sqlite3.connect(db_path)
+    try:
+        with open(SCHEMA_FILE) as f:
+            conn.executescript(f.read())
+        conn.execute('DROP INDEX idx_transactions_swap_group')
+        conn.execute('ALTER TABLE transactions DROP COLUMN swap_group_id')
+        conn.commit()
+        columns = [r[1] for r in conn.execute('PRAGMA table_info(transactions)')]
+        assert 'swap_group_id' not in columns, 'the drop did not take effect'
+        assert 'record_hash' in columns, 'the drop removed more than its column'
+    finally:
+        conn.close()
+    return db_path
+
+
+def test_engine_on_a_database_without_the_swap_group_column_stops_and_names_the_migration(tmp_path):
+    """Read in every mode, so task 1's migration is a prerequisite, not an option.
+
+    Default swap_realizes = True here on purpose: the query selects
+    swap_group_id whatever the rule says, so without this guard the engine
+    dies on a raw sqlite3.OperationalError (no such column) partway through
+    a crypto instead of saying which migration is missing.
+    """
+    db = _db_without_swap_group_column(str(tmp_path / 'no_swap_group_column.db'))
+
+    tracker = CryptoFIFOTracker(db)
+    try:
+        with pytest.raises(ValueError, match='update_fifo_schema_swap_group'):
+            tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+
+def test_a_second_deferral_pass_replaces_the_transfers_instead_of_doubling_them(db_path, monkeypatch):
+    """The DELETE at the top is what makes a re-run idempotent per crypto.
+
+    Without it the UNIQUE (swap_group_id, source_fifo_lot_id) index turns the
+    second pass into an IntegrityError; with a DELETE that missed rows it
+    would instead double the inherited cost basis. The JOIN also pins the
+    subtler half: the lots are deleted and re-inserted on every pass, so the
+    pointer must be the id of the lot the second pass created, not the stale
+    id from the first.
+    """
+    _seed_swap(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("""SELECT t.swap_group_id, t.cost_basis, l.cryptocurrency, l.purchase_date
+                               FROM swap_lot_transfers t
+                               JOIN fifo_lots l ON l.id = t.source_fifo_lot_id""").fetchall()
+        total = conn.execute('SELECT COUNT(*) FROM swap_lot_transfers').fetchone()[0]
+    finally:
+        conn.close()
+
+    assert total == 1, 'the second pass must replace the transfer, not add one'
+    assert rows == [('swap-1', 1000.0, 'ETH', '2020-01-10T10:00:00+00:00')], \
+        'the pointer must resolve to the lot the second pass created'
