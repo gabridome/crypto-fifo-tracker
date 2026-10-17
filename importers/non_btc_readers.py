@@ -401,6 +401,22 @@ def read_deposit_withdrawal(fh, exchange):
 
         if type_raw == 'FIAT':
             if desc != 'Convert':
+                if coin in FIAT and desc.startswith('Deposit'):
+                    # Money arriving on the exchange, not a crypto leg: the
+                    # same call read_account_history makes on a fiat row
+                    # ('if asset in FIAT: continue'). Both halves of the
+                    # condition are load-bearing. Without `coin in FIAT` a
+                    # crypto inflow typed 'Fiat' would be dropped silently;
+                    # without the Description test the fiat leg of a Convert
+                    # — also Type=Fiat, also a currency — would go with it,
+                    # and the acquisition it pays for would vanish. A
+                    # Description this reader does not know still raises
+                    # below: understood-and-out-of-scope is not the same as
+                    # unrecognised. 'Deposit' is the only such label seen so
+                    # far; the symmetric fiat withdrawal is not covered here
+                    # because no export in hand has one, and raising on an
+                    # unseen shape is the safe direction.
+                    continue
                 raise ValueError(
                     f'Type=Fiat with unexpected Description {desc!r} {locator}')
             convert_legs.append((coin, qty, when))

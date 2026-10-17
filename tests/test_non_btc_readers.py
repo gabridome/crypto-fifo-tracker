@@ -448,3 +448,56 @@ def test_deposit_withdrawal_two_conversions_inside_the_window_raise():
         list(read_deposit_withdrawal(io.StringIO(data), exchange='Bybit'))
     message = str(exc_info.value)
     assert 'EUR' in message and 'USDT' in message
+
+
+def test_deposit_withdrawal_skips_a_fiat_deposit():
+    """Fiat arriving on the exchange is money, not a crypto leg.
+
+    Same treatment read_account_history already gives a fiat row ('if asset
+    in FIAT: continue'): understood, out of scope, skipped. It is not an
+    unknown shape, so it must not stop the import — a real Bybit export has
+    such rows and the import that needs this reader cannot run without them
+    being skipped.
+    """
+    fiat_deposit = _dw_row('250.000000', 'Fiat', 'Deposit', coin='EUR')
+    assert list(read_deposit_withdrawal(io.StringIO(fiat_deposit), exchange='Bybit')) == []
+
+
+FIAT_DEPOSIT_AND_CONVERT = """UID: 456,Company Name: ,Country: 
+Uid,Date & Time(UTC),Coin,QTY,Type,Account Balance,Description
+456,2024-06-10 08:00:00,EUR,250.000000,Fiat,250.000000,Deposit
+456,2024-06-10 09:30:00,EUR,-4000.000000,Fiat,0.000000,Convert
+456,2024-06-10 09:30:05,USDC,4300.000000,Fiat,4300.000000,Convert
+"""
+
+
+def test_deposit_withdrawal_fiat_convert_leg_survives_the_fiat_skip():
+    """The other direction of the same guard: a fiat Convert leg *is* a leg.
+
+    EUR is fiat and this row is Type=Fiat too, so a skip keyed on the asset
+    alone would swallow the paying side of the conversion and leave the
+    acquisition unrecorded (the USDC leg would then raise as unpaired). The
+    skip is for a fiat row that is not part of a conversion, and nothing
+    else.
+    """
+    rows = list(read_deposit_withdrawal(io.StringIO(FIAT_DEPOSIT_AND_CONVERT), exchange='Bybit'))
+
+    assert len(rows) == 1  # the deposit contributed nothing, the pair one CONVERT
+    assert rows[0]['kind'] == 'CONVERT'
+    assert rows[0]['give_asset'] == 'EUR'
+    assert rows[0]['give_amount'] == pytest.approx(4000.0)
+    assert rows[0]['take_asset'] == 'USDC'
+    assert rows[0]['take_amount'] == pytest.approx(4300.0)
+
+
+def test_deposit_withdrawal_fiat_typed_deposit_of_a_crypto_asset_raises():
+    """The skip is justified by the asset being a currency, not by the label.
+
+    A Type=Fiat row carrying a crypto asset is a shape this reader has never
+    seen; dropping the asset half of the guard would silently discard a
+    crypto inflow instead of stopping the import.
+    """
+    bad = _dw_row('250.000000', 'Fiat', 'Deposit', coin='USDC')
+    with pytest.raises(ValueError, match='unexpected Description') as exc_info:
+        list(read_deposit_withdrawal(io.StringIO(bad), exchange='Bybit'))
+    assert 'Coin=' in str(exc_info.value) and 'Time=' in str(exc_info.value)
