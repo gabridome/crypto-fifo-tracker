@@ -76,11 +76,41 @@
   cambiano sia gli eventi imponibili sia il **periodo di detenzione** che decide
   l'esenzione oltre i 365 giorni. Finché non è verificata, la guida va marcata come
   assunzione, non come regola. Riguarda anche `doc/pt/crypto_to_crypto_guide.md`.
+  **Aggiornamento 2026-10-17**: esiste ora un flag dichiarato e testato,
+  `tax_rules.swap_realizes` in `config.py` (task 7, `tests/test_swap_realizes.py`) —
+  letto dal motore FIFO e stampato in ogni summary (`config.tax_rule_banner()`).
+  La domanda legale resta aperta: il flag rende la regola verificabile e
+  cambiabile, non ne certifica la correttezza.
 - [ ] **Vendite senza lotto d'acquisto** (es. coin da fork del 2017): quattro SELL non
   matchati, nessun cost basis. Decidere come trattarli nel report IRS.
 - [ ] **Riconciliazione con il custode** — i lotti aperti del tracker vanno confrontati
   con i saldi reali (exchange + custodia propria): se non combaciano, mancano
   acquisti da una parte o dismissioni dall'altra. Vale come controllo periodico.
+- [ ] **Web UI: lo stdout del subprocess viene scartato sul success path.**
+  (Dal code review del task 7, 2026-10-17.) `web/app.py` — `run_fifo()` e
+  `generate_report()` fanno `flash()` dell'output del subprocess solo quando
+  `returncode != 0`, e anche lì solo gli ultimi 500 caratteri. Sul percorso di
+  successo (il caso comune) l'output non arriva mai all'utente della web UI —
+  quindi nemmeno il banner `Tax rule in force: swap_realizes=...` stampato da
+  `calculate_fifo.py`/`generate_irs_report.py`/`generate_annual_summary.py` lo
+  raggiunge. Importa prima che `swap_realizes=False` possa cambiare cifre reali:
+  un utente della web UI non avrebbe modo di scoprire sotto quale regola sono
+  state calcolate.
+- [ ] **`calculators/crypto_fifo_tracker.py`: import `SWAP_REALIZES` non letto, in attesa dei task 9-11.**
+  (Dal code review del task 7, 2026-10-17.) L'import è marcato `# noqa: F401`
+  perché nulla lo legge ancora — è lì solo perché un test possa fare
+  `monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', ...)`.
+  Se i task 9-11 (regime di deferral) venissero abbandonati, rimuovere sia
+  quell'import sia il test che lo presidia
+  (`test_engine_module_exposes_swap_realizes_for_patching` in
+  `tests/test_swap_realizes.py`).
+- [ ] **`config.py`: paese non riconosciuto ricade su PT con solo un warning su stderr.**
+  (Dal code review del task 7, 2026-10-17.) Pre-esistente, non del task 7 — non
+  è stato toccato. Se `COUNTRY`/`FIFO_COUNTRY` è scritto male, l'intero calcolo
+  gira silenziosamente sotto le regole fiscali di un altro paese (stesso difetto
+  di principio che il task 7 ha appena chiuso per `swap_realizes`, qui lasciato
+  com'era). Da trattare come decisione tracciata — fallire forte come
+  `swap_realizes`, o restare un fallback deliberato — non come sorpresa.
 
 ## Operativo / Infrastruttura
 

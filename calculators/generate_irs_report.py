@@ -39,7 +39,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import COUNTRY, DATABASE_PATH, SWAP_REALIZES, get_exchange_at_country
+from config import DATABASE_PATH, get_exchange_at_country, tax_rule_banner
 DB_PATH = DATABASE_PATH
 
 DOMESTIC_EXCHANGES = set()  # Portuguese platforms with NIF
@@ -647,7 +647,7 @@ def main():
     print(f'\n  {"=" * 50}')
     print(f'  Plus-valenza totale:   EUR {sum(s["gain_loss"] for s in sales):>12,.2f}')
     print(f'  Imposta stimata:       EUR {tax:>12,.2f}')
-    print(f'Tax rule in force: swap_realizes={SWAP_REALIZES} (config.py, profile {COUNTRY})')
+    print(tax_rule_banner())
     print(f'  {"=" * 50}')
     if tax == 0:
         print(f'  Nessuna imposta. Dichiarare in Anexo G1 Quadro 07.')

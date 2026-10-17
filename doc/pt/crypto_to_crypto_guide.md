@@ -6,7 +6,7 @@ Como tratar swaps BTC→ETH, conversões de stablecoins e negociações entre di
 
 ## Regra fiscal fundamental
 
-**Cada swap cripto-para-cripto é um evento fiscal** na maioria das jurisdições.
+**Cada swap cripto-para-cripto é um evento fiscal** na maioria das jurisdições. Para Portugal isto é uma ASSUMPTION declarada e sinalizada — não é lei verificada — lida pelo motor como `tax_rules.swap_realizes` em `config.py` (ver `doc/TODO.md`).
 
 **Nota importante sobre Portugal**: existe divergência de interpretação. Algumas fontes (incluindo a Lei n.º 24-D/2022 e interpretações de fiscalistas) indicam que permutas entre criptoativos **não são tributáveis** no momento da operação — o novo ativo herda o valor de aquisição do anterior, e a tributação ocorre apenas na conversão para moeda fiduciária (fiat). Outras interpretações, mais conservadoras, consideram cada swap um evento tributável.
 

@@ -12,7 +12,7 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from crypto_fifo_tracker import CryptoFIFOTracker
-from config import COUNTRY, DATABASE_PATH, SWAP_REALIZES
+from config import DATABASE_PATH, tax_rule_banner
 DB_PATH = DATABASE_PATH
 
 
@@ -126,7 +126,7 @@ def main():
     print(f"\n[4/4] Summary")
     print("="*70)
     print(f"✓ FIFO CALCULATION COMPLETE!")
-    print(f"Tax rule in force: swap_realizes={SWAP_REALIZES} (config.py, profile {COUNTRY})")
+    print(tax_rule_banner())
     print(f"\nTotal time: {total_elapsed:.1f} seconds ({total_elapsed/60:.1f} minutes)")
     
     # Database size after FIFO

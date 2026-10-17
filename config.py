@@ -139,7 +139,14 @@ DECLARE_EXEMPT = _profile["tax_rules"]["declare_exempt"]
 
 # No .get() default: a profile that forgets to declare the rule must fail at
 # import, not silently inherit someone else's tax treatment.
-SWAP_REALIZES = _profile["tax_rules"]["swap_realizes"]
+try:
+    SWAP_REALIZES = _profile["tax_rules"]["swap_realizes"]
+except KeyError:
+    raise ValueError(
+        f"Profile '{COUNTRY}' ({_profile['name']}) is missing tax_rules.swap_realizes. "
+        f"Add it explicitly (True or False) to COUNTRY_PROFILES['{COUNTRY}']['tax_rules'] "
+        f"in config.py — there is no safe default for a legal assumption."
+    ) from None
 
 EXEMPT_FORM = _profile["report"]["exempt_form"]
 TAXABLE_FORM = _profile["report"]["taxable_form"]
@@ -196,6 +203,11 @@ def get_exchange_at_country(exchange_name):
     if entry:
         return entry["at_code"], entry["at_name"]
     return "000", "Desconhecido"
+
+
+def tax_rule_banner() -> str:
+    """One line naming the tax rule that produced the figures just printed."""
+    return f"Tax rule in force: swap_realizes={SWAP_REALIZES} (config.py, profile {COUNTRY})"
 
 
 # ============================================================
