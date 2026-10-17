@@ -4,7 +4,7 @@ Compatible with new database structure
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import pandas as pd
 from typing import Optional
@@ -27,6 +27,44 @@ def _to_price(value):
     Use for purchase_price_per_unit / sale_price_per_unit so sub-EUR tokens
     (e.g. SHIB at EUR 0.00001234) are not flattened to 0.00."""
     return float(value.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP))
+
+
+def _acquisition_key(iso_date):
+    """Comparable key for a purchase date, whatever form it is stored in.
+
+    The production database holds both forms: most rows ending in '+00:00'
+    and a minority with no offset (counted read-only on data/crypto_fifo.db,
+    2026-10-17). fromisoformat gives an aware datetime for the first and a
+    naive one for the second, and comparing the two raises TypeError. A naive
+    timestamp is read as UTC, the same assumption the holding-period code
+    already makes when it compares .date().
+    """
+    dt = datetime.fromisoformat(iso_date)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _insert_lot_by_acquisition_date(mem_lots, lot_ptr, lot):
+    """Insert keeping mem_lots ordered by acquisition date from lot_ptr on.
+
+    Appending is right for a purchase, because purchases arrive in date order.
+    It is wrong for an inherited lot: that lot carries the *original*
+    acquisition date — older than lots already in the list — while it only
+    enters this asset's ledger at the swap. The consumption loop walks the list
+    in order, so appending would make a later sale match the newer lot first:
+    FIFO by availability instead of FIFO by acquisition date, with a different
+    cost basis and a different holding period, and therefore a different
+    exempt/taxable split.
+
+    Positions before lot_ptr are exhausted lots, so the insertion point is
+    never before it and the pointer stays valid. A lot already partially
+    consumed can end up after the inherited one, which is correct: the older
+    lot would have gone first had it been available.
+    """
+    key = _acquisition_key(lot['purchase_date'])
+    j = lot_ptr
+    while j < len(mem_lots) and _acquisition_key(mem_lots[j]['purchase_date']) <= key:
+        j += 1
+    mem_lots.insert(j, lot)
 
 
 class CryptoFIFOTracker:
@@ -254,6 +292,58 @@ class CryptoFIFOTracker:
             for trans in transactions:
                 trans_type = trans['transaction_type']
 
+                if trans_type == 'BUY' and trans['swap_group_id'] and not SWAP_REALIZES:
+                    # Deferral: this asset was received in a swap. It does not get a
+                    # new cost basis — it inherits one lot per lot consumed on the
+                    # other side, with that lot's acquisition date.
+                    #
+                    # Nothing to make idempotent here: the DELETEs above cleared
+                    # this crypto's fifo_lots, so these lots are rebuilt from
+                    # scratch on every pass. The transfers being read belong to the
+                    # asset given up (from_cryptocurrency), which the DELETE on
+                    # swap_lot_transfers filters on, so this pass cannot destroy
+                    # the rows it is reading.
+                    self.cursor.execute('''
+                        SELECT source_purchase_date, amount_from, cost_basis
+                        FROM swap_lot_transfers
+                        WHERE swap_group_id = ? AND to_cryptocurrency = ?
+                        ORDER BY source_purchase_date ASC, id ASC
+                    ''', (trans['swap_group_id'], cryptocurrency))
+                    slices = self.cursor.fetchall()
+                    if not slices:
+                        raise ValueError(
+                            f"swap {trans['swap_group_id']}: no lot transfer recorded. "
+                            f"The asset given up in that swap has to be processed "
+                            f"before {cryptocurrency}, because its lots are what "
+                            f"{cryptocurrency} inherits: run calculate_fifo_lots on "
+                            f"it first."
+                        )
+                    received = Decimal(str(trans['amount']))
+                    total_from = sum(Decimal(str(s['amount_from'])) for s in slices)
+                    allocated = Decimal('0')
+                    for n, sl in enumerate(slices, 1):
+                        share = (Decimal(str(sl['amount_from'])) / total_from
+                                 if total_from > 0 else Decimal('0'))
+                        # Last slice takes the remainder: the sum must equal what arrived.
+                        qty = (received - allocated) if n == len(slices) else (received * share)
+                        allocated += qty
+                        cost = Decimal(str(sl['cost_basis']))
+                        _insert_lot_by_acquisition_date(mem_lots, lot_ptr, {
+                            'db_id': None,
+                            'key': len(mem_lots),
+                            'purchase_transaction_id': trans['id'],
+                            'cryptocurrency': cryptocurrency,
+                            'purchase_date': sl['source_purchase_date'],   # inherited
+                            'original_amount': qty,
+                            'remaining_amount': qty,
+                            'purchase_price_per_unit': (cost / qty) if qty > 0 else Decimal('0'),
+                            'cost_basis': cost,                            # inherited
+                            'purchase_fee_total': Decimal('0'),
+                            'exchange_name': trans['exchange_name'],
+                        })
+                    buys += 1
+                    continue
+
                 if trans_type == 'BUY':
                     amount = float(trans['amount'])
                     price_per_unit = float(trans['price_per_unit']) if trans['price_per_unit'] else 0
@@ -271,6 +361,16 @@ class CryptoFIFOTracker:
 
                     mem_lots.append({
                         'db_id': None,  # assigned after INSERT
+                        # Stable identity, not a position: a lot's index in
+                        # mem_lots shifts whenever a lot is inserted rather than
+                        # appended (deferral inserts in acquisition-date order),
+                        # and every index already recorded in matches_batch /
+                        # transfers_batch would then resolve to the wrong lot —
+                        # wrong cost basis, wrong purchase date, no error.
+                        # len(mem_lots) read before the append is a monotonic
+                        # counter: unique within one crypto's pass, which is all
+                        # the resolution below needs.
+                        'key': len(mem_lots),
                         'purchase_transaction_id': trans['id'],
                         'cryptocurrency': cryptocurrency,
                         'purchase_date': trans['transaction_date'],
@@ -344,7 +444,7 @@ class CryptoFIFOTracker:
                             take_asset = swap_takes[trans['swap_group_id']]
                             transfers_batch.append((
                                 trans['swap_group_id'],
-                                i,                 # lot index (replaced with db_id later)
+                                lot['key'],        # resolved to the db id below
                                 cryptocurrency,
                                 take_asset,
                                 sale_date,
@@ -355,7 +455,7 @@ class CryptoFIFOTracker:
                         else:
                             matches_batch.append((
                                 trans['id'],       # sale_transaction_id
-                                i,                 # lot index (replaced with db_id later)
+                                lot['key'],        # resolved to the db id below
                                 sale_date,
                                 lot['purchase_date'],
                                 cryptocurrency,
@@ -386,8 +486,9 @@ class CryptoFIFOTracker:
             # Bulk write to DB
             print(f"  Writing {len(mem_lots):,} lots and {len(matches_batch):,} matches to DB...")
 
-            # INSERT all lots
-            lot_db_ids = []
+            # INSERT all lots. Keyed by lot['key'], not by position: see the
+            # comment on that field in the BUY branch.
+            lot_db_ids = {}
             for lot in mem_lots:
                 self.cursor.execute('''
                     INSERT INTO fifo_lots
@@ -402,11 +503,11 @@ class CryptoFIFOTracker:
                     _to_eur(lot['cost_basis']), _to_eur(lot['purchase_fee_total']),
                     lot['exchange_name'],
                 ))
-                lot_db_ids.append(self.cursor.lastrowid)
+                lot_db_ids[lot['key']] = self.cursor.lastrowid
 
             if transfers_batch:
                 print(f"  Writing {len(transfers_batch):,} swap lot transfers (deferral)...")
-                # Replace the lot index with the real DB id, exactly as the matches
+                # Replace the lot key with the real DB id, exactly as the matches
                 # below do: the pointer is what makes the inheritance auditable back
                 # to the lot it consumed, and a date alone does not identify a lot.
                 for transfer in transfers_batch:
@@ -422,9 +523,8 @@ class CryptoFIFOTracker:
                         transfer[6], transfer[7],
                     ))
 
-            # INSERT all matches (replace lot index with real DB id)
+            # INSERT all matches (replace lot key with real DB id)
             for match in matches_batch:
-                lot_idx = match[1]
                 self.cursor.execute('''
                     INSERT INTO sale_lot_matches
                     (sale_transaction_id, fifo_lot_id, sale_date, purchase_date,
@@ -433,7 +533,7 @@ class CryptoFIFOTracker:
                      holding_period_days)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    match[0], lot_db_ids[lot_idx],
+                    match[0], lot_db_ids[match[1]],
                     match[2], match[3], match[4], match[5],
                     match[6], match[7], match[8], match[9],
                     match[10], match[11],

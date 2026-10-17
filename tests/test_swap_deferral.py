@@ -1036,3 +1036,551 @@ def test_the_write_phase_opens_an_explicit_transaction():
         'BEGIN must come before the first DELETE, or the deletes are not in the '
         'transaction that the error path rolls back'
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 10 — the take side: lots that inherit date and cost.
+#
+# Idempotency on this side needs nothing new: the engine clears fifo_lots and
+# sale_lot_matches for the crypto it is about to process, so inherited lots are
+# rewritten from scratch on every pass. The swap_lot_transfers unique index is
+# no guard here — a re-run brings the lots back with new ids, so the
+# (swap_group_id, source_fifo_lot_id) pair differs. The asymmetry is on
+# purpose: the engine deletes transfers by from_cryptocurrency, so processing
+# the take side never destroys the rows it is there to read.
+# ---------------------------------------------------------------------------
+
+
+def test_received_asset_inherits_date_and_cost(db_path, monkeypatch):
+    """The USDT received keeps the ETH acquisition date: the clock does not restart."""
+    _seed_swap(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')    # give side first
+        tracker.calculate_fifo_lots('USDT')   # take side
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        lots = conn.execute("""SELECT purchase_date, ROUND(original_amount,8),
+                                      ROUND(cost_basis,2), ROUND(purchase_price_per_unit,8)
+                               FROM fifo_lots WHERE cryptocurrency='USDT'""").fetchall()
+    finally:
+        conn.close()
+
+    assert lots == [('2020-01-10T10:00:00+00:00', 2000.0, 1000.0, 0.5)]
+
+
+def test_two_source_lots_become_two_inherited_lots(db_path, monkeypatch):
+    """One swap of two lots creates two lots, each with its own inherited date."""
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2019-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=0.5, price_per_unit=200.0, total_value=100.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='a1')
+        _tx(conn, transaction_date='2021-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=0.5, price_per_unit=600.0, total_value=300.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='a2')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='a3', swap_group_id='swap-2')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='a4', swap_group_id='swap-2')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        lots = conn.execute("""SELECT purchase_date, ROUND(original_amount,8), ROUND(cost_basis,2)
+                               FROM fifo_lots WHERE cryptocurrency='USDT'
+                               ORDER BY purchase_date""").fetchall()
+    finally:
+        conn.close()
+
+    # 1000 USDT split pro-rata on the ETH consumed (0.5 + 0.5), each slice keeping its cost
+    assert lots == [('2019-01-01T10:00:00+00:00', 500.0, 100.0),
+                    ('2021-01-01T10:00:00+00:00', 500.0, 300.0)]
+
+
+def test_an_inherited_lot_older_than_an_existing_lot_is_consumed_first(db_path, monkeypatch):
+    """FIFO follows the acquisition date, including an inherited one.
+
+    The received asset already had a lot of its own, bought later than the lot
+    the swap hands it. Appending the inherited lot would put the newer lot
+    first in mem_lots and the consumption loop walks that list in order, so a
+    later sale would match the wrong lot — wrong cost basis, wrong holding
+    period, wrong exempt/taxable split.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2019-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='o1')
+        # USDT bought on its own, LATER than the ETH the swap will hand over
+        _tx(conn, transaction_date='2022-06-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=500.0, price_per_unit=0.9, total_value=450.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='o2')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='o3', swap_group_id='swap-3')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='o4', swap_group_id='swap-3')
+        # Sell 600 USDT: FIFO must take the 1000 inherited (2019) before the 500 own (2022)
+        _tx(conn, transaction_date='2024-09-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='USDT', amount=600.0, price_per_unit=1.0, total_value=600.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='o5')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        matched = conn.execute("""SELECT purchase_date, ROUND(amount_sold,8)
+                                  FROM sale_lot_matches WHERE cryptocurrency='USDT'
+                                  ORDER BY purchase_date""").fetchall()
+    finally:
+        conn.close()
+
+    assert matched == [('2019-01-01T10:00:00+00:00', 600.0)], (
+        'the sale must consume the inherited lot first: it was acquired in 2019, '
+        'the asset own lot only in 2022'
+    )
+
+
+def test_inherited_lot_ordering_survives_both_date_formats(db_path, monkeypatch):
+    """The production database stores both forms, so the key must cope.
+
+    Measured read-only on data/crypto_fifo.db (2026-10-17): most rows end in
+    '+00:00' and a minority have no offset at all. datetime.fromisoformat on the two
+    gives an aware and a naive datetime, and comparing them raises TypeError.
+    The existing holding-period code sidesteps it by comparing .date(); the
+    ordering added by this task must not reintroduce it.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2019-01-01T10:00:00', transaction_type='BUY',   # naive
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='m1')
+        _tx(conn, transaction_date='2022-06-01T10:00:00+00:00', transaction_type='BUY',  # aware
+            cryptocurrency='USDT', amount=500.0, price_per_unit=0.9, total_value=450.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='m2')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='m3', swap_group_id='swap-4')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='m4', swap_group_id='swap-4')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')     # must not raise TypeError
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        dates = [r[0] for r in conn.execute(
+            "SELECT purchase_date FROM fifo_lots WHERE cryptocurrency='USDT' ORDER BY id")]
+    finally:
+        conn.close()
+
+    assert dates == ['2019-01-01T10:00:00', '2022-06-01T10:00:00+00:00'], (
+        'the inherited naive-dated lot belongs before the aware-dated own lot'
+    )
+
+
+def test_take_side_without_its_give_side_fails_loudly(db_path, monkeypatch):
+    """Processing the received asset before the one given up is an ordering bug."""
+    _seed_swap(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='swap-1'):
+            tracker.calculate_fifo_lots('USDT')  # give side not computed yet
+    finally:
+        tracker.close()
+
+
+# ---------------------------------------------------------------------------
+# Four more guards, each closing a mutation that the five tests above let
+# through. Found by mutating the engine one line at a time and running the
+# whole suite: a surviving mutation is an uncovered mechanism, not a safe one.
+# ---------------------------------------------------------------------------
+
+
+def test_the_received_asset_takes_a_fresh_lot_on_the_default_path(db_path):
+    """With swap_realizes True nothing inherits: these are the declared figures.
+
+    Nothing in the suite computed the *receiving* asset of a swap on the
+    default path before this test, so dropping `not SWAP_REALIZES` from the
+    new BUY condition changed nothing any test could see — while in reality it
+    sends every take leg of every swap looking for an inheritance that the
+    default path never records.
+    """
+    _seed_swap(db_path)  # no monkeypatch: SWAP_REALIZES stays at its default
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        lots = conn.execute("""SELECT purchase_date, ROUND(original_amount,8),
+                                      ROUND(cost_basis,2), ROUND(purchase_price_per_unit,8)
+                               FROM fifo_lots WHERE cryptocurrency='USDT'""").fetchall()
+        transfers = conn.execute('SELECT COUNT(*) FROM swap_lot_transfers').fetchone()[0]
+    finally:
+        conn.close()
+
+    assert lots == [('2024-04-22T15:00:00+00:00', 2000.0, 3000.0, 1.5)], \
+        'on the default path the asset received is an ordinary purchase at market value'
+    assert transfers == 0, 'the default path records no inheritance'
+
+
+def test_a_match_on_an_inherited_lot_points_at_the_lot_it_consumed(db_path, monkeypatch):
+    """fifo_lot_id must resolve to the right lot once lots are inserted, not appended.
+
+    matches_batch records a lot while mem_lots is still being built and
+    resolves it to a DB id after the inserts. Recording the lot's *position*
+    works only while lots are appended: inserting an inherited lot in
+    acquisition-date order shifts every position already recorded, silently,
+    onto a different lot. purchase_date and cost on the match row would still
+    look right — they are copied at match time — while fifo_lot_id, the only
+    audit trail back to the purchase (generate_holding_report JOINs on it for
+    the purchase exchange and transaction id), points at someone else's lot.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2019-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='j1')
+        _tx(conn, transaction_date='2022-06-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=500.0, price_per_unit=0.9, total_value=450.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='j2')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='j3', swap_group_id='swap-6')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='j4', swap_group_id='swap-6')
+        # 1200 spans both lots: the inherited one (1000) first, then 200 of its own
+        _tx(conn, transaction_date='2024-09-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='USDT', amount=1200.0, price_per_unit=1.0, total_value=1200.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='j5')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        joined = conn.execute("""SELECT m.purchase_date, l.purchase_date, ROUND(m.amount_sold,8)
+                                 FROM sale_lot_matches m
+                                 JOIN fifo_lots l ON l.id = m.fifo_lot_id
+                                 WHERE m.cryptocurrency='USDT'
+                                 ORDER BY m.purchase_date""").fetchall()
+    finally:
+        conn.close()
+
+    assert joined == [('2019-01-01T10:00:00+00:00', '2019-01-01T10:00:00+00:00', 1000.0),
+                      ('2022-06-01T10:00:00+00:00', '2022-06-01T10:00:00+00:00', 200.0)], \
+        'fifo_lot_id must point at the lot whose date and cost the match carries'
+
+
+def test_an_inherited_lot_older_than_an_exhausted_lot_is_still_reachable(db_path, monkeypatch):
+    """The insertion point starts at lot_ptr, and that is not an optimization.
+
+    lot_ptr is where the consumption loop begins; everything before it is an
+    exhausted lot. An inherited lot is older than the lots already on record,
+    so scanning from 0 would place it *before* lot_ptr when an older-dated lot
+    has already been used up — out of the loop's reach for good. The next sale
+    then reports its amount as unmatched and the inherited cost basis leaves
+    the chain in silence.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2019-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='p1')
+        # a USDT lot of its own, bought and then entirely sold before the swap
+        _tx(conn, transaction_date='2021-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=500.0, price_per_unit=0.8, total_value=400.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='p2')
+        _tx(conn, transaction_date='2022-01-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='USDT', amount=500.0, price_per_unit=1.0, total_value=500.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='p3')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='p4', swap_group_id='swap-7')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='p5', swap_group_id='swap-7')
+        _tx(conn, transaction_date='2025-03-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='USDT', amount=400.0, price_per_unit=1.1, total_value=440.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='p6')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        matched = conn.execute("""SELECT sale_date, purchase_date, ROUND(amount_sold,8),
+                                         ROUND(cost_basis,2)
+                                  FROM sale_lot_matches WHERE cryptocurrency='USDT'
+                                  ORDER BY sale_date""").fetchall()
+    finally:
+        conn.close()
+
+    assert matched == [
+        ('2022-01-01T10:00:00+00:00', '2021-01-01T10:00:00+00:00', 500.0, 400.0),
+        ('2025-03-01T10:00:00+00:00', '2019-01-01T10:00:00+00:00', 400.0, 400.0),
+    ], 'the 2025 sale must reach the inherited lot, placed after the exhausted one'
+
+
+def test_an_inherited_lot_queues_behind_an_existing_lot_of_the_same_date(db_path, monkeypatch):
+    """Equal acquisition instants: the lot already on record goes first.
+
+    FIFO by acquisition date says nothing about two lots acquired at the same
+    instant, and the holding period is identical either way, so neither order
+    is wrong. The order still decides which cost basis is realized in which
+    year, so it is pinned here rather than left to flip silently: `<=` in the
+    scan keeps the existing lot ahead, which makes the insertion stable.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='q1')
+        # same instant as the ETH purchase, so the inherited lot ties with it
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=300.0, price_per_unit=0.5, total_value=150.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='q2')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='q3', swap_group_id='swap-8')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='q4', swap_group_id='swap-8')
+        # 300 units: EUR 150 if its own lot goes first, EUR 300 if the inherited one does
+        _tx(conn, transaction_date='2024-09-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='USDT', amount=300.0, price_per_unit=1.0, total_value=300.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='q5')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        matched = conn.execute("""SELECT ROUND(amount_sold,8), ROUND(cost_basis,2)
+                                  FROM sale_lot_matches WHERE cryptocurrency='USDT'""").fetchall()
+    finally:
+        conn.close()
+
+    assert matched == [(300.0, 150.0)], \
+        'on a tie the lot already in this asset ledger is consumed first'
+
+
+def test_two_source_lots_of_the_same_date_keep_their_give_side_order(db_path, monkeypatch):
+    """Slices are read oldest first, and on a tie in the order they were consumed.
+
+    Two purchases of the asset given up at the same timestamp produce two
+    transfers with the same source_purchase_date and different costs. The
+    ORDER BY on swap_lot_transfers.id is what keeps them in the order the give
+    side consumed them — FIFO order, since the rows were appended as the lots
+    were used. Reverse it and a partial sale of the received asset realizes
+    the other lot cost basis, same date, same holding period, different gain.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        for tag, price, total in (('s1', 100.0, 100.0), ('s2', 300.0, 300.0)):
+            _tx(conn, transaction_date='2020-03-01T10:00:00+00:00', transaction_type='BUY',
+                cryptocurrency='ETH', amount=1.0, price_per_unit=price, total_value=total,
+                fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+                imported_at='2026-01-01T00:00:00', record_hash=tag)
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=2.0, price_per_unit=1500.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='s3', swap_group_id='swap-9')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='s4', swap_group_id='swap-9')
+        # 500 of the 1000 received: the slice of the first ETH lot (EUR 100), not the second
+        _tx(conn, transaction_date='2024-09-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='USDT', amount=500.0, price_per_unit=1.0, total_value=500.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='s5')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        matched = conn.execute("""SELECT ROUND(amount_sold,8), ROUND(cost_basis,2)
+                                  FROM sale_lot_matches WHERE cryptocurrency='USDT'""").fetchall()
+    finally:
+        conn.close()
+
+    assert matched == [(500.0, 100.0)], \
+        'the slice of the first ETH lot consumed must be the first lot of USDT'
+
+
+def test_an_asset_that_inherits_and_is_then_swapped_on_passes_the_original_date(
+        db_path, monkeypatch):
+    """Two hops: BTC to ETH to USDT, with ETH holding a lot of its own as well.
+
+    The only case where the give side itself inserts lots mid-list, so it is
+    the only case that can prove the other half of the key-not-index change:
+    the transfers ETH writes must point at the lots ETH actually consumed,
+    which are no longer at the positions they were appended to. It is also
+    what the deferral is for — the 2019 acquisition date has to survive both
+    swaps, or the exempt/taxable split two hops out is computed from the wrong
+    clock.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2019-05-05T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='BTC', amount=0.5, price_per_unit=2000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='c1')
+        # ETH lot of its own, newer than the BTC the first swap hands over
+        _tx(conn, transaction_date='2021-07-07T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=2.0, price_per_unit=50.0, total_value=100.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='c2')
+        _tx(conn, transaction_date='2023-02-02T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='BTC', amount=0.5, price_per_unit=4200.0, total_value=2100.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='c3', swap_group_id='swap-a')
+        _tx(conn, transaction_date='2023-02-02T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=3.0, price_per_unit=700.0, total_value=2100.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='c4', swap_group_id='swap-a')
+        _tx(conn, transaction_date='2024-08-08T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=5.0, price_per_unit=1000.0, total_value=5000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='c5', swap_group_id='swap-b')
+        _tx(conn, transaction_date='2024-08-08T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=5000.0, price_per_unit=1.0, total_value=5000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='c6', swap_group_id='swap-b')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('BTC')
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # the JOIN is the assertion: the lot the transfer names must be the lot
+        # whose date and cost the transfer carries
+        handed_on = conn.execute("""SELECT t.source_purchase_date, l.purchase_date,
+                                           ROUND(t.amount_from,8), ROUND(t.cost_basis,2)
+                                    FROM swap_lot_transfers t
+                                    JOIN fifo_lots l ON l.id = t.source_fifo_lot_id
+                                    WHERE t.from_cryptocurrency='ETH'
+                                    ORDER BY t.id""").fetchall()
+        usdt = conn.execute("""SELECT purchase_date, ROUND(original_amount,8),
+                                      ROUND(cost_basis,2)
+                               FROM fifo_lots WHERE cryptocurrency='USDT'
+                               ORDER BY purchase_date""").fetchall()
+    finally:
+        conn.close()
+
+    assert handed_on == [
+        ('2019-05-05T10:00:00+00:00', '2019-05-05T10:00:00+00:00', 3.0, 1000.0),
+        ('2021-07-07T10:00:00+00:00', '2021-07-07T10:00:00+00:00', 2.0, 100.0),
+    ], 'each transfer must name the ETH lot it consumed, not the one at that position'
+    assert usdt == [('2019-05-05T10:00:00+00:00', 3000.0, 1000.0),
+                    ('2021-07-07T10:00:00+00:00', 2000.0, 100.0)], \
+        'the BTC acquisition date of 2019 must survive both swaps'
