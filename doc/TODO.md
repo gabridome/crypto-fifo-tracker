@@ -77,6 +77,20 @@
   task 12 non ha interrogato il database di produzione). Passo operativo, da
   spuntare solo dopo averlo guardato: importare gli export delle sedi dove stanno
   le stablecoin, ricalcolare, e confrontare i lotti aperti con i saldi reali.
+  **Fra l'import e il ricalcolo c'è un secondo passo**, perché
+  `import_non_btc_legs.py` scarta le righe BTC: di una permuta BTC→USDT
+  sopravvive la sola gamba BUY, con uno `swap_group_id` la cui gamba SELL sta nel
+  database ma senza quella colonna (l'ha scritta un altro importer). Sotto
+  `swap_realizes = False` il motore rifiuta il gruppo
+  (`crypto_fifo_tracker.py:474-481`). Lo chiude
+  `importers/link_swap_counterparty_legs.py`, che ricalcola lo stesso id dallo
+  stesso export e scrive **solo** quella colonna dove è NULL, appaiando **per
+  posizione** e verificando prima conteggio e sequenza delle quantità (rifiuta
+  senza scrivere se una delle due cade). Ha `--dry-run`, e va lanciato con gli
+  **stessi** argomenti usati per l'import — l'`exchange_name` entra nell'id, e uno
+  diverso fa rifiutare lo script invece di scrivere id che non appaiano a niente.
+  **Nessuna esecuzione su dati reali è stata fatta qui**: è il passo operativo di
+  questa voce.
 - [ ] **Verificare la regola fiscale su crypto-to-crypto (domanda legale, aperta).**
   Il regime cripto dell'art. 10.º CIRS ha una norma specifica sulla **permuta** fra
   cripto-attività, e se non c'è realizzo al momento dello scambio cambiano sia gli

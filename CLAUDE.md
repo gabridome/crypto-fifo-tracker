@@ -75,6 +75,18 @@ Exchange CSV files (data/)
     │       │                                     an unknown shape raises
     │       └── importers/non_btc_valuation.py  — rows → transaction dicts;
     │                                             fiat actually paid, swap_group_id
+    │
+    ├── importers/link_swap_counterparty_legs.py  (reconciliation, not an import)
+    │           the BTC rows the importer above drops were written by another
+    │           importer, which does not write swap_group_id — so a BTC->USDT
+    │           swap has a BUY leg with an id and a SELL leg without one.
+    │           Recomputes the same id from the same export and UPDATEs that
+    │           one column where it is NULL: no INSERT, no DELETE, no figure
+    │           touched (record_hash does not hash swap_group_id). Pairing is
+    │           positional — same-second timestamps and repeated quantities
+    │           make (instant, quantity) ambiguous — and the count and the
+    │           quantity sequence are checked before anything is written.
+    │           --dry-run reports without writing.
     ▼
 SQLite DB (data/crypto_fifo.db)
   transactions ── (BUY) ──> fifo_lots ──> sale_lot_matches (realized gains)
