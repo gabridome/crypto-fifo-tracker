@@ -1,5 +1,6 @@
 """Deferral path: a swap that does not realize, and the inheritance it creates."""
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -135,17 +136,59 @@ def test_all_columns_except_id_are_not_null(tmp_path):
         assert notnull == 1, f'{name} should be NOT NULL'
 
 
-def test_schema_sql_and_migration_agree_on_columns(tmp_path):
+INDEX_NAMES = (
+    'idx_swap_lot_transfers_group',
+    'idx_swap_lot_transfers_from',
+    'idx_swap_lot_transfers_unique_group_lot',
+)
+
+
+def _normalize_sql(sql):
+    """Strip SQL comments and collapse whitespace for a structural compare.
+
+    sqlite_master.sql stores the CREATE statement verbatim, comments
+    included, so two DDL copies that differ only in how a comment happens
+    to wrap (a real but harmless difference — see the created_at comment in
+    doc/schema.sql vs. the migration script) would otherwise compare
+    unequal for the wrong reason.
+    """
+    without_comments = re.sub(r'--[^\n]*', '', sql)
+    return re.sub(r'\s+', ' ', without_comments).strip()
+
+
+def _table_and_index_sql(db_path):
+    """The verbatim CREATE statements sqlite_master stored for the table and its indexes."""
+    conn = sqlite3.connect(db_path)
+    try:
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)
+        ).fetchone()[0]
+        index_sql = {
+            name: conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,)
+            ).fetchone()[0]
+            for name in INDEX_NAMES
+        }
+    finally:
+        conn.close()
+    return table_sql, index_sql
+
+
+def test_schema_sql_and_migration_agree_on_ddl(tmp_path):
     """The two copies of the DDL (doc/schema.sql and the migration script)
-    must describe the same table.
+    must describe the exact same table and indexes — CHECKs and foreign
+    keys included, not just the columns PRAGMA table_info reports.
 
     tests/conftest.py's db_path fixture and a fresh install build from
-    doc/schema.sql; the migration script never runs for them. If the two
-    copies drift (e.g. a column renamed in only one of them), nothing here
-    would notice unless this test compares the two directly — comparing
-    each against a second, independently hand-written column list would
-    not catch that, because both lists could just as easily be stale in
-    the same way.
+    doc/schema.sql; the migration script never runs for them. A CHECK or a
+    FOREIGN KEY present in one copy and missing from the other would pass
+    a column-only comparison silently — and a CHECK cannot be re-added
+    later with an ALTER TABLE, so the installation that ends up missing it
+    (a fresh install or the web app) stays unprotected until the table is
+    rebuilt. Comparing the two copies' `sqlite_master.sql` directly (after
+    stripping comments) catches that; comparing each against a third,
+    independently hand-written DDL string would not, for the same reason a
+    hand-written column list didn't.
     """
     fresh_db = str(tmp_path / 'fresh_install.db')
     conn = sqlite3.connect(fresh_db)
@@ -155,16 +198,20 @@ def test_schema_sql_and_migration_agree_on_columns(tmp_path):
         conn.commit()
     finally:
         conn.close()
-    schema_columns = _columns(fresh_db, TABLE)
+    schema_table_sql, schema_index_sql = _table_and_index_sql(fresh_db)
 
     migrated_db = _pre_migration_db(str(tmp_path / 'migrated.db'))
     _run_migration(migrated_db)
-    migration_columns = _columns(migrated_db, TABLE)
+    migration_table_sql, migration_index_sql = _table_and_index_sql(migrated_db)
 
-    assert schema_columns == migration_columns, (
-        'doc/schema.sql and update_fifo_schema_swap_transfers.py have drifted: '
-        'they must describe the same swap_lot_transfers table'
+    assert _normalize_sql(schema_table_sql) == _normalize_sql(migration_table_sql), (
+        'doc/schema.sql and update_fifo_schema_swap_transfers.py have drifted on the '
+        'swap_lot_transfers CREATE TABLE statement (columns, CHECKs or foreign keys)'
     )
+    for name in INDEX_NAMES:
+        assert _normalize_sql(schema_index_sql[name]) == _normalize_sql(migration_index_sql[name]), (
+            f'doc/schema.sql and update_fifo_schema_swap_transfers.py have drifted on {name}'
+        )
 
 
 @pytest.mark.parametrize('overrides', [
