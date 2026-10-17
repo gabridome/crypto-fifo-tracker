@@ -331,3 +331,171 @@ def test_unique_index_allows_two_lots_in_the_same_swap_group(tmp_path):
     finally:
         conn.close()
     assert count == 2
+
+
+# ---- the engine: the give side of a deferred swap (task 9) ----
+
+from calculators.crypto_fifo_tracker import CryptoFIFOTracker  # noqa: E402
+
+
+def _tx(conn, **kw):
+    """Insert one transaction; returns its id."""
+    cols = ('transaction_date', 'transaction_type', 'cryptocurrency', 'amount',
+            'price_per_unit', 'total_value', 'fee_amount', 'fee_currency', 'currency',
+            'exchange_name', 'source', 'imported_at', 'record_hash', 'swap_group_id')
+    row = {c: kw.get(c) for c in cols}
+    row.setdefault('fee_amount', 0)
+    cur = conn.execute(
+        f"INSERT INTO transactions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+        tuple(row[c] for c in cols))
+    conn.commit()
+    return cur.lastrowid
+
+
+def _seed_swap(db_path):
+    """Buy 1 ETH for EUR 1000 in 2020, swap it for 2000 USDT in 2024."""
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='h1')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='h2',
+            swap_group_id='swap-1')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=2000.0, price_per_unit=1.5, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='h3',
+            swap_group_id='swap-1')
+    finally:
+        conn.close()
+
+
+def test_deferred_swap_realizes_nothing_and_records_the_transfer(db_path, monkeypatch):
+    _seed_swap(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        matches = conn.execute("SELECT COUNT(*) FROM sale_lot_matches WHERE cryptocurrency='ETH'").fetchone()[0]
+        transfers = conn.execute("""SELECT swap_group_id, from_cryptocurrency, to_cryptocurrency,
+                                           source_purchase_date, amount_from, cost_basis
+                                    FROM swap_lot_transfers""").fetchall()
+        # The JOIN is the assertion: source_fifo_lot_id must resolve to the lot
+        # actually consumed. Two buys on the same day make two lots with the
+        # same purchase_date, so a date alone does not identify one.
+        inherited = conn.execute("""SELECT l.cryptocurrency, l.purchase_date
+                                   FROM swap_lot_transfers t
+                                   JOIN fifo_lots l ON l.id = t.source_fifo_lot_id""").fetchall()
+        remaining = conn.execute("SELECT ROUND(SUM(remaining_amount),8) FROM fifo_lots "
+                                 "WHERE cryptocurrency='ETH'").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert matches == 0, 'a deferred swap must not produce a realized match'
+    assert transfers == [('swap-1', 'ETH', 'USDT', '2020-01-10T10:00:00+00:00', 1.0, 1000.0)]
+    assert inherited == [('ETH', '2020-01-10T10:00:00+00:00')], \
+        'the transfer must point at the lot it consumed, not merely carry its date'
+    assert remaining == 0.0, 'the lots of the asset given up are consumed'
+
+
+def test_deferred_swap_without_its_buy_leg_refuses_to_lose_the_cost_basis(db_path, monkeypatch):
+    """The one way this branch could destroy a number silently.
+
+    A SELL carrying a swap_group_id whose BUY leg was never imported: the lots
+    are consumed, and under deferral there is no realized match either. Before
+    this guard the row was written with an empty to_cryptocurrency, which the
+    take side never queries — cost basis out of the chain, no error, wrong tax.
+    """
+    _seed_swap(db_path)
+    conn = sqlite3.connect(db_path)
+    try:  # remove the BUY leg of the swap, keep the disposal
+        conn.execute("DELETE FROM transactions WHERE cryptocurrency='USDT'")
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='swap-1'):
+            tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+
+def test_deferral_on_a_database_without_the_transfers_table_stops_and_names_the_migration(
+        tmp_path, monkeypatch):
+    """Deferral needs the table, and the engine does not create it.
+
+    A fourth copy of that DDL inside the engine would be a fourth thing that
+    can drift, and this table's CHECKs cannot be added by a later ALTER.
+    So the engine requires the table and names the migration that installs it.
+    """
+    db = _pre_migration_db(str(tmp_path / 'no_transfers_table.db'))
+    _seed_swap(db)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db)
+    try:
+        with pytest.raises(ValueError, match='update_fifo_schema_swap_transfers'):
+            tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+
+def test_realizing_swap_on_a_database_without_the_transfers_table_is_not_stopped(tmp_path):
+    """The default path must not require the table it never writes.
+
+    The engine self-creates fifo_lots and sale_lot_matches precisely because
+    a database predating them must keep working; swap_lot_transfers is not
+    self-created, so every statement touching it has to be reached only when
+    deferral is in use.
+    """
+    db = _pre_migration_db(str(tmp_path / 'realizing_no_table.db'))
+    _seed_swap(db)
+
+    tracker = CryptoFIFOTracker(db)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        gain = conn.execute("SELECT ROUND(SUM(gain_loss),2) FROM sale_lot_matches "
+                            "WHERE cryptocurrency='ETH'").fetchone()[0]
+    finally:
+        conn.close()
+    assert gain == 2000.0
+
+
+def test_realizing_swap_still_produces_a_match(db_path):
+    """With the default setting nothing changes: the swap is a disposal."""
+    _seed_swap(db_path)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        gain = conn.execute("SELECT ROUND(SUM(gain_loss),2) FROM sale_lot_matches "
+                            "WHERE cryptocurrency='ETH'").fetchone()[0]
+        transfers = conn.execute('SELECT COUNT(*) FROM swap_lot_transfers').fetchone()[0]
+    finally:
+        conn.close()
+
+    assert gain == 2000.0
+    assert transfers == 0

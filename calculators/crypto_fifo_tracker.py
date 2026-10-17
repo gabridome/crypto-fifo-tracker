@@ -10,7 +10,7 @@ import pandas as pd
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from config import SWAP_REALIZES  # noqa: F401 — read by tasks 9-11, not yet; re-exported for monkeypatch.setattr
+from config import SWAP_REALIZES  # imported by name so tests can monkeypatch it on this module
 
 
 DUST_THRESHOLD = Decimal('1e-8')  # Single threshold for all dust comparisons
@@ -109,6 +109,24 @@ class CryptoFIFOTracker:
 
         print(f"\nCalculating FIFO for {cryptocurrency}...")
 
+        # swap_lot_transfers is NOT self-created here, unlike fifo_lots and
+        # sale_lot_matches: a further copy of its DDL would be a further thing
+        # that can drift from doc/schema.sql, and its CHECK constraints cannot
+        # be added by a later ALTER TABLE. The engine requires the table
+        # instead — and only on the deferral path, because the default
+        # (realizing) path never writes it and a database that predates the
+        # migration must keep working there.
+        transfers_table_exists = self.cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='swap_lot_transfers'"
+        ).fetchone() is not None
+        if not SWAP_REALIZES and not transfers_table_exists:
+            raise ValueError(
+                'tax_rules.swap_realizes is False, which needs the swap_lot_transfers '
+                'table to carry lot inheritance across a deferred swap, and this '
+                'database does not have it. Run: python3 '
+                'calculators/update_fifo_schema_swap_transfers.py <db>'
+            )
+
         # Clear existing FIFO data for this crypto (atomic with subsequent inserts)
         self.cursor.execute('DELETE FROM sale_lot_matches WHERE cryptocurrency = ?', (cryptocurrency,))
         self.cursor.execute('DELETE FROM fifo_lots WHERE cryptocurrency = ?', (cryptocurrency,))
@@ -116,7 +134,8 @@ class CryptoFIFOTracker:
         # Get all transactions for this crypto, ordered by date
         query = '''
             SELECT id, transaction_date, transaction_type, amount,
-                   price_per_unit, total_value, fee_amount, fee_currency, exchange_name
+                   price_per_unit, total_value, fee_amount, fee_currency, exchange_name,
+                   swap_group_id
             FROM transactions
             WHERE cryptocurrency = ?
             AND transaction_type IN ('BUY', 'SELL', 'DEPOSIT', 'WITHDRAWAL')
@@ -125,6 +144,21 @@ class CryptoFIFOTracker:
 
         self.cursor.execute(query, (cryptocurrency,))
         transactions = self.cursor.fetchall()
+
+        # Which asset each swap group delivers — needed on the give side, where
+        # the other leg belongs to a different cryptocurrency.
+        self.cursor.execute("""
+            SELECT swap_group_id, cryptocurrency FROM transactions
+            WHERE swap_group_id IS NOT NULL AND transaction_type = 'BUY'
+        """)
+        swap_takes = {row['swap_group_id']: row['cryptocurrency'] for row in self.cursor.fetchall()}
+
+        # Idempotent per crypto, like the DELETEs above. Reached only when the
+        # table is there: on the default path it may legitimately be missing.
+        if transfers_table_exists:
+            self.cursor.execute('DELETE FROM swap_lot_transfers WHERE from_cryptocurrency = ?',
+                                (cryptocurrency,))
+        transfers_batch = []
 
         print(f"  Processing {len(transactions):,} transactions...")
 
@@ -219,20 +253,46 @@ class CryptoFIFOTracker:
                     purchase_date_dt = datetime.fromisoformat(lot['purchase_date'])
                     holding_days = (sale_date_dt.date() - purchase_date_dt.date()).days
 
-                    matches_batch.append((
-                        trans['id'],       # sale_transaction_id
-                        i,                 # lot index (replaced with db_id later)
-                        sale_date,
-                        lot['purchase_date'],
-                        cryptocurrency,
-                        float(amount_from_lot),
-                        _to_price(purchase_price),
-                        _to_price(sale_price),
-                        _to_eur(cost_basis),
-                        _to_eur(proceeds),
-                        _to_eur(gain_loss),
-                        holding_days,
-                    ))
+                    deferred = bool(trans['swap_group_id']) and not SWAP_REALIZES
+                    if deferred:
+                        # No realization: the acquisition date and cost travel to
+                        # the asset received (spec §7, deferral regime).
+                        take_asset = swap_takes.get(trans['swap_group_id'])
+                        if not take_asset:
+                            raise ValueError(
+                                f"Swap group {trans['swap_group_id']!r} disposes of "
+                                f'{cryptocurrency} but its BUY leg was never imported. '
+                                'Under deferral the cost basis of the lots consumed here '
+                                'would have nowhere to land: it would leave the chain '
+                                'silently, with no realized gain and no inherited lot. '
+                                'Import the other leg with importers/import_non_btc_legs.py, '
+                                'or set tax_rules.swap_realizes = True in config.py.'
+                            )
+                        transfers_batch.append((
+                            trans['swap_group_id'],
+                            i,                 # lot index (replaced with db_id later)
+                            cryptocurrency,
+                            take_asset,
+                            sale_date,
+                            lot['purchase_date'],
+                            float(amount_from_lot),
+                            _to_eur(cost_basis),
+                        ))
+                    else:
+                        matches_batch.append((
+                            trans['id'],       # sale_transaction_id
+                            i,                 # lot index (replaced with db_id later)
+                            sale_date,
+                            lot['purchase_date'],
+                            cryptocurrency,
+                            float(amount_from_lot),
+                            _to_price(purchase_price),
+                            _to_price(sale_price),
+                            _to_eur(cost_basis),
+                            _to_eur(proceeds),
+                            _to_eur(gain_loss),
+                            holding_days,
+                        ))
 
                     # Update in-memory lot
                     lot['remaining_amount'] -= amount_from_lot
@@ -269,6 +329,24 @@ class CryptoFIFOTracker:
                 lot['exchange_name'],
             ))
             lot_db_ids.append(self.cursor.lastrowid)
+
+        if transfers_batch:
+            print(f"  Writing {len(transfers_batch):,} swap lot transfers (deferral)...")
+            # Replace the lot index with the real DB id, exactly as the matches
+            # below do: the pointer is what makes the inheritance auditable back
+            # to the lot it consumed, and a date alone does not identify a lot.
+            for transfer in transfers_batch:
+                self.cursor.execute('''
+                    INSERT INTO swap_lot_transfers
+                    (swap_group_id, source_fifo_lot_id, from_cryptocurrency,
+                     to_cryptocurrency, swap_date, source_purchase_date,
+                     amount_from, cost_basis)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    transfer[0], lot_db_ids[transfer[1]],
+                    transfer[2], transfer[3], transfer[4], transfer[5],
+                    transfer[6], transfer[7],
+                ))
 
         # INSERT all matches (replace lot index with real DB id)
         for match in matches_batch:
