@@ -2276,6 +2276,85 @@ and a new section:
 In `doc/TODO.md`, mark the stablecoin and documentation items done, dated
 2026-10-16, pointing at `doc/specs/2026-10-16-non-btc-legs-design.md`.
 
+- [ ] **Step 4b: Reconcile what a deferred disposal does to every reader of `sale_lot_matches`**
+
+This is the largest piece of task 12 and it is not optional. A deferred
+disposal writes **no row** in `sale_lot_matches` — correctly, because it is not
+a taxable event. Everything that uses that table as the *register of
+disposals*, rather than as the register of realized gains, therefore becomes
+silently incomplete the moment `swap_realizes` is `False`. Found by the task 9
+quality review; each item verified in the code, not inferred.
+
+Do not fix all of these in code. Decide, per item, whether it is corrected or
+documented, and write the decision down. The failure mode they share is the one
+this whole branch exists to prevent: not an error, a plausible wrong number.
+
+The one that matters most:
+
+- `calculators/generate_annual_summary.py` — §2 *VENDITE* (`:63-77`) reads
+  `transactions` and counts the swap's SELL at its full `total_value` as
+  proceeds; §3 *RISULTATO FIFO* (`:95-123`) reads `sale_lot_matches` and
+  excludes it; §4 per-exchange (`:159-174`) likewise. Two sections side by
+  side, one including it and one not, with no note. A reader reconciling them
+  concludes the FIFO lost a sale.
+
+The rest:
+
+- `calculators/calculate_fifo.py:92-105` — "Sales matched" counts the deferred
+  SELL in `sells` but not in `sales_matched`, with no warning for the gap.
+  `crypto_fifo_tracker.py:380` counts it as a sale too.
+- `web/app.py:218-220` — setup marks FIFO complete only on
+  `lot_count > 0 AND match_count > 0`: a database whose only disposals are
+  deferred swaps keeps the FIFO step incomplete and the reports locked.
+- `web/app.py:1627-1631` and `:215-220` — the year lists for `/reports` and
+  `/audit` come from `sale_lot_matches`, so a year whose only disposals were
+  deferred swaps **disappears** from both dropdowns.
+- `web/app.py:1673-1700` — `/api/audit` is a pure join on `sale_lot_matches`,
+  so a deferred disposal appears nowhere in the audit trail, while
+  `doc/en/audit_trail_guide.md:68` presents that join as the complete trail.
+  Extend the trail to `swap_lot_transfers` or say plainly that it covers
+  realized disposals only.
+- `web/app.py:1253-1271`, `:1337-1346` — `/fifo` excludes swaps from
+  `total_gain` (right), but `SUM(amount_sold)` read as "how much you disposed
+  of" is incomplete, while the import pages count SELLs from `transactions`.
+  Two pages, two answers.
+- `doc/schema.sql:147-159` `v_annual_gains` — `sale_count`, `total_sold`,
+  `total_proceeds` silently become "excluding deferred swaps".
+  `v_exchange_summary` (`:123-133`) reads `transactions` and therefore
+  **includes** them at full value: the same contradiction as the summary, in
+  SQL. Mitigating and verified: no view is referenced from Python or a
+  template, so the blast radius is the hand-written query.
+- The one-off SQL files, all on `sale_lot_matches`, all silently incomplete:
+  `demo/queries/{gains_per_sale_year,long_vs_short_term,exchange_performances,purchases_by_sale_year,sale_matches_detailed}.sql`,
+  `calculators/{exchange_performances,purchases_year_sale_2024,2024_sale_purchases_detailed}.sql`.
+- `doc/en/audit_trail_guide.md:95-101` and the Portuguese twin — the
+  determinism checksum stays deterministic, but compared across a change of the
+  setting it shows a drop with no documented cause.
+- `CLAUDE.md:74` and `:117` state "one row per (SELL × consumed lot)". That
+  invariant is now false under deferral. Correct it here.
+- `calculators/calculate_fifo.py:14` imports `crypto_fifo_tracker` as a
+  top-level module while the tests import `calculators.crypto_fifo_tracker`:
+  **two module objects, two separate `SWAP_REALIZES`**. Not a behaviour bug —
+  the driver reads the real value from `config` — but it makes `main()`
+  impossible to drive from an in-process test, which is why the task 9 tests
+  reproduce the shape of the driver's loop instead of calling it. Worth one
+  line in `doc/TODO.md`.
+
+- [ ] **Step 4c: The stale schema copies**
+
+`schema.sql` at the repo root and the DDL embedded in `setup.sh:149-252` carry
+neither `transactions.swap_group_id` nor `swap_lot_transfers` (zero hits for
+"swap" in either). Until task 9 that was harmless; now the engine's first
+prerequisite check refuses any database built from them. `setup.sh:138-147`
+prefers `doc/schema.sql` when it exists, so the practical risk is low — but
+`README.md:130` presents the root `schema.sql` as "Database DDL", and a reader
+who follows it gets a database the engine will not calculate.
+
+Pick one and say so in the file: bring both copies up to date, or make the root
+`schema.sql` point at `doc/schema.sql` as the single source. Do not leave three
+copies of a DDL that carries `CHECK` constraints SQLite cannot add later — the
+task 8 review measured that even two copies drifted undetected.
+
 - [ ] **Step 5: Add the new files to CLAUDE.md**
 
 In the architecture section, one line for `importers/non_btc_readers.py`,
