@@ -291,6 +291,23 @@ queste voci la usi, invece di riscrivere la query.
 
 ## Operativo / Infrastruttura
 
+- [ ] **Niente rileva un lotto orfano** — un `fifo_lots.purchase_transaction_id`
+  che non ha più una riga in `transactions`, per esempio dopo una transazione
+  cancellata a calcolo già fatto o un restore parziale. La `FOREIGN KEY` è
+  dichiarata in `doc/schema.sql` ma SQLite **non la applica** senza
+  `PRAGMA foreign_keys = ON`, che nessun file del progetto imposta (verificato:
+  zero occorrenze). `import_and_verify()` verifica il numero di righe inserite,
+  non l'integrità dei riferimenti, e il controllo chiamato «orphan» nel motore
+  riguarda un'altra cosa — un gruppo di permuta la cui gamba BUY non è mai stata
+  importata. Un lotto orfano continua a produrre match, con un costo e una data
+  che non si possono più risalire a un acquisto: la pista di audit si interrompe
+  e il report non lo dice. Chiusura naturale: un controllo nel passo di verifica
+  che conti i lotti senza acquisto e rifiuti, oppure `PRAGMA foreign_keys = ON`
+  sulla connessione — che però va misurato sul resto del progetto prima, perché
+  renderebbe applicate anche le altre due FK dichiarate.
+  **La spec di questo branch (§9) e il piano affermavano che un passo di verifica
+  li segnala: non esiste.** (Trovato dal task 12, 2026-10-17.)
+
 - [ ] **Un BUY senza prezzo unitario perde il costo di base nel match** —
   preesistente, non introdotto dal branch non-BTC. Il lotto prende
   `cost_basis` da `total_value` ma lascia `purchase_price_per_unit = 0`; il
