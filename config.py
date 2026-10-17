@@ -121,6 +121,24 @@ def get_profile():
     return COUNTRY_PROFILES[COUNTRY]
 
 
+def _require_swap_realizes(profile, country):
+    """Return profile['tax_rules']['swap_realizes'], or fail loudly.
+
+    No .get() default: a profile that forgets to declare the rule must fail
+    at import, not silently inherit someone else's tax treatment. Extracted
+    from the module-level assignment so a test can call it directly against
+    a fake profile dict, instead of re-executing config.py's source.
+    """
+    try:
+        return profile["tax_rules"]["swap_realizes"]
+    except KeyError:
+        raise ValueError(
+            f"Profile '{country}' ({profile['name']}) is missing tax_rules.swap_realizes. "
+            f"Add it explicitly (True or False) to COUNTRY_PROFILES['{country}']['tax_rules'] "
+            f"in config.py — there is no safe default for a legal assumption."
+        ) from None
+
+
 # Shortcuts for the most commonly used settings
 try:
     _profile = get_profile()
@@ -137,16 +155,7 @@ EXEMPT_HOLDING_DAYS = _profile["tax_rules"]["exempt_holding_days"]
 SHORT_TERM_RATE = _profile["tax_rules"]["short_term_rate"]
 DECLARE_EXEMPT = _profile["tax_rules"]["declare_exempt"]
 
-# No .get() default: a profile that forgets to declare the rule must fail at
-# import, not silently inherit someone else's tax treatment.
-try:
-    SWAP_REALIZES = _profile["tax_rules"]["swap_realizes"]
-except KeyError:
-    raise ValueError(
-        f"Profile '{COUNTRY}' ({_profile['name']}) is missing tax_rules.swap_realizes. "
-        f"Add it explicitly (True or False) to COUNTRY_PROFILES['{COUNTRY}']['tax_rules'] "
-        f"in config.py — there is no safe default for a legal assumption."
-    ) from None
+SWAP_REALIZES = _require_swap_realizes(_profile, COUNTRY)
 
 EXEMPT_FORM = _profile["report"]["exempt_form"]
 TAXABLE_FORM = _profile["report"]["taxable_form"]

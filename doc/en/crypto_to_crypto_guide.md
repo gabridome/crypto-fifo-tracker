@@ -6,7 +6,7 @@ How to handle BTC→ETH swaps, stablecoin conversions, and trades between differ
 
 ## Fundamental tax rule
 
-**Every crypto-to-crypto swap is a taxable event** in most jurisdictions, including Portugal. The Portugal claim is a declared, flagged ASSUMPTION — not verified law — read by the engine as `tax_rules.swap_realizes` in `config.py` (see `doc/TODO.md`).
+**Every crypto-to-crypto swap is a taxable event** in most jurisdictions, including Portugal. The Portugal claim is a declared, flagged ASSUMPTION — not verified law — recorded as `tax_rules.swap_realizes` in `config.py` and printed on every report. The FIFO engine does not branch on this value yet (tasks 9-11 of the non-BTC-legs plan): changing it today changes no figures. See `doc/TODO.md`.
 
 When you trade BTC for ETH:
 1. You are **selling** BTC at its EUR market value at that moment

@@ -77,10 +77,12 @@
   l'esenzione oltre i 365 giorni. Finché non è verificata, la guida va marcata come
   assunzione, non come regola. Riguarda anche `doc/pt/crypto_to_crypto_guide.md`.
   **Aggiornamento 2026-10-17**: esiste ora un flag dichiarato e testato,
-  `tax_rules.swap_realizes` in `config.py` (task 7, `tests/test_swap_realizes.py`) —
-  letto dal motore FIFO e stampato in ogni summary (`config.tax_rule_banner()`).
-  La domanda legale resta aperta: il flag rende la regola verificabile e
-  cambiabile, non ne certifica la correttezza.
+  `tax_rules.swap_realizes` in `config.py` (task 7, `tests/test_swap_realizes.py`),
+  stampato in ogni summary (`config.tax_rule_banner()`). **Il motore FIFO non si
+  dirama ancora su questo valore** (task 9-11): cambiarlo oggi non cambia nessuna
+  cifra. La domanda legale resta aperta: il flag rende la regola dichiarabile e,
+  una volta che il motore la leggerà, cambiabile — non ne certifica la
+  correttezza.
 - [ ] **Vendite senza lotto d'acquisto** (es. coin da fork del 2017): quattro SELL non
   matchati, nessun cost basis. Decidere come trattarli nel report IRS.
 - [ ] **Riconciliazione con il custode** — i lotti aperti del tracker vanno confrontati
@@ -111,6 +113,13 @@
   di principio che il task 7 ha appena chiuso per `swap_realizes`, qui lasciato
   com'era). Da trattare come decisione tracciata — fallire forte come
   `swap_realizes`, o restare un fallback deliberato — non come sorpresa.
+- [ ] **`config.py`: una `tax_rules.swap_realizes` mancante ora fa fallire con
+  traceback anche la web app, non solo i calculator.** (Dal code review del
+  task 7, 2026-10-17.) Deviazione deliberata da `doc/code_guidelines.md` §4.2
+  («`import config` non deve mai fallire»), già accettata a livello di spec
+  del task 7 — il motivo è che non esiste un default sicuro per un'assunzione
+  legale. A verbale qui perché è un'eccezione alla regola generale, non
+  un'infrazione dimenticata.
 
 ## Operativo / Infrastruttura
 
