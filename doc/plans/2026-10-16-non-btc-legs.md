@@ -1975,9 +1975,11 @@ def test_an_inherited_lot_older_than_an_existing_lot_is_consumed_first(db_path, 
 def test_inherited_lot_ordering_survives_both_date_formats(db_path, monkeypatch):
     """The production database stores both forms, so the key must cope.
 
-    Measured read-only on data/crypto_fifo.db (2026-10-17): most rows end in
-    '+00:00' and a minority have no offset at all. datetime.fromisoformat on the two
-    gives an aware and a naive datetime, and comparing them raises TypeError.
+    Checked read-only on the production database (2026-10-17): both forms are
+    present — most dates carry a '+00:00' offset, a minority carry none, and a
+    few add microseconds to the offset form. datetime.fromisoformat parses all
+    three, but it returns an aware datetime for the offset forms and a naive
+    one for the third, and comparing the two raises TypeError.
     The existing holding-period code sidesteps it by comparing .date(); the
     ordering added by this task must not reintroduce it.
     """
@@ -2145,12 +2147,13 @@ And the helper, as a module-level function next to `_to_eur` / `_to_price`:
 def _acquisition_key(iso_date):
     """Comparable key for a purchase date, whatever form it is stored in.
 
-    The production database holds both forms: most rows ending in '+00:00'
-    and a minority with no offset (measured read-only, 2026-10-17). fromisoformat
-    gives an aware datetime for the first and a naive one for the second, and
-    comparing the two raises TypeError. A naive timestamp is read as UTC, the
-    same assumption the holding-period code already makes when it compares
-    .date().
+    The production database holds both forms, the offset-bearing one in the
+    large majority (checked read-only, 2026-10-17). fromisoformat gives an
+    aware datetime for that one and a naive one for the other, and comparing
+    the two raises TypeError. A naive timestamp is read as UTC, the same
+    assumption the holding-period code already makes when it compares .date().
+    No row count goes in a versioned file: this repo is public, and a count of
+    someone's transactions is their data even though it is not an amount.
     """
     dt = datetime.fromisoformat(iso_date)
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
