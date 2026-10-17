@@ -56,9 +56,12 @@ STATEMENTS = (
     # is already covered by the group index above.
     """CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_from
     ON swap_lot_transfers(from_cryptocurrency)""",
-    # The only idempotency invariant expressible here: one lot moves into
-    # one swap group's inheritance at most once (one swap group is exactly
-    # one SELL, and FIFO consumption for one SELL visits each lot once).
+    # One lot moves into one swap group's inheritance at most once (one swap
+    # group is exactly one SELL, and FIFO consumption for one SELL visits each
+    # lot once). This does NOT make a re-run safe: the engine reinserts the
+    # lots on every pass, so the same lot returns with a new id and the pair
+    # differs. Only the DELETE in calculate_fifo_lots prevents a second pass
+    # from doubling the inherited cost basis.
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_swap_lot_transfers_unique_group_lot
     ON swap_lot_transfers(swap_group_id, source_fifo_lot_id)""",
 )

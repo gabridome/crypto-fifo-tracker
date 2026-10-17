@@ -110,8 +110,12 @@ CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_from
 -- The only idempotency invariant expressible here: one lot moves into one
 -- swap group's inheritance at most once. A swap group is exactly one SELL
 -- (see importers/non_btc_valuation.py:_swap_id), and FIFO consumption for
--- one SELL visits each lot once, so this cannot be violated by a correct
--- run — only by a bug re-running consumption for the same group.
+-- one SELL visits each lot once, so a correct run cannot violate it.
+-- It is NOT a guard against re-running the engine: the engine deletes and
+-- reinserts the lots on every pass, so the same lot comes back with a new
+-- id and the pair differs (measured: lot id 1 on the first pass, 2 on the
+-- second). The only thing that keeps a second pass from doubling the
+-- inherited cost basis is the DELETE in calculate_fifo_lots.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_swap_lot_transfers_unique_group_lot
     ON swap_lot_transfers(swap_group_id, source_fifo_lot_id);
 
