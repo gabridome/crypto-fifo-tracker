@@ -596,7 +596,7 @@ def test_a_second_deferral_pass_replaces_the_transfers_instead_of_doubling_them(
 def _driver_loop(db_path, cryptos):
     """One tracker, several cryptos, an exception caught per crypto, loop carried on.
 
-    This is the shape of the real driver, calculators/calculate_fifo.py:87-119:
+    This is the shape of the real driver, calculators/calculate_fifo.py:100-138:
     it calls calculate_fifo_lots() inside a per-crypto try/except Exception on
     one shared connection and keeps going. The engine's transactional
     behaviour is what is under test here, not the driver's three lines of
@@ -2136,17 +2136,15 @@ def test_the_driver_still_computes_a_round_trip_on_the_default_path(db_path):
     was calculated at all.
 
     Run as a subprocess, which is what the web app does too
-    (web/app.py:1297), because the gate is the driver's and the setting is
+    (web/app.py:1309), because the gate is the driver's and the setting is
     read at import time.
     """
     _seed_round_trip(db_path)
 
-    env = dict(os.environ, FIFO_DB=db_path)
-    r = subprocess.run([sys.executable, os.path.join(PROJECT_ROOT, 'calculators',
-                                                     'calculate_fifo.py')],
-                       capture_output=True, text=True, env=env)
-    out = r.stdout + r.stderr
+    r, out = _run_driver(db_path)
 
+    assert r.returncode == 0, f'a clean default run must still exit 0:\n{out}'
+    assert '✓ FIFO CALCULATION COMPLETE!' in out, 'and must still report completion'
     assert 'cycle' not in out, f'the default path must not order by dependency:\n{out}'
     assert 'Fatal error' not in out, out
     assert 'Processing order (swap deferral)' not in out, \
@@ -2323,3 +2321,259 @@ def test_the_order_does_not_depend_on_the_callers_row_factory(db_path):
         assert swap_dependency_order(conn, ['USDT', 'ETH']) == ['ETH', 'USDT']
     finally:
         conn.close()
+
+
+def test_the_order_is_alphabetical_inside_each_layer(db_path):
+    """The tie-break, pinned: without it the order varies between processes.
+
+    Nothing in a dependency graph decides between assets that do not depend
+    on each other, so the layers are ordered alphabetically to make the run
+    reproducible. The input here is deliberately scrambled, and two different
+    assets hand work to the second layer, so dropping either sort changes
+    this list: the ready queue would follow the insertion order of a set,
+    which differs from process to process (hash randomization) — one run
+    ordering CCC before AAA, the next one not, with no way to tell two runs
+    apart afterwards.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        for tag, (give, take) in enumerate((('AAA', 'NNN'), ('CCC', 'MMM'),
+                                            ('CCC', 'ZZZ'))):
+            _tx(conn, transaction_date='2024-01-01T10:00:00+00:00', transaction_type='SELL',
+                cryptocurrency=give, amount=1.0, price_per_unit=1.0, total_value=1.0,
+                fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+                imported_at='2026-01-01T00:00:00', record_hash=f'ly{tag}s',
+                swap_group_id=f'layer-{tag}')
+            _tx(conn, transaction_date='2024-01-01T10:00:00+00:00', transaction_type='BUY',
+                cryptocurrency=take, amount=1.0, price_per_unit=1.0, total_value=1.0,
+                fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+                imported_at='2026-01-01T00:00:00', record_hash=f'ly{tag}b',
+                swap_group_id=f'layer-{tag}')
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        order = swap_dependency_order(conn, ['ZZZ', 'MMM', 'CCC', 'BBB', 'NNN', 'AAA'])
+    finally:
+        conn.close()
+
+    assert order == ['AAA', 'BBB', 'CCC', 'MMM', 'NNN', 'ZZZ'], (
+        'every layer must be alphabetical: AAA, BBB and CCC depend on nothing, '
+        'and MMM, NNN and ZZZ are what the swaps deliver'
+    )
+
+
+def test_the_order_on_a_database_without_the_swap_group_column_names_the_migration(tmp_path):
+    """The ordering runs before the engine, so it meets a missing column first.
+
+    calculate_fifo_lots refuses a database without transactions.swap_group_id
+    with the name of the migration script. Under deferral the driver asks for
+    the order before it calls the engine at all, so without the same check
+    here that database answers with a bare `no such column: give.swap_group_id`
+    — while the default path, which skips the ordering, still names the script.
+    """
+    db = _db_without_swap_group_column(str(tmp_path / 'no_swap_group_column.db'))
+
+    conn = sqlite3.connect(db)
+    try:
+        with pytest.raises(ValueError, match='update_fifo_schema_swap_group'):
+            swap_dependency_order(conn, ['ETH'])
+    finally:
+        conn.close()
+
+
+def test_recomputing_the_give_side_after_its_heir_refuses_instead_of_stranding_it(
+        db_path, monkeypatch):
+    """The same contradiction as a stale inheritance, reached from the other side.
+
+    The guard on the take side says the give side must have been computed in
+    this run. It says nothing about the give side being computed AGAIN
+    afterwards, which rewrites the transfer rows the heir's lots were built
+    from: measured, the transfers move to 2019-01-10 / EUR 500 while the
+    heir's lots stay on 2020-01-10 / EUR 1000, and nothing raises or warns.
+    The true holding period would be 722 days — exempt — and the database
+    says taxable.
+
+    Refused before the first DELETE, so the two tables are left agreeing with
+    each other rather than rewritten into a contradiction the reader would
+    have to unpick.
+    """
+    _seed_deferred_swap(db_path, 'ZZZ', 'swap-back', take_asset='AAA', tag='sb')
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ZZZ')
+        tracker.calculate_fifo_lots('AAA')
+        _older_cheaper_purchase_of_the_give_side(db_path)
+
+        with pytest.raises(ValueError, match='already computed') as exc:
+            tracker.calculate_fifo_lots('ZZZ')
+    finally:
+        tracker.close()
+
+    assert 'AAA' in str(exc.value), 'the message must name the asset left stale'
+    assert _lots(db_path, 'AAA') == [('2020-01-10T10:00:00+00:00', 3000.0, 1000.0)]
+    conn = sqlite3.connect(db_path)
+    try:
+        transfers = conn.execute('SELECT source_purchase_date, cost_basis '
+                                 'FROM swap_lot_transfers').fetchall()
+    finally:
+        conn.close()
+    assert transfers == [('2020-01-10T10:00:00+00:00', 1000.0)], \
+        'refusing before the writes leaves fifo_lots and swap_lot_transfers agreeing'
+
+
+def test_a_give_side_that_raised_has_not_been_computed_by_this_run(db_path, monkeypatch):
+    """`computed` must mean finished, not attempted.
+
+    Recording the crypto on the way INTO calculate_fifo_lots instead of after
+    its commit leaves the whole suite green, and it empties the guard: a give
+    side that raises would count as computed and the asset received would go
+    on to rebuild its lots from the transfer rows of an earlier pass. Here the
+    give side's purchase is gone from `transactions`, so its pass refuses and
+    writes nothing — and the heir must refuse too, not inherit a 2020 date
+    whose purchase no longer exists.
+    """
+    _seed_deferred_swap(db_path, 'ZZZ', 'swap-gone', take_asset='AAA', tag='sg')
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ZZZ')
+        tracker.calculate_fifo_lots('AAA')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM transactions WHERE record_hash = 'sg-buy'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='no purchase on record'):
+            tracker.calculate_fifo_lots('ZZZ')      # fails, writes nothing
+        with pytest.raises(ValueError, match='this run has not computed') as exc:
+            tracker.calculate_fifo_lots('AAA')
+    finally:
+        tracker.close()
+
+    assert 'ZZZ' in str(exc.value), 'the message must name the give side to compute'
+
+
+def _run_driver(db_path):
+    """Run the real driver on this database, the way the web app runs it.
+
+    web/app.py:1309-1317 calls it with subprocess.run(capture_output=True),
+    treats returncode 0 as success, and on failure flashes the LAST 500
+    characters of stdout + stderr — in that order, so anything written to
+    stderr lands after everything written to stdout.
+    """
+    env = dict(os.environ, FIFO_DB=str(db_path))
+    r = subprocess.run([sys.executable, os.path.join(PROJECT_ROOT, 'calculators',
+                                                     'calculate_fifo.py')],
+                       capture_output=True, text=True, env=env)
+    return r, (r.stdout + r.stderr)
+
+
+def _seed_one_good_one_broken_crypto(db_path):
+    """GOOD computes normally; BROKEN raises as soon as its pass reads the amount.
+
+    `amount REAL NOT NULL` keeps a NULL out, but SQLite stores a non-numeric
+    string in a REAL column as text — what a hand-edited row looks like. Any
+    per-crypto failure would serve: what is under test is the driver's
+    accounting of failures, not this particular corruption.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='GOOD', amount=2.0, price_per_unit=100.0, total_value=200.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='g1')
+        _tx(conn, transaction_date='2022-05-10T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='GOOD', amount=1.0, price_per_unit=300.0, total_value=300.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='g2')
+        _tx(conn, transaction_date='2021-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='BROKEN', amount='not-a-number', price_per_unit=1.0,
+            total_value=1.0, fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='b1')
+        stored = conn.execute("SELECT typeof(amount) FROM transactions "
+                              "WHERE record_hash = 'b1'").fetchone()[0]
+        assert stored == 'text', f'the fixture needs a non-numeric amount, got {stored}'
+    finally:
+        conn.close()
+
+
+def test_a_crypto_that_fails_makes_the_driver_report_failure_and_exit_nonzero(db_path):
+    """A refusal must not reach the caller as a success.
+
+    Every guard in this engine ends up here: the driver catches per crypto and
+    carries on, which is right — one broken cryptocurrency must not stop the
+    others — but it then printed `✓ FIFO CALCULATION COMPLETE!` and exited 0,
+    and web/app.py flashes `completed successfully` in green on exit 0. So the
+    engine refused, the figures of the previous run stayed in fifo_lots, and
+    the user was told the calculation was complete. Until this commit the
+    deferral path also printed a standing `Do NOT use these numbers` banner,
+    which made exit 0 harmless; removing that banner is what makes this the
+    mechanism.
+    """
+    _seed_one_good_one_broken_crypto(db_path)
+
+    r, out = _run_driver(db_path)
+
+    assert r.returncode == 1, f'a failed crypto must not exit 0:\n{out}'
+    assert '✓ FIFO CALCULATION COMPLETE!' not in out, \
+        'the success banner must be conditional on there being no failure'
+    assert out.rstrip().splitlines()[-1] == (
+        '✗ 1 of 2 cryptocurrencies were NOT calculated: BROKEN. For those, fifo_lots '
+        'still holds the figures of the previous run — do not use them for a tax '
+        'return. Fix the errors above and run this script again.'
+    ), f'the summary line must be the last thing in the output:\n{out[-800:]}'
+
+    conn = sqlite3.connect(db_path)
+    try:
+        good = conn.execute("SELECT COUNT(*) FROM sale_lot_matches "
+                            "WHERE cryptocurrency = 'GOOD'").fetchone()[0]
+    finally:
+        conn.close()
+    assert good == 1, 'the healthy cryptocurrency must still be calculated'
+
+
+def test_a_fatal_error_before_the_loop_exits_nonzero_and_says_nothing_was_calculated(tmp_path):
+    """The other path out of main(), and the one the cycle refusal takes.
+
+    swap_dependency_order is called outside the per-crypto try, so its
+    refusal — and anything else that fails before the loop — reaches the
+    `except Exception` in __main__, which printed a traceback and exited 0.
+    Nothing is calculated on this path, not even the cryptocurrencies that
+    have nothing to do with the failure, so the previous run's figures are
+    what the database still holds.
+
+    A file that is not a database stands in for any such failure: it fails in
+    the tracker's first PRAGMA, before the loop, like the cycle refusal does.
+    """
+    db = tmp_path / 'not_a_database.db'
+    db.write_bytes(b'this file is not an sqlite database')
+
+    r, out = _run_driver(db)
+
+    assert r.returncode == 1, f'a fatal error must not exit 0:\n{out}'
+    assert '✓ FIFO CALCULATION COMPLETE!' not in out
+    assert out.rstrip().splitlines()[-1] == (
+        '✗ NOTHING WAS CALCULATED: the run stopped before any cryptocurrency was '
+        'processed, so fifo_lots still holds the figures of the previous run — do not '
+        'use them for a tax return.'
+    ), f'the summary line must be the last thing in the output:\n{out[-800:]}'
+
+
+def test_a_missing_database_exits_nonzero(tmp_path):
+    """The early return in main() is a failure too, and returned nothing."""
+    r, out = _run_driver(tmp_path / 'does_not_exist.db')
+
+    assert r.returncode == 1, f'a missing database must not exit 0:\n{out}'
+    assert 'Database file not found' in out

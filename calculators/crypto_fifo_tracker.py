@@ -16,6 +16,25 @@ from config import SWAP_REALIZES  # imported by name so tests can monkeypatch it
 DUST_THRESHOLD = Decimal('1e-8')  # Single threshold for all dust comparisons
 
 
+def _require_swap_group_column(conn):
+    """Refuse a database that predates the swap_group_id migration, by name.
+
+    The column is read in every mode — by the engine's transaction query and
+    by swap_dependency_order — so the migration is a prerequisite, not an
+    option. Both callers raise from here, which is also why the ordering does
+    not answer with a bare `no such column: give.swap_group_id`: it runs
+    before the engine, so without this it would be the first to touch the
+    column on a database that has not been migrated.
+    """
+    if 'swap_group_id' not in [r[1] for r in
+                               conn.execute('PRAGMA table_info(transactions)')]:
+        raise ValueError(
+            'This database has no transactions.swap_group_id column, which the '
+            'FIFO engine now reads to tell a swap apart from a plain disposal. '
+            'Run: python3 calculators/update_fifo_schema_swap_group.py <db>'
+        )
+
+
 def swap_dependency_order(conn, cryptos):
     """Order cryptos so a swap's give side is computed before its take side.
 
@@ -26,20 +45,27 @@ def swap_dependency_order(conn, cryptos):
     Works on any sqlite3 connection: the rows are unpacked positionally, so
     nothing here depends on the caller having set row_factory.
     """
-    # `swap_group_id <> ''` for the same reason the swap_takes query in
-    # calculate_fifo_lots has it, and the per-transaction branches test
-    # truthiness: an empty string is not a swap group for this engine. Without
-    # it the JOIN pairs every '' row with every other '' row, inventing edges
-    # between cryptocurrencies that were never swapped — and a pair of them in
-    # opposite directions would invent a cycle, which stops a deferred run.
+    _require_swap_group_column(conn)
+
+    # `<> ''` is the whole point of this filter: an empty string is not a swap
+    # group for this engine — the swap_takes query in calculate_fifo_lots
+    # excludes it and every per-transaction branch tests truthiness — and
+    # without it the JOIN pairs every '' row with every other '' row,
+    # inventing edges between cryptocurrencies that were never swapped; two of
+    # those in opposite directions invent a cycle and stop a deferred run. No
+    # NULL filter is needed here, unlike in swap_takes, which has no JOIN:
+    # `NULL = NULL` is not true, so the JOIN already drops those rows.
     cur = conn.execute("""
         SELECT give.cryptocurrency AS give_crypto, take.cryptocurrency AS take_crypto
         FROM transactions give
         JOIN transactions take ON take.swap_group_id = give.swap_group_id
                               AND take.transaction_type = 'BUY'
-        WHERE give.swap_group_id IS NOT NULL AND give.swap_group_id <> ''
-          AND give.transaction_type = 'SELL'
+        WHERE give.swap_group_id <> '' AND give.transaction_type = 'SELL'
     """)
+    try:
+        rows = cur.fetchall()
+    finally:
+        cur.close()
     edges = {c: set() for c in cryptos}          # give → takes that depend on it
     indegree = {c: 0 for c in cryptos}
     # Unpacked positionally rather than read by name: a name would require the
@@ -48,7 +74,7 @@ def swap_dependency_order(conn, cryptos):
     # sets that factory, a script opening its own connection does not, and the
     # failure would be a bare TypeError from this loop. Measured: unpacking
     # reads the same two columns under both factories.
-    for give, take in cur.fetchall():
+    for give, take in rows:
         if give in edges and take in indegree and take not in edges[give] and give != take:
             edges[give].add(take)
             indegree[take] += 1
@@ -58,10 +84,14 @@ def swap_dependency_order(conn, cryptos):
     while ready:
         current = ready.pop(0)
         ordered.append(current)
-        for dependent in sorted(edges[current]):
+        for dependent in edges[current]:
             indegree[dependent] -= 1
             if indegree[dependent] == 0:
                 ready.append(dependent)
+        # The tie-break lives here and in the sort above, and nowhere else: a
+        # third sort over edges[current] would be dead, because this one
+        # reorders whatever it appended. Without it the queue would follow the
+        # insertion order of a set, which differs between processes.
         ready.sort()
 
     if len(ordered) != len(cryptos):
@@ -226,13 +256,7 @@ class CryptoFIFOTracker:
 
         # transactions.swap_group_id is read by the query below in every mode,
         # so task 1's migration is a prerequisite of this engine, not an option.
-        if 'swap_group_id' not in [r[1] for r in
-                                   self.cursor.execute('PRAGMA table_info(transactions)')]:
-            raise ValueError(
-                'This database has no transactions.swap_group_id column, which the '
-                'FIFO engine now reads to tell a swap apart from a plain disposal. '
-                'Run: python3 calculators/update_fifo_schema_swap_group.py <db>'
-            )
+        _require_swap_group_column(self.conn)
 
         # swap_lot_transfers is NOT self-created here, unlike fifo_lots and
         # sale_lot_matches: a further copy of its DDL would be a further thing
@@ -353,9 +377,38 @@ class CryptoFIFOTracker:
                     'tax_rules.swap_realizes = True in config.py.'
                 )
 
+            # The other half of the inheritance rule. The take side requires a
+            # give side computed in this run; that says nothing about this give
+            # side being recomputed AFTER the asset that inherited from it,
+            # which rewrites the transfer rows those inherited lots were built
+            # from while nothing rebuilds the lots. Measured: the transfers
+            # move to a purchase imported since, the heir keeps the earlier
+            # date and cost, and nothing raises — the acquisition date that
+            # decides the 365 days ends up on the wrong side of fifo_lots.
+            # Refused before the first DELETE, so the two tables are left
+            # agreeing with each other rather than rewritten into that
+            # contradiction. swap_takes is indexed, not .get(): the orphan
+            # check above has just established that every deferred SELL group
+            # of this crypto is in it.
+            heirs = sorted({swap_takes[t['swap_group_id']] for t in transactions
+                            if t['transaction_type'] == 'SELL' and t['swap_group_id']}
+                           .intersection(self._computed_this_run))
+            if heirs:
+                raise ValueError(
+                    f'{cryptocurrency} is the asset given up in a swap whose received '
+                    f"asset — {', '.join(heirs)} — this run has already computed. "
+                    'Recomputing it now would rewrite the lot transfers those '
+                    'inherited lots were built from, and nothing rebuilds the lots: '
+                    'they would keep an acquisition date that no longer matches any '
+                    f'lot of {cryptocurrency}, the date that decides the 365-day '
+                    'exemption, and fifo_lots and swap_lot_transfers would contradict '
+                    'each other. Run calculators/calculate_fifo.py, which computes '
+                    'every cryptocurrency in dependency order.'
+                )
+
         # ---- writes from here on: one transaction, explicit BEGIN, ROLLBACK on
         # ---- the error path (doc/code_guidelines.md §1.1). The driver
-        # ---- (calculators/calculate_fifo.py:87-119) catches per crypto and
+        # ---- (calculators/calculate_fifo.py:100-138) catches per crypto and
         # ---- carries on with this same connection, so a DELETE left
         # ---- uncommitted here would be made permanent by the next crypto's
         # ---- commit — this crypto silently reduced to zero lots.

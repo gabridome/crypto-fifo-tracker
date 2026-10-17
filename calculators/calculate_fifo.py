@@ -6,6 +6,7 @@ SQLite Database | EUR Currency | Lisbon Timezone
 import os
 import sys
 import time
+import traceback
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -33,7 +34,7 @@ def main():
     if not os.path.exists(DB_PATH):
         print(f"\n✗ Error: Database file not found: {DB_PATH}")
         print("\nPlease run import_all_data.py first!")
-        return
+        return 1
     
     print(f"\n[1/4] Connecting to database...")
     tracker = CryptoFIFOTracker(DB_PATH)
@@ -87,7 +88,8 @@ def main():
     print("☕ Grab a coffee and let it run...\n")
     
     start_time = time.time()
-    
+    failures = []
+
     for idx, crypto in enumerate(cryptos, 1):
         print(f"{'='*70}")
         print(f"[{idx}/{len(cryptos)}] Calculating FIFO for {crypto}...")
@@ -127,16 +129,26 @@ def main():
                     print(f"  Long-term percentage: {pct:.1f}%")
             
         except Exception as e:
+            failures.append(crypto)
             print(f"✗ Error calculating FIFO for {crypto}: {e}")
-            import traceback
-            traceback.print_exc()
+            # On stdout, not stderr: web/app.py:1317 flashes the last 500
+            # characters of stdout + stderr, in that order, so anything written
+            # to stderr lands after everything on stdout and would push the
+            # summary line below out of what the user is shown.
+            traceback.print_exc(file=sys.stdout)
     
     total_elapsed = time.time() - start_time
     
-    # Summary
+    # Summary. The banner is conditional and the run returns a code: the
+    # engine refuses rather than guess, the loop above catches per crypto so
+    # that one broken cryptocurrency does not stop the others, and a refusal
+    # that reaches the caller as `✓ COMPLETE` and exit 0 is indistinguishable
+    # from a clean run — web/app.py:1314-1315 flashes `completed successfully` on
+    # exit 0. A crypto that was not recalculated keeps whatever fifo_lots
+    # already held, which is the previous run's figures.
     print(f"\n[4/4] Summary")
     print("="*70)
-    print(f"✓ FIFO CALCULATION COMPLETE!")
+    print("✗ FIFO CALCULATION INCOMPLETE" if failures else "✓ FIFO CALCULATION COMPLETE!")
     print(tax_rule_banner())
     print(f"\nTotal time: {total_elapsed:.1f} seconds ({total_elapsed/60:.1f} minutes)")
     
@@ -147,23 +159,43 @@ def main():
     if new_db_size > db_size:
         growth = new_db_size - db_size
         print(f"Database grew by: {format_file_size(growth)}")
-    
+
+    tracker.close()
+
+    if failures:
+        # Last line of the whole run, deliberately: this is the tail the web
+        # app shows, and a single error message can be longer than the 500
+        # characters it keeps.
+        print("\n" + "="*70)
+        print(f"✗ {len(failures)} of {len(cryptos)} cryptocurrencies were NOT calculated: "
+              f"{', '.join(failures)}. For those, fifo_lots still holds the figures of "
+              "the previous run — do not use them for a tax return. Fix the errors above "
+              "and run this script again.")
+        return 1
+
     print("\n" + "="*70)
     print("NEXT STEP:")
     print("="*70)
     print("\nGenerate tax reports:")
     print("  python3 generate_reports.py")
     print()
-    
-    tracker.close()
+    return 0
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except KeyboardInterrupt:
         print("\n\n⚠️  Calculation interrupted by user")
         print("You can safely run this script again")
+        sys.exit(1)
     except Exception as e:
+        # Everything that fails outside the per-crypto loop lands here, the
+        # dependency ordering included: it runs before the loop, so nothing at
+        # all has been calculated — not even the cryptocurrencies unrelated to
+        # the failure.
         print(f"\n\n✗ Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
+        traceback.print_exc(file=sys.stdout)
+        print("✗ NOTHING WAS CALCULATED: the run stopped before any cryptocurrency was "
+              "processed, so fifo_lots still holds the figures of the previous run — do "
+              "not use them for a tax return.")
+        sys.exit(1)
