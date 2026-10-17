@@ -2320,10 +2320,28 @@ def swap_dependency_order(conn, cryptos):
 
     if len(ordered) != len(cryptos):
         stuck = sorted(set(cryptos) - set(ordered))
-        raise ValueError(f'swap dependency cycle between {stuck}: cannot decide '
-                         f'which asset inherits from which')
+        raise ValueError(
+            f'Deferred swaps form a cycle between {stuck}: each of those assets '
+            'receives lots from another one in the cycle, so there is no order in '
+            'which to compute them. This engine computes one cryptocurrency at a '
+            'time, which cannot express a chain that goes out and comes back — '
+            'A to B in April and B to A in June needs A computed up to April, '
+            'then B, then A again. Run with tax_rules.swap_realizes = True, or '
+            'see doc/TODO.md for what a round-trip deferral would require.'
+        )
     return ordered
 ```
+
+**Why a cycle is refused rather than solved.** A round trip is the obvious case
+a reader will think of, so the refusal has to be honest about being a limit of
+this engine and not a property of the tax rule. Checked against the actual
+exports (2026-10-17): the crypto-to-crypto legs run in **one direction only** —
+Binance trade history has `BTCUSDT` sells and no `BTCUSDT` buys, Bybit's
+`Convert` rows are fiat to stablecoin, and the Coinbase 2024 exports hold only
+Advanced Trade, Withdrawal and Receive rows. So no cycle is reachable on the
+data at hand, and solving it would mean rewriting the per-crypto pass that
+produces the figures already filed, to serve a tax rule that is still an open
+question. Record the limit in `doc/TODO.md` in task 12; do not build for it.
 
 - [ ] **Step 4: Use it in the driver**
 
@@ -2331,12 +2349,32 @@ In `calculators/calculate_fifo.py`, after the `cryptos` list is read (line ~49)
 and before the per-crypto loop:
 
 ```python
-    from calculators.crypto_fifo_tracker import swap_dependency_order
-    cryptos = swap_dependency_order(tracker.conn, cryptos)
-    print(f"✓ Processing order: {', '.join(cryptos)}")
+    if not SWAP_REALIZES:
+        cryptos = swap_dependency_order(tracker.conn, cryptos)
+        print(f"✓ Processing order (swap deferral): {', '.join(cryptos)}")
 ```
 
-If `tracker.conn` is not exposed, use `tracker.cursor.connection`.
+Three things about those four lines, each of which would be a defect if taken
+differently.
+
+**Gated on the setting.** Under `swap_realizes = True` no cryptocurrency's lots
+depend on another's, so the ordering buys nothing — and it would hand the
+default path a brand-new way to fail: a cycle in the data would stop the whole
+run with a message about a rule that is not even in force. The figures already
+filed do not get a new failure mode to serve a hypothesis.
+
+**Imported the way this file already imports.** Add `swap_dependency_order` to
+the existing `from crypto_fifo_tracker import CryptoFIFOTracker` on line 14 —
+**not** `from calculators.crypto_fifo_tracker import …`. That file puts both the
+project root and `calculators/` on `sys.path`, so the two spellings produce two
+separate module objects with two separate `SWAP_REALIZES`; `doc/TODO.md` records
+it. One pure function would survive the duplication, but importing the module a
+second time is not what this change is for. `SWAP_REALIZES` itself comes from
+`from config import …`, which is a single module object either way.
+
+**`tracker.conn` exists**: `calculators/crypto_fifo_tracker.py:75-76` assigns it
+and sets `row_factory = sqlite3.Row`, which the function's `row['give_crypto']`
+needs. No fallback to `tracker.cursor.connection` — checked, not hedged.
 
 - [ ] **Step 5: Run them and watch them pass**
 
