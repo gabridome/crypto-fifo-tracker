@@ -238,12 +238,14 @@ def tax_rule_banner(conn=None) -> str:
     to do, because those figures go on a tax return.
 
     A clean line therefore establishes that no disposal and no inherited lot on
-    record contradicts the setting named. It does not establish more than that:
-    the inherited-lot evidence cannot see a swap that happened on the same day
-    as the purchase it consumed (see that module's docstring), and on a database
-    older than the `swap_group_id` migration nothing is identifiable as a swap
-    leg at all, so all three read zero and the line is clean for want of
-    evidence rather than for want of a contradiction. That last case is a
+    record contradicts the setting named. It does not establish more than that.
+    Two blind spots, both narrow and both stated in that module: a swap made on
+    the same day as the purchase it consumed whose give side has **already** been
+    recalculated under the other rule — same-day alone is still caught by the
+    give-side traces — and a database older than the `swap_group_id` migration,
+    where nothing is identifiable as a swap leg at all, so all three read zero
+    and the line is clean for want of evidence rather than for want of a
+    contradiction. That last case is a
     silence indistinguishable from agreement, and it is recorded in
     `doc/TODO.md` rather than turned into an alarm: it can only arise under the
     non-default rule, on a database the engine would refuse to recalculate.
@@ -320,7 +322,10 @@ def tax_rule_banner(conn=None) -> str:
         ]
         # The frame is measured from the content, not a constant: a line that
         # sticks out of its own box is how this went wrong the first time, and
-        # the texts here vary with the setting and the counts.
+        # the texts here vary with the setting and the counts. Deliberately
+        # untested — measuring it from the content makes "no line exceeds the
+        # frame" true by construction, and a test could only forbid going back
+        # to a constant, which this comment does more cheaply.
         bar = rule + '=' * (max(len(b) for b in body) - len(rule))
         return '\n'.join([line, bar] + body + [bar])
 

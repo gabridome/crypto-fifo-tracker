@@ -417,12 +417,19 @@ def test_the_inherited_evidence_only_looks_at_lots_acquired_by_a_buy(db_path):
     """Defensive, and marked as such — it has no live path.
 
     `fifo_lots.purchase_transaction_id` points at a BUY by construction: the
-    engine builds lots in its BUY branches only. What can break that is a
-    stale pointer — ids are AUTOINCREMENT, so a transaction deleted and
-    re-imported comes back with a new id and a lot left behind can end up
-    pointing at a different row (the stale-lot family already in doc/TODO.md).
-    Landing on a SELL that carries a swap_group_id and a different date would
-    count as an inherited lot and raise a warning with nothing behind it.
+    engine builds lots in its BUY branches only. Landing on a SELL that carries
+    a `swap_group_id` and a different date would count as an inherited lot and
+    raise a warning with nothing behind it.
+
+    What can put it there is a pointer that resolves to a *different* row.
+    Deleting and re-importing a transaction is **not** one of those: the ids are
+    `AUTOINCREMENT`, which is precisely what stops them being reused, so a lot
+    left behind points at a row that is absent and this query's INNER JOIN drops
+    it — that is the orphan-lot case in doc/TODO.md, which has been observed on
+    the real database, and it is a different defect. The paths that do land on a
+    different row are a table rebuilt with renumbering, and the file-copying
+    practice `doc/en/audit_trail_guide.md` recommends: a `fifo_lots` from one
+    database alongside a `transactions` from another.
 
     A false warning is not a harmless warning here: this banner is a fiscal
     safety device, and one that cries wolf is one a reader learns to scroll
@@ -452,6 +459,49 @@ def test_the_inherited_evidence_only_looks_at_lots_acquired_by_a_buy(db_path):
     assert result['count'] == 0, \
         'a lot whose acquisition row is a SELL is a broken pointer, not an inheritance'
     assert banner == TODAYS_LINE, 'and it must not raise a warning with nothing behind it'
+
+
+def test_the_inherited_evidence_only_looks_at_lots_acquired_in_a_swap(db_path):
+    """The mirror of the test above, on the other filter of the same query.
+
+    A lot whose acquisition is an ORDINARY BUY — no `swap_group_id` — with a
+    `purchase_date` that does not match it. Nothing inherited anything here: no
+    swap is involved at all. Without the filter the count is one and the banner
+    shouts on a database where no disposal has ever deferred, which is a warning
+    with nothing behind it on a device whose whole value is that it only fires
+    when it means something.
+
+    Same reachability as the sibling test: a `fifo_lots` and a `transactions`
+    that do not come from the same database, which the file-copying practice in
+    `doc/en/audit_trail_guide.md` makes easy to produce.
+    """
+    conn = _connect(db_path)
+    try:
+        buy_id = _tx(conn, transaction_date='2024-06-15T15:00:00+00:00',
+                     transaction_type='BUY', cryptocurrency='ETH', amount=1.0,
+                     price_per_unit=3200.0, total_value=3200.0, fee_currency='EUR',
+                     currency='EUR', exchange_name='Test', source='seed',
+                     imported_at='2026-01-01T00:00:00', record_hash='o1')
+        assert conn.execute(
+            'SELECT swap_group_id FROM transactions WHERE id = ?', (buy_id,)
+        ).fetchone()[0] is None, 'an ordinary BUY, with no swap group'
+        conn.execute("""INSERT INTO fifo_lots
+            (purchase_transaction_id, cryptocurrency, purchase_date, original_amount,
+             remaining_amount, purchase_price_per_unit, cost_basis, purchase_fee_total,
+             exchange_name)
+            VALUES (?, 'ETH', '2020-01-10T10:00:00+00:00', 1.0, 1.0, 1000.0, 1000.0, 0, 'Test')""",
+            (buy_id,))
+        conn.commit()
+        result = inherited_lots(conn)
+        banner = config.tax_rule_banner(conn)
+    finally:
+        conn.close()
+
+    assert result['count'] == 0, \
+        'no swap, nothing inherited: a mismatched date on an ordinary BUY is a ' \
+        'different defect and belongs to the stale-lot entry in doc/TODO.md'
+    assert banner == TODAYS_LINE, \
+        'and the banner must not shout about deferral on a database that never deferred'
 
 
 def test_a_database_without_fifo_lots_answers_zero_for_the_inherited_evidence(db_path):

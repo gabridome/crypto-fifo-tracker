@@ -101,9 +101,10 @@ that prints that block is not fit to file from.
 What a clean line establishes, and no more: that no disposal and no inherited lot
 **on record** contradicts the setting named. Two limits, both stated in the code
 and recorded in `doc/TODO.md`: a swap made on the same day as the purchase it
-consumed inherits that same day, so its lot is indistinguishable from an ordinary
-one; and on a database older than the `swap_group_id` migration nothing is
-identifiable as a swap leg at all, so the line is clean for want of evidence.
+consumed **whose give side has already been recalculated under the other rule**
+— same-day alone still leaves the give-side traces — and a database older than
+the `swap_group_id` migration, where nothing is identifiable as a swap leg at
+all, so the line is clean for want of evidence.
 
 ### What `sale_lot_matches` is, and is not
 

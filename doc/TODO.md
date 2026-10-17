@@ -114,18 +114,29 @@
   raggiunge — **compreso il blocco di avviso** che quel banner stampa quando
   l'impostazione e i dati non concordano, che è la cosa che meno di tutte può
   restare su un canale che la web UI butta.
-  **Misurato il 2026-10-17 leggendo il codice e l'output, non avviando Flask:**
-  il blocco d'avviso è **949 caratteri su 21 righe**, la finestra della web app
-  è `[-500:]` (`web/app.py:1317` per il FIFO, `:1471` per il report), quindi non
-  ci sta **su nessun percorso**; e su `returncode == 0` (`:1314-1315`,
-  `:1468-1469`) lo stdout viene scartato del tutto. Nei due report misurati il
-  blocco comincia a 1.483 e a 1.021 caratteri dalla fine dell'output, cioè
-  interamente fuori dalla coda anche se ci stesse. Nessun altro canale lo
-  mostra: le sole altre letture di `result.stdout` in `web/app.py` (`:1015`,
-  `:1055`) sono sui percorsi di import e non eseguono questi script, e nessun
-  template legge l'output di un sottoprocesso. **Conclusione: l'avviso non
-  raggiunge l'utente della web UI**, su nessun percorso. Chi chiude questa voce
-  tratti il blocco d'avviso come il caso da far passare per primo. Importa **adesso**, non "prima che": dopo i task 9-11
+  **Misurato il 2026-10-17 leggendo il codice e l'output, non avviando Flask.**
+  L'invariante, non una cifra: la dimensione del blocco **varia** con quale
+  prova scatta e con il punto in cui l'elemento va a capo — misurato su tre
+  stati, 945, 986 e 1.022 caratteri su 19, 20 e 21 righe — quindi un numero
+  nudo non è riproducibile senza nominare lo stato, ed è per questo che qui non
+  ce n'è uno. L'invariante che regge: **l'impalcatura fissa del blocco** (le due
+  cornici più le frasi che non dipendono da quale prova scatta) è da sola **897
+  caratteri su 18 righe**, cioè già oltre la finestra di `[-500:]`, prima che si
+  aggiunga una sola riga di prova. Nessuna forma del blocco può starci. E su
+  `returncode == 0` lo stdout viene scartato del tutto.
+  Gli script che la web app lancia sono **due**: `calculate_fifo.py`
+  (`web/app.py:1310`, finestra a `:1317`, successo a `:1314-1315`) e
+  `generate_irs_report.py` (finestra a `:1471`, successo a `:1468-1469`).
+  `generate_annual_summary.py` **non viene eseguito dalla web app** (zero
+  occorrenze sotto `web/`), quindi il canale che conta qui è il report IRS.
+  Verificato su quello: esce con codice 0 mentre stampa l'avviso, quindi lo
+  stdout non viene nemmeno guardato, e la riga del disaccordo non è negli
+  ultimi 500 caratteri. Nessun altro canale lo mostra: le sole altre letture di
+  `result.stdout` (`:1015`, `:1055`) sono sui percorsi di import e non eseguono
+  questi script, e nessun template legge l'output di un sottoprocesso.
+  **Conclusione: l'avviso non raggiunge l'utente della web UI**, su nessun
+  percorso. Chi chiude questa voce tratti il blocco d'avviso come il caso da
+  far passare per primo. Importa **adesso**, non "prima che": dopo i task 9-11
   `swap_realizes=False` cambia le date, e un utente della web UI non ha modo di
   scoprire sotto quale regola sono state calcolate le cifre che legge.
 - [x] ~~**`calculators/crypto_fifo_tracker.py`: import `SWAP_REALIZES` non letto**~~
@@ -276,7 +287,12 @@ queste voci la usi, invece di riscrivere la query.
   **Limite della terza prova, dichiarato**: una permuta avvenuta lo stesso
   giorno dell'acquisto consumato eredita quello stesso giorno, quindi le due
   date coincidono e il lotto è indistinguibile da uno ordinario — la prova è
-  **sufficiente e non necessaria**.
+  **sufficiente e non necessaria**. Il punto cieco è però più stretto del
+  limite: una permuta nello stesso giorno lascia comunque le tracce della gamba
+  che cede, quindi su un database calcolato sotto differimento
+  `deferred_disposals` scatta. Non si vede solo la **combinazione** — permuta
+  nello stesso giorno **e** gamba che cede già ricalcolata sotto l'altra regola.
+  Dichiarare un limite più severo del vero costa credibilità agli altri.
 
 ## Limiti noti — non difetti aperti
 
@@ -348,6 +364,11 @@ queste voci la usi, invece di riscrivere la query.
   renderebbe applicate anche le altre due FK dichiarate.
   **La spec di questo branch (§9) e il piano affermavano che un passo di verifica
   li segnala: non esiste.** (Trovato dal task 12, 2026-10-17.)
+  **Non è un limite latente: la classe è stata osservata sul database reale**
+  (interrogato in sola lettura dal proprietario, 2026-10-17). Quantità, asset e
+  id non stanno qui — sono dati di conto e vivono nei registri del proprietario.
+  Quello che serve a chi chiuderà la voce è che il caso esiste già, quindi il
+  controllo da scrivere troverà qualcosa da segnalare al primo giro.
 
 - [ ] **Un BUY senza prezzo unitario perde il costo di base nel match** —
   preesistente, non introdotto dal branch non-BTC. Il lotto prende

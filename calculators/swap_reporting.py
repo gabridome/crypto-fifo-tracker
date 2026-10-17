@@ -43,11 +43,18 @@ under `True` as well — takes away the last standing trace the moment the give
 side is recomputed. `inherited_lots` is what sees that state.
 
 **The limit of the third evidence, stated.** It recognises an inherited lot by
-its acquisition date differing from the date of the swap's BUY leg. A swap that
-happened on the same day as the purchase it consumed inherits that same day, so
-the two dates coincide and the lot is indistinguishable from an ordinary one.
-The evidence is therefore **sufficient and not necessary**: finding one proves
-a deferred run wrote it, finding none does not prove none exists.
+its acquisition date differing from the date of the swap's BUY leg. A swap made
+on the same day as the purchase it consumed inherits that same day, so the two
+dates coincide and the lot is indistinguishable from an ordinary one. Each
+evidence is therefore **sufficient and not necessary**: finding one proves which
+rule wrote it, finding none does not prove none exists.
+
+The blind spot is narrower than that limit alone suggests, and saying so costs
+nothing: a same-day swap still leaves its give-side traces, so on a database
+calculated under deferral `deferred_disposals` fires anyway. What goes unseen is
+the **combination** — a same-day swap whose give side has *already* been
+recalculated under the other rule, which is the one state where the give-side
+traces are gone and the date tells nothing apart.
 """
 
 ZERO = {'count': 0, 'amount': 0.0, 'total_value': 0.0}
