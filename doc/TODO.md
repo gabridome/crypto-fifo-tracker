@@ -123,6 +123,29 @@
 
 ## Operativo / Infrastruttura
 
+- [ ] **Dichiarare esplicitamente la modalità di transazione di `sqlite3`** —
+  oggi ciò che rende efficace il `rollback()` di `calculate_fifo_lots` non è
+  codice nostro: è il controllo di transazione legacy del modulo `sqlite3`, che
+  apre una transazione implicita prima del primo DML. Python ha annunciato il
+  passaggio all'autocommit come default; quel giorno, un `rollback()` senza
+  `BEGIN` esplicito non annulla più niente. Il `BEGIN` esplicito c'è ed è
+  presidiato da `test_the_write_phase_opens_an_explicit_transaction`, quindi
+  non c'è un difetto aperto — ma la difesa vera è `autocommit=False`, che
+  **non esiste su Python 3.11** (misurato: `TypeError`), ed è il piano
+  d'appoggio che `pyproject.toml` dichiara con `target-version = "py311"`.
+  `isolation_level=''` non serve: ridichiara il default di oggi e dalla 3.12 è
+  scavalcata quando `autocommit` è impostato. Primo passo quando si farà:
+  verificare che `autocommit=False` sia neutro per gli script di report e per
+  la web app, che usano la stessa classe — cambia **quando** le transazioni si
+  aprono, anche per le SELECT, e questo non è verificato.
+  (Dal code review del task 9, 2026-10-17.)
+- [ ] **`calculate_fifo.py` importa il motore come modulo top-level** mentre i
+  test importano `calculators.crypto_fifo_tracker`: due oggetti modulo, due
+  `SWAP_REALIZES` distinti. Non è un difetto di comportamento — il driver legge
+  il valore vero da `config` — ma rende `main()` non pilotabile da un test
+  in-process, e per questo i test del task 9 riproducono la forma del loop del
+  driver invece di chiamarlo. (Dal code review del task 9, 2026-10-17.)
+
 - [x] ~~**Audit trail / tracciabilità fiscale**~~ — pagina /audit con drill-down per riga IRS, Print CSS (2026-03-30)
 - [x] ~~**Backup data/ su Google Drive**~~ — `backup_drive.sh` con rclone (2026-03-30)
 - [x] ~~**Manuale importatori**~~ — `doc/en/IMPORT_MAPPING.md` esisteva già (587 righe), aggiornato con source tracking (2026-03-30)
