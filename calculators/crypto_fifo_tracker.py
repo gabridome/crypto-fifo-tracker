@@ -188,15 +188,30 @@ class CryptoFIFOTracker:
             # alphabetically (SELECT DISTINCT cryptocurrency ORDER BY
             # cryptocurrency), and its per-crypto except at :118-121 turns the
             # engine's refusal into a printed line and carries on.
+            #
+            # The refusal itself only happens while the swap has no transfer
+            # row yet, and that is the dangerous part. Measured on a seeded
+            # database: give side ZZZ, take side AAA, so the driver takes AAA
+            # first. Run 1 in the correct order gives AAA a lot dated
+            # 2024-01-10 at EUR 1000. An older, cheaper ZZZ purchase then
+            # arrives (2022-01-10, EUR 500). Run 2 — alphabetical, which is
+            # what the driver does — raises nothing, prints nothing, and
+            # leaves AAA on the 2024 date and EUR 1000, while
+            # swap_lot_transfers now says 2022-01-10 and EUR 500: the two
+            # tables disagree and the inherited date is the previous run's.
+            # On a 2025 disposal that is the difference between exempt and
+            # taxable.
             bar = '!' * 70
             print(f"  {bar}")
             print('  WARNING: swap deferral is INCOMPLETE in this build.')
             print('  Both sides of a deferred swap work (tasks 9 and 10), but nothing')
             print('  computes the asset given up before the asset that inherits from it:')
-            print('  a full run goes in alphabetical order. The wrong order is loud — the')
-            print('  engine refuses — but recalculating the asset given up ON ITS OWN is')
-            print('  not: it rewrites the transfers and leaves the inherited lots of the')
-            print('  asset received behind, stale, and nothing recomputes them.')
+            print('  a full run goes in alphabetical order. That wrong order refuses')
+            print('  only while the swap has no transfer row yet. Once any previous run')
+            print('  has written one, the asset received silently rebuilds its lots from')
+            print('  those stale rows — the inherited acquisition date, the one that')
+            print('  decides the 365 days, is then the previous run one, and fifo_lots')
+            print('  and swap_lot_transfers are left disagreeing with each other.')
             print('  Do NOT use these numbers for any tax return. Task 11 orders the')
             print('  cryptocurrencies by dependency and removes this warning.')
             print(f"  {bar}")
@@ -354,12 +369,33 @@ class CryptoFIFOTracker:
                     ''', (trans['swap_group_id'], cryptocurrency))
                     slices = self.cursor.fetchall()
                     if not slices:
+                        # The absence of transfers does not establish WHY they
+                        # are absent, and the first version of this message
+                        # asserted one cause: that the asset given up had not
+                        # been processed yet. Measured wrong on a second cause
+                        # — an asset given up that IS processed and refuses (no
+                        # purchase history, the guard in the SELL branch) also
+                        # leaves no transfer, so this branch fires in the
+                        # correct order too, telling the reader to do what they
+                        # had just done. Which of the two it is is not
+                        # established here: name the asset to look at, name
+                        # both causes, pick neither.
+                        self.cursor.execute("""
+                            SELECT DISTINCT cryptocurrency FROM transactions
+                            WHERE swap_group_id = ? AND transaction_type = 'SELL'
+                            ORDER BY cryptocurrency
+                        """, (trans['swap_group_id'],))
+                        given_up = [r[0] for r in self.cursor.fetchall()]
                         raise ValueError(
-                            f"swap {trans['swap_group_id']}: no lot transfer recorded. "
-                            f"The asset given up in that swap has to be processed "
-                            f"before {cryptocurrency}, because its lots are what "
-                            f"{cryptocurrency} inherits: run calculate_fifo_lots on "
-                            f"it first."
+                            f"swap {trans['swap_group_id']}: no lot transfer recorded "
+                            f'for {cryptocurrency}. Given up in that swap: '
+                            f"{', '.join(given_up) if given_up else 'nothing on record'}. "
+                            'Either that asset has not been computed yet in this run — '
+                            'the driver goes alphabetically, so the asset received can '
+                            'come first — or computing it produced no transfer at all, '
+                            'which it reports on its own side. This branch cannot tell '
+                            'the two apart: compute the asset given up and read what it '
+                            'says.'
                         )
                     received = Decimal(str(trans['amount']))
                     total_from = sum(Decimal(str(s['amount_from'])) for s in slices)
@@ -458,6 +494,12 @@ class CryptoFIFOTracker:
 
                     sale_date_dt = datetime.fromisoformat(sale_date)
 
+                    # One value for the whole sale, read before the loop: the
+                    # check after it has to know whether this disposal defers
+                    # even when the loop consumed no lot at all and so never
+                    # reached the per-lot branch below.
+                    deferred_sale = bool(trans['swap_group_id']) and not SWAP_REALIZES
+
                     i = lot_ptr
                     while i < len(mem_lots) and amount_to_sell > DUST_THRESHOLD:
                         lot = mem_lots[i]
@@ -492,8 +534,7 @@ class CryptoFIFOTracker:
                         purchase_date_dt = datetime.fromisoformat(lot['purchase_date'])
                         holding_days = (sale_date_dt.date() - purchase_date_dt.date()).days
 
-                        deferred = bool(trans['swap_group_id']) and not SWAP_REALIZES
-                        if deferred:
+                        if deferred_sale:
                             # No realization: the acquisition date and cost travel to
                             # the asset received (spec §7, deferral regime).
                             # Indexed, not .get(): every deferred group was checked
@@ -538,6 +579,30 @@ class CryptoFIFOTracker:
                         i += 1
 
                     if amount_to_sell > DUST_THRESHOLD:
+                        if deferred_sale:
+                            # Fatal only under deferral, and a different defect
+                            # from the orphan check before the DELETEs: there
+                            # the BUY leg is missing, here it is the purchase
+                            # history of the asset given up. The transfers
+                            # written above cover only the part that found
+                            # lots, while the take side spreads the whole
+                            # amount received over them — the asset received
+                            # inherits the full quantity against a fraction of
+                            # the cost, in a lot that looks ordinary from where
+                            # it lands. Understating the cost overstates the
+                            # gain, so this one runs against the taxpayer; it
+                            # is a wrong figure in a return either way.
+                            raise ValueError(
+                                f'Deferred swap {trans["swap_group_id"]!r} disposes of '
+                                f'{amount_to_sell:.8f} {cryptocurrency} with no purchase '
+                                f'on record (sale on {sale_date}). Under deferral the '
+                                f'asset received would inherit the whole amount that '
+                                f'arrived against only the cost of the part matched '
+                                f'here: a lot that looks ordinary and carries too '
+                                f'little cost basis. Import the missing {cryptocurrency} '
+                                'purchases, or set tax_rules.swap_realizes = True in '
+                                'config.py.'
+                            )
                         print(f"  ⚠️  Warning: Sale on {sale_date} has {amount_to_sell:.8f} "
                               f"{cryptocurrency} unmatched (no purchase found)")
                     sells += 1

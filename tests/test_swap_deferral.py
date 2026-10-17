@@ -430,10 +430,15 @@ def test_deferred_swap_without_its_buy_leg_refuses_to_lose_the_cost_basis(db_pat
 
     tracker = CryptoFIFOTracker(db_path)
     try:
-        with pytest.raises(ValueError, match='swap-1'):
+        # matched on the phrase, not on the group name: three guards on this
+        # path put a group name in their message, so 'swap-1' alone would let
+        # any of the other two stand in for this one — and each sends the
+        # reader somewhere else to look
+        with pytest.raises(ValueError, match='BUY leg was never imported') as exc:
             tracker.calculate_fifo_lots('ETH')
     finally:
         tracker.close()
+    assert 'swap-1' in str(exc.value), 'the message must name the group to go and look at'
 
 
 def test_deferral_on_a_database_without_the_transfers_table_stops_and_names_the_migration(
@@ -828,10 +833,16 @@ def test_an_orphan_deferred_group_raises_even_when_no_lot_is_consumed(db_path, m
 
     tracker = CryptoFIFOTracker(db_path)
     try:
-        with pytest.raises(ValueError, match='swap-nolots'):
+        # Matched on the phrase: this fixture also has nothing to consume, so
+        # with the orphan check disabled the unmatched-disposal guard raises
+        # instead and its message carries the group name too. That one says to
+        # import the missing ETH purchases, when what is missing is the BUY
+        # leg of the swap — the right cure for a different defect.
+        with pytest.raises(ValueError, match='BUY leg was never imported') as exc:
             tracker.calculate_fifo_lots('ETH')
     finally:
         tracker.close()
+    assert 'swap-nolots' in str(exc.value), 'the message must name the group'
 
 
 def _seed_swap_group_with_two_take_legs(db_path):
@@ -894,16 +905,18 @@ def test_two_buy_legs_in_one_swap_group_only_warn_on_the_default_path(db_path, c
 
 def test_deferral_warns_loudly_that_the_chain_is_incomplete_until_task_11(
         db_path, monkeypatch, capsys):
-    """Until task 11 the chain can be left half-stale without saying so.
+    """Until task 11 the chain can be left stale without saying so.
 
     Both sides of a deferred swap work now (tasks 9 and 10), so the reason has
-    changed and the warning had to change with it: what is still missing is an
-    order. A full run takes the cryptocurrencies alphabetically, and
-    recalculating the asset given up on its own rewrites its transfers while
-    the inherited lots of the asset received keep the old numbers — the one
-    failure mode here that produces no error at all, which is why the warning
-    has to name it. The task number is in the message on purpose: it says when
-    the scaffolding comes out, and where to find this test.
+    changed twice and the warning with it. What is still missing is an order,
+    and the earlier wording — that the wrong order is loud because the engine
+    refuses — was true only on a database where no transfer had ever been
+    written. Measured otherwise: with a transfer row from any previous run the
+    asset received rebuilds its lots from THAT row, raising nothing and
+    printing nothing, so the inherited acquisition date is the previous run's
+    and the two tables end up disagreeing. A warning that says the wrong order
+    is caught invites exactly the run that is not, which is why the
+    conditional half is asserted here and not only the alarming half.
     Asserted in both directions: absent on the default path, which has no
     scaffolding to warn about.
     """
@@ -929,8 +942,20 @@ def test_deferral_warns_loudly_that_the_chain_is_incomplete_until_task_11(
     assert 'Do NOT use these numbers for any tax return' in deferred_out
     assert 'Task 11' in deferred_out, 'the warning must say what removes it'
     assert 'stale' in deferred_out, (
-        'the warning must name the silent failure: recalculating one side alone '
-        'leaves the inherited lots of the other behind'
+        'the warning must name the silent failure: the asset received rebuilds its '
+        'lots from transfer rows left by an earlier run'
+    )
+    assert 'only while' in deferred_out, (
+        'the warning must say that the refusal is conditional. Unqualified — "the '
+        'wrong order is loud, the engine refuses" — it invites the one run that is '
+        'silent, which is any run after the first'
+    )
+    # The whole fragment, not just 'previous run': that phrase appears on the
+    # conditional line above as well, so the loose version of this assertion
+    # passed with the claim about the date mutated away.
+    assert 'is then the previous run one' in deferred_out, (
+        'and that the inherited acquisition date, the one deciding the 365 days, is '
+        'then the previous run one'
     )
     assert 'inherit its date and cost yet' not in deferred_out, (
         'that line claimed the received asset does not inherit yet — task 10 made '
@@ -1247,10 +1272,17 @@ def test_take_side_without_its_give_side_fails_loudly(db_path, monkeypatch):
 
     tracker = CryptoFIFOTracker(db_path)
     try:
-        with pytest.raises(ValueError, match='swap-1'):
+        # Matched on the phrase, not on the group name. With this guard
+        # disabled, slices is empty, so total_from is zero and the schema
+        # invariant guard below it raises instead — and that message carries
+        # the group name too. match='swap-1' passed with the guard switched
+        # off, while sending the reader to check the table constraints when
+        # the problem is the processing order.
+        with pytest.raises(ValueError, match='no lot transfer recorded') as exc:
             tracker.calculate_fifo_lots('USDT')  # give side not computed yet
     finally:
         tracker.close()
+    assert 'swap-1' in str(exc.value), 'the message must name the group to go and look at'
 
 
 # ---------------------------------------------------------------------------
@@ -1777,3 +1809,156 @@ def test_lot_transfers_summing_to_zero_units_stop_instead_of_allocating_nothing(
     finally:
         tracker.close()
     assert 'swap-1' in str(exc.value), 'the message must name the group to go and look at'
+
+
+def _seed_deferred_swap_with_incomplete_purchase_history(db_path):
+    """1 ETH swapped for 1000 USDT, but only 0.6 ETH was ever bought.
+
+    EUR 600 of cost on record against a whole ETH given up: the engine can
+    match 0.6 and nothing else.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=0.6, price_per_unit=1000.0, total_value=600.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='u1')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='u2',
+            swap_group_id='swap-short')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='u3',
+            swap_group_id='swap-short')
+    finally:
+        conn.close()
+
+
+def test_a_deferred_sale_not_fully_matched_stops_instead_of_inheriting_part(
+        db_path, monkeypatch):
+    """Whole quantity, partial cost: the lot that looks ordinary and is not.
+
+    The transfers cover only the part of the disposal that found lots, but the
+    take side spreads the WHOLE amount that arrived over those transfers. The
+    asset received would get 1000 USDT carrying EUR 600 instead of the cost of
+    a whole ETH — nothing about that lot looks wrong from where it lands, and
+    the missing cost is invisible on that side. A cost basis too low overstates
+    the gain, so this one runs against the taxpayer rather than the revenue,
+    which makes it no less wrong in a return.
+
+    Not the orphan check: that one is about a swap whose BUY leg was never
+    imported. This is about the missing purchase history of the asset given up
+    — the BUY leg is right here. Different cause, different cure.
+    """
+    _seed_deferred_swap_with_incomplete_purchase_history(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='no purchase on record') as exc:
+            tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+    assert 'swap-short' in str(exc.value), 'the message must name the group'
+    assert '0.40000000' in str(exc.value), 'and how much of the disposal went unmatched'
+
+    conn = sqlite3.connect(db_path)
+    try:
+        transfers = conn.execute('SELECT COUNT(*) FROM swap_lot_transfers').fetchone()[0]
+    finally:
+        conn.close()
+    assert transfers == 0, 'the partial inheritance must not be left behind to be read'
+
+
+def test_a_sale_not_fully_matched_still_only_warns_on_the_default_path(db_path, capsys):
+    """Same data, default path: the warning that has always been there.
+
+    An unmatched tail is an old and common state of this database — an import
+    that starts mid-history leaves one on the first sale of every asset — and
+    on the realizing path it costs nothing but a gain computed on what is on
+    record. Raising here would stop a tax history that has been like this all
+    along.
+    """
+    _seed_deferred_swap_with_incomplete_purchase_history(db_path)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+    out = capsys.readouterr().out
+
+    assert 'unmatched' in out, 'the warning must still be printed'
+    conn = sqlite3.connect(db_path)
+    try:
+        gain = conn.execute("SELECT ROUND(SUM(gain_loss),2) FROM sale_lot_matches "
+                            "WHERE cryptocurrency='ETH'").fetchone()[0]
+    finally:
+        conn.close()
+    assert gain == 1200.0, 'the matched 0.6 ETH must still realize its gain'
+
+
+def test_the_missing_transfer_message_names_the_asset_and_not_a_guessed_cause(
+        db_path, monkeypatch):
+    """No transfer row does not establish why, so the message must not pick one.
+
+    Two causes land on this branch. The ordering one is the obvious half. The
+    other: an asset given up that WAS computed, first, and refused — here
+    because its purchase history is missing — writes no transfer either. The
+    first wording blamed the order, so in this run it told the reader to do
+    the thing they had just done, while the real answer was printed by the
+    other crypto. The message names the asset given up, which is a fact from
+    the database, and leaves the cause open.
+    """
+    _seed_deferred_swap_with_incomplete_purchase_history(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='no purchase on record'):
+            tracker.calculate_fifo_lots('ETH')     # the give side, FIRST, and it refuses
+        with pytest.raises(ValueError, match='no lot transfer recorded') as exc:
+            tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    message = str(exc.value)
+    assert 'Given up in that swap: ETH' in message, \
+        'the message must name the asset to go and look at'
+    assert 'cannot tell the two apart' in message, (
+        'and must not attribute a cause it has not established: the give side was '
+        'computed first here, so blaming the order would be false'
+    )
+
+
+def test_a_swap_group_with_no_disposal_leg_at_all_says_so(db_path, monkeypatch):
+    """A BUY leg tagged with a swap group that disposes of nothing.
+
+    Third way onto the same branch, and the one where naming the asset given
+    up would otherwise print an empty list. There is nothing to compute first
+    and nothing to inherit from: the message has to say that rather than send
+    the reader looking for an asset that is not there.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='v1',
+            swap_group_id='swap-noleg')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='no lot transfer recorded') as exc:
+            tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    assert 'Given up in that swap: nothing on record' in str(exc.value), \
+        'an empty list of assets given up must read as a fact, not as a blank'
