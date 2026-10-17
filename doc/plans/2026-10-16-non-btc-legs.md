@@ -2376,6 +2376,74 @@ second time is not what this change is for. `SWAP_REALIZES` itself comes from
 and sets `row_factory = sqlite3.Row`, which the function's `row['give_crypto']`
 needs. No fallback to `tracker.cursor.connection` — checked, not hedged.
 
+- [ ] **Step 4b: Refuse to inherit from a pass that is not this one**
+
+Ordering the full run is necessary and not sufficient, and the task 10 quality
+review measured why. The take side's refusal — `if not slices` — only fires
+while that swap has **no** transfer row at all. Once any earlier pass has
+written one, the wrong order rebuilds the inherited lots from those stale rows
+in silence: measured, a forgotten older purchase of the asset given up changed
+the inherited date from 2024 to 2022 and the cost from EUR 1000 to EUR 500, and
+the alphabetical run — the one the driver performs — kept the 2024 figures with
+no error, no warning, and `fifo_lots` and `swap_lot_transfers` left contradicting
+each other. On a sale in the following year that is the difference between
+exempt and taxable at 28%.
+
+`swap_dependency_order` fixes the full run. It does nothing for a single-crypto
+entry point — `calculate_fifo_lots('AAA')` from a shell, or a per-crypto button
+in the web app — which stays silent for the same reason.
+
+So make the inheritance require the give side from **this** invocation. In
+`CryptoFIFOTracker.__init__`, add:
+
+```python
+        # Cryptos whose lots this instance has (re)built. The take side of a
+        # deferred swap may only inherit from a give side computed in this same
+        # run: a transfer row from an earlier pass can be stale, and nothing in
+        # the row says so (see the task 10 review).
+        self._computed_this_run = set()
+```
+
+Record it at the end of `calculate_fifo_lots`, after the commit:
+
+```python
+        self._computed_this_run.add(cryptocurrency)
+```
+
+and, in the inheritance branch, before trusting `slices`:
+
+```python
+                give_assets = [r[0] for r in self.cursor.execute(
+                    "SELECT DISTINCT cryptocurrency FROM transactions "
+                    "WHERE swap_group_id = ? AND transaction_type = 'SELL'",
+                    (trans['swap_group_id'],))]
+                stale = [a for a in give_assets if a not in self._computed_this_run]
+                if stale:
+                    raise ValueError(
+                        f"swap {trans['swap_group_id']}: {cryptocurrency} inherits lots "
+                        f"from {', '.join(stale)}, which this run has not computed. The "
+                        'transfer rows on record may be from an earlier pass, and nothing '
+                        'in them says whether the purchase history behind them has since '
+                        'changed — inheriting from them would silently carry a stale '
+                        'acquisition date, the one that decides the 365-day exemption. '
+                        'Run calculate_fifo.py, which orders the cryptocurrencies by '
+                        'dependency.'
+                    )
+```
+
+This replaces nothing: `if not slices` stays, because a give side computed in
+this run that wrote no transfer is a different fault with a different cure.
+
+Two tests. First, the measured scenario: compute in the right order, add an
+older purchase of the asset given up, then compute **only** the take side —
+it must raise naming the give asset, where before it silently kept the stale
+date. Second, that a full run in dependency order still passes, so the guard
+refuses staleness and not the normal path.
+
+Then remove the scaffolding warning task 9 added and task 10 rewrote, together
+with the state it warns about, and drop the assertions that pin it — including
+the `Task 11` string, which is there to lead whoever removes it to this step.
+
 - [ ] **Step 5: Run them and watch them pass**
 
 Run: `venv/bin/pytest tests/test_swap_deferral.py -v`
