@@ -16,6 +16,65 @@ from config import SWAP_REALIZES  # imported by name so tests can monkeypatch it
 DUST_THRESHOLD = Decimal('1e-8')  # Single threshold for all dust comparisons
 
 
+def swap_dependency_order(conn, cryptos):
+    """Order cryptos so a swap's give side is computed before its take side.
+
+    Only matters under deferral, where the asset received inherits the lots of
+    the asset given up. Alphabetical within each layer, so the order is stable
+    between runs. Raises ValueError on a cycle instead of choosing a side.
+    """
+    # `swap_group_id <> ''` for the same reason the swap_takes query in
+    # calculate_fifo_lots has it, and the per-transaction branches test
+    # truthiness: an empty string is not a swap group for this engine. Without
+    # it the JOIN pairs every '' row with every other '' row, inventing edges
+    # between cryptocurrencies that were never swapped — and a pair of them in
+    # opposite directions would invent a cycle, which stops a deferred run.
+    cur = conn.execute("""
+        SELECT give.cryptocurrency AS give_crypto, take.cryptocurrency AS take_crypto
+        FROM transactions give
+        JOIN transactions take ON take.swap_group_id = give.swap_group_id
+                              AND take.transaction_type = 'BUY'
+        WHERE give.swap_group_id IS NOT NULL AND give.swap_group_id <> ''
+          AND give.transaction_type = 'SELL'
+    """)
+    edges = {c: set() for c in cryptos}          # give → takes that depend on it
+    indegree = {c: 0 for c in cryptos}
+    for row in cur.fetchall():
+        give, take = row['give_crypto'], row['take_crypto']
+        if give in edges and take in indegree and take not in edges[give] and give != take:
+            edges[give].add(take)
+            indegree[take] += 1
+
+    ready = sorted(c for c in cryptos if indegree[c] == 0)
+    ordered = []
+    while ready:
+        current = ready.pop(0)
+        ordered.append(current)
+        for dependent in sorted(edges[current]):
+            indegree[dependent] -= 1
+            if indegree[dependent] == 0:
+                ready.append(dependent)
+        ready.sort()
+
+    if len(ordered) != len(cryptos):
+        # Everything still unordered has a predecessor that is also still
+        # unordered, so the set contains a cycle — but not every member needs
+        # to sit on it: an asset that merely inherits from one is stuck too.
+        # Hence "a cycle inside that set" rather than "between those assets".
+        stuck = sorted(set(cryptos) - set(ordered))
+        raise ValueError(
+            f'Deferred swaps leave {stuck} impossible to order: a cycle runs '
+            'inside that set, and every asset listed receives lots from another '
+            'asset in it. This engine computes one cryptocurrency at a time, '
+            'which cannot express a chain that goes out and comes back — A to B '
+            'in April and B to A in June needs A computed up to April, then B, '
+            'then A again. That is a limit of this engine, not of the tax rule: '
+            'run with tax_rules.swap_realizes = True, or compute these assets by '
+            'hand.'
+        )
+    return ordered
+
+
 def _to_eur(value):
     """Round a Decimal value to 2 decimal places for EUR currency totals
     (cost_basis, proceeds, gain_loss, fees)."""
@@ -81,7 +140,13 @@ class CryptoFIFOTracker:
         self.cursor.execute("PRAGMA journal_mode=WAL")
         self.cursor.execute("PRAGMA synchronous=NORMAL")
         self.cursor.execute("PRAGMA cache_size=10000")
-        
+
+        # Cryptocurrencies whose lots this instance has (re)built. The take
+        # side of a deferred swap may only inherit from a give side computed in
+        # this same run: a transfer row from an earlier pass can be stale, and
+        # nothing in the row says so.
+        self._computed_this_run = set()
+
         self._ensure_fifo_tables()
     
     def _ensure_fifo_tables(self):
@@ -178,43 +243,6 @@ class CryptoFIFOTracker:
                 'database does not have it. Run: python3 '
                 'calculators/update_fifo_schema_swap_transfers.py <db>'
             )
-
-        if not SWAP_REALIZES:
-            # Scaffolding, to be removed by task 11 together with the state it
-            # warns about: both sides of a deferred swap are implemented (tasks
-            # 9 and 10), but nothing orders the cryptocurrencies so that the
-            # asset given up is always computed before the asset that inherits
-            # from it. calculators/calculate_fifo.py:48-52 processes them
-            # alphabetically (SELECT DISTINCT cryptocurrency ORDER BY
-            # cryptocurrency), and its per-crypto except at :118-121 turns the
-            # engine's refusal into a printed line and carries on.
-            #
-            # The refusal itself only happens while the swap has no transfer
-            # row yet, and that is the dangerous part. Measured on a seeded
-            # database: give side ZZZ, take side AAA, so the driver takes AAA
-            # first. Run 1 in the correct order gives AAA a lot dated
-            # 2024-01-10 at EUR 1000. An older, cheaper ZZZ purchase then
-            # arrives (2022-01-10, EUR 500). Run 2 — alphabetical, which is
-            # what the driver does — raises nothing, prints nothing, and
-            # leaves AAA on the 2024 date and EUR 1000, while
-            # swap_lot_transfers now says 2022-01-10 and EUR 500: the two
-            # tables disagree and the inherited date is the previous run's.
-            # On a 2025 disposal that is the difference between exempt and
-            # taxable.
-            bar = '!' * 70
-            print(f"  {bar}")
-            print('  WARNING: swap deferral is INCOMPLETE in this build.')
-            print('  Both sides of a deferred swap work (tasks 9 and 10), but nothing')
-            print('  computes the asset given up before the asset that inherits from it:')
-            print('  a full run goes in alphabetical order. That wrong order refuses')
-            print('  only while the swap has no transfer row yet. Once any previous run')
-            print('  has written one, the asset received silently rebuilds its lots from')
-            print('  those stale rows — the inherited acquisition date, the one that')
-            print('  decides the 365 days, is then the previous run one, and fifo_lots')
-            print('  and swap_lot_transfers are left disagreeing with each other.')
-            print('  Do NOT use these numbers for any tax return. Task 11 orders the')
-            print('  cryptocurrencies by dependency and removes this warning.')
-            print(f"  {bar}")
 
         # Get all transactions for this crypto, ordered by date
         query = '''
@@ -390,12 +418,45 @@ class CryptoFIFOTracker:
                             f"swap {trans['swap_group_id']}: no lot transfer recorded "
                             f'for {cryptocurrency}. Given up in that swap: '
                             f"{', '.join(given_up) if given_up else 'nothing on record'}. "
-                            'Either that asset has not been computed yet in this run — '
-                            'the driver goes alphabetically, so the asset received can '
-                            'come first — or computing it produced no transfer at all, '
-                            'which it reports on its own side. This branch cannot tell '
-                            'the two apart: compute the asset given up and read what it '
-                            'says.'
+                            'Either that asset has not been computed in this run — '
+                            'calculators/calculate_fifo.py orders the cryptocurrencies '
+                            'by dependency, a single calculate_fifo_lots() call cannot '
+                            '— or computing it produced no transfer at all, which it '
+                            'reports on its own side. This branch cannot tell the two '
+                            'apart: compute the asset given up and read what it says.'
+                        )
+                    # Transfer rows exist, which does not make them this run's.
+                    # They are written by the give side, and the give side
+                    # writes what its purchase history says at the time: a
+                    # purchase imported since then changes which lot the
+                    # disposal consumes, hence the date and the cost that
+                    # travel here. Nothing in a transfer row records that, so
+                    # the only honest test is whether this invocation computed
+                    # the asset given up. `if not slices` above does not cover
+                    # it — it fires while there is no row at all, and the
+                    # dangerous case is a row that is there and out of date.
+                    # swap_dependency_order orders a full run; a single-crypto
+                    # call, which is how a shell session computes one asset,
+                    # has no order to speak of.
+                    give_assets = [r[0] for r in self.cursor.execute(
+                        "SELECT DISTINCT cryptocurrency FROM transactions "
+                        "WHERE swap_group_id = ? AND transaction_type = 'SELL' "
+                        'ORDER BY cryptocurrency',
+                        (trans['swap_group_id'],)).fetchall()]
+                    stale = [a for a in give_assets if a not in self._computed_this_run]
+                    if stale:
+                        raise ValueError(
+                            f"swap {trans['swap_group_id']}: {cryptocurrency} inherits "
+                            f"lots from {', '.join(stale)}, which this run has not "
+                            'computed. The transfer rows on record may be from an '
+                            'earlier pass, and nothing in them says whether the '
+                            'purchase history behind them has since changed — '
+                            'inheriting from them would carry an acquisition date '
+                            'that is the earlier pass one, the date that decides the '
+                            '365-day exemption, and leave fifo_lots and '
+                            'swap_lot_transfers contradicting each other. Run '
+                            'calculators/calculate_fifo.py, which orders the '
+                            'cryptocurrencies by dependency.'
                         )
                     received = Decimal(str(trans['amount']))
                     total_from = sum(Decimal(str(s['amount_from'])) for s in slices)
@@ -664,6 +725,7 @@ class CryptoFIFOTracker:
                 ))
 
             self.conn.commit()
+            self._computed_this_run.add(cryptocurrency)
 
             print(f"  ✓ Processed {buys:,} purchases, {sells:,} sales")
 

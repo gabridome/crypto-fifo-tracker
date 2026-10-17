@@ -903,67 +903,6 @@ def test_two_buy_legs_in_one_swap_group_only_warn_on_the_default_path(db_path, c
     assert gain == 2000.0, 'the default path must still realize the disposal'
 
 
-def test_deferral_warns_loudly_that_the_chain_is_incomplete_until_task_11(
-        db_path, monkeypatch, capsys):
-    """Until task 11 the chain can be left stale without saying so.
-
-    Both sides of a deferred swap work now (tasks 9 and 10), so the reason has
-    changed twice and the warning with it. What is still missing is an order,
-    and the earlier wording — that the wrong order is loud because the engine
-    refuses — was true only on a database where no transfer had ever been
-    written. Measured otherwise: with a transfer row from any previous run the
-    asset received rebuilds its lots from THAT row, raising nothing and
-    printing nothing, so the inherited acquisition date is the previous run's
-    and the two tables end up disagreeing. A warning that says the wrong order
-    is caught invites exactly the run that is not, which is why the
-    conditional half is asserted here and not only the alarming half.
-    Asserted in both directions: absent on the default path, which has no
-    scaffolding to warn about.
-    """
-    _seed_swap(db_path)
-
-    tracker = CryptoFIFOTracker(db_path)
-    try:
-        tracker.calculate_fifo_lots('ETH')
-    finally:
-        tracker.close()
-    default_out = capsys.readouterr().out
-    assert 'INCOMPLETE' not in default_out, 'the default path has no scaffolding to warn about'
-
-    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
-    tracker = CryptoFIFOTracker(db_path)
-    try:
-        tracker.calculate_fifo_lots('ETH')
-    finally:
-        tracker.close()
-    deferred_out = capsys.readouterr().out
-
-    assert 'INCOMPLETE' in deferred_out
-    assert 'Do NOT use these numbers for any tax return' in deferred_out
-    assert 'Task 11' in deferred_out, 'the warning must say what removes it'
-    assert 'stale' in deferred_out, (
-        'the warning must name the silent failure: the asset received rebuilds its '
-        'lots from transfer rows left by an earlier run'
-    )
-    assert 'only while' in deferred_out, (
-        'the warning must say that the refusal is conditional. Unqualified — "the '
-        'wrong order is loud, the engine refuses" — it invites the one run that is '
-        'silent, which is any run after the first'
-    )
-    # The whole fragment, not just 'previous run': that phrase appears on the
-    # conditional line above as well, so the loose version of this assertion
-    # passed with the claim about the date mutated away.
-    assert 'is then the previous run one' in deferred_out, (
-        'and that the inherited acquisition date, the one deciding the 365 days, is '
-        'then the previous run one'
-    )
-    assert 'inherit its date and cost yet' not in deferred_out, (
-        'that line claimed the received asset does not inherit yet — task 10 made '
-        'it inherit, and a false line here is read by someone deciding whether to '
-        'trust the figures'
-    )
-
-
 def _seed_two_sells_in_one_swap_group(db_path):
     """ETH disposed of twice under one swap group, plus an unrelated crypto.
 
@@ -1689,10 +1628,16 @@ def test_a_duplicated_take_leg_refuses_to_inherit_the_same_cost_twice(db_path, m
 
     tracker = CryptoFIFOTracker(db_path)
     try:
-        with pytest.raises(ValueError, match='swap-dupbuy') as exc:
+        # The phrase of this guard, not the group name: every message in this
+        # branch of the engine carries the group id, including the staleness
+        # one added in task 11, so match='swap-dupbuy' would pass on a run
+        # that never reached the leg count at all.
+        with pytest.raises(ValueError, match='more than one BUY leg') as exc:
             tracker.calculate_fifo_lots('ETH')
     finally:
         tracker.close()
+    assert 'swap-dupbuy' in str(exc.value), \
+        'the message must name the group to go and look at'
     assert '2 BUY legs' in str(exc.value), (
         'the message must say how many legs were found, so the import can be fixed'
     )
@@ -1789,26 +1734,30 @@ def test_lot_transfers_summing_to_zero_units_stop_instead_of_allocating_nothing(
     _db_with_unchecked_transfers_table(db_path)
     monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
 
+    # One tracker across the tampering, deliberately: the take side only
+    # inherits from a give side computed in the same invocation, so computing
+    # USDT on a fresh instance would be refused as stale before this
+    # invariant was ever read — the guard nearest the symptom, not the one
+    # under test. The UPDATE goes through a second connection because the
+    # engine never writes amount_from = 0 itself.
     tracker = CryptoFIFOTracker(db_path)
     try:
         tracker.calculate_fifo_lots('ETH')   # writes the transfer normally
-    finally:
-        tracker.close()
 
-    conn = sqlite3.connect(db_path)
-    try:  # only possible because the CHECK is gone
-        conn.execute('UPDATE swap_lot_transfers SET amount_from = 0')
-        conn.commit()
-    finally:
-        conn.close()
+        conn = sqlite3.connect(db_path)
+        try:  # only possible because the CHECK is gone
+            conn.execute('UPDATE swap_lot_transfers SET amount_from = 0')
+            conn.commit()
+        finally:
+            conn.close()
 
-    tracker = CryptoFIFOTracker(db_path)
-    try:
-        with pytest.raises(ValueError, match='amount_from') as exc:
+        with pytest.raises(ValueError, match='violated schema invariant') as exc:
             tracker.calculate_fifo_lots('USDT')
     finally:
         tracker.close()
     assert 'swap-1' in str(exc.value), 'the message must name the group to go and look at'
+    assert 'amount_from' in str(exc.value), \
+        'the message must name the column whose constraint is missing'
 
 
 def _seed_deferred_swap_with_incomplete_purchase_history(db_path):
@@ -1962,3 +1911,394 @@ def test_a_swap_group_with_no_disposal_leg_at_all_says_so(db_path, monkeypatch):
 
     assert 'Given up in that swap: nothing on record' in str(exc.value), \
         'an empty list of assets given up must read as a fact, not as a blank'
+
+
+# ---------------------------------------------------------------------------
+# Task 11 — the processing order. Deferral makes one crypto's lots depend on
+# another's, so the asset given up must be computed before the asset that
+# inherits from it, and the engine must say so when that is impossible.
+# ---------------------------------------------------------------------------
+
+from calculators.crypto_fifo_tracker import swap_dependency_order  # noqa: E402
+
+
+def test_order_puts_the_asset_given_up_first(db_path):
+    _seed_swap(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        order = swap_dependency_order(conn, ['USDT', 'ETH'])
+    finally:
+        conn.close()
+
+    assert order.index('ETH') < order.index('USDT')
+
+
+def test_order_keeps_unrelated_cryptos_and_is_stable(db_path):
+    _seed_swap(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        order = swap_dependency_order(conn, ['USDT', 'BTC', 'ETH'])
+    finally:
+        conn.close()
+
+    assert sorted(order) == ['BTC', 'ETH', 'USDT']
+    assert order.index('ETH') < order.index('USDT')
+
+
+def test_order_refuses_a_cycle(db_path):
+    """A → B and B → A cannot both inherit: stop instead of picking one."""
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2024-01-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='AAA', amount=1.0, price_per_unit=1.0, total_value=1.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+            imported_at='2026-01-01T00:00:00', record_hash='c1', swap_group_id='s1')
+        _tx(conn, transaction_date='2024-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='BBB', amount=1.0, price_per_unit=1.0, total_value=1.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+            imported_at='2026-01-01T00:00:00', record_hash='c2', swap_group_id='s1')
+        _tx(conn, transaction_date='2024-02-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='BBB', amount=1.0, price_per_unit=1.0, total_value=1.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+            imported_at='2026-01-01T00:00:00', record_hash='c3', swap_group_id='s2')
+        _tx(conn, transaction_date='2024-02-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='AAA', amount=1.0, price_per_unit=1.0, total_value=1.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+            imported_at='2026-01-01T00:00:00', record_hash='c4', swap_group_id='s2')
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        with pytest.raises(ValueError, match='impossible to order') as exc:
+            swap_dependency_order(conn, ['AAA', 'BBB'])
+    finally:
+        conn.close()
+
+    message = str(exc.value)
+    assert 'cycle' in message, 'the message must name what makes the order impossible'
+    assert "'AAA'" in message and "'BBB'" in message, \
+        'the message must name the assets to go and look at'
+
+
+def test_an_empty_swap_group_id_is_not_a_swap_and_invents_no_cycle(db_path):
+    """'' is not a swap group here either, so it must not create a dependency.
+
+    doc/schema.sql declares transactions.swap_group_id as plain TEXT — no
+    CHECK (<> ''), unlike swap_lot_transfers.swap_group_id in the same file —
+    so an empty string is storable, and the engine already reads it as
+    not-a-swap in both places it looks: the swap_takes query filters
+    `swap_group_id <> ''` and every per-transaction branch tests truthiness.
+    An ordering that disagreed would join every '' row to every other '' row,
+    and two unrelated disposals in opposite directions would then be reported
+    as a cycle — stopping a whole deferred run over transactions that are not
+    swaps at all.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        for tag, (crypto, kind) in enumerate((('AAA', 'SELL'), ('BBB', 'BUY'),
+                                              ('BBB', 'SELL'), ('AAA', 'BUY'))):
+            _tx(conn, transaction_date='2024-01-01T10:00:00+00:00', transaction_type=kind,
+                cryptocurrency=crypto, amount=1.0, price_per_unit=1.0, total_value=1.0,
+                fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+                imported_at='2026-01-01T00:00:00', record_hash=f'e{tag}',
+                swap_group_id='')
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        assert swap_dependency_order(conn, ['AAA', 'BBB']) == ['AAA', 'BBB']
+    finally:
+        conn.close()
+
+
+def test_the_same_pair_swapped_twice_is_one_dependency_not_a_cycle(db_path):
+    """Two swap groups, same direction: the ordinary case, and the one that
+    breaks without the duplicate-edge guard.
+
+    Each (give, take) row raises the take side's indegree, and each give side
+    is ordered once, so it can only pay that count down once. Two ETH→USDT
+    swaps — swapping the same pair twice is as ordinary as it gets — would
+    leave USDT at indegree 1 forever and be reported as a cycle, stopping a
+    run that has no cycle in it at all.
+    """
+    _seed_swap(db_path)                                   # ETH → USDT, swap-1
+    _seed_deferred_swap(db_path, 'ETH', 'swap-2', take_asset='USDT', tag='t2')
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        assert swap_dependency_order(conn, ['USDT', 'ETH']) == ['ETH', 'USDT']
+    finally:
+        conn.close()
+
+
+def test_a_swap_group_with_both_legs_in_one_asset_is_no_dependency_on_itself(db_path):
+    """An asset cannot be ordered before itself.
+
+    A group whose SELL and BUY legs name the same cryptocurrency is an import
+    defect, and the engine has its own say about those groups. What the order
+    must not do is turn it into a self-dependency: that asset would never
+    become ready and the run would stop with a cycle message, which hides the
+    import defect behind a limit of the engine.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2024-01-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='AAA', amount=1.0, price_per_unit=1.0, total_value=1.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+            imported_at='2026-01-01T00:00:00', record_hash='sl1', swap_group_id='self-1')
+        _tx(conn, transaction_date='2024-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='AAA', amount=2.0, price_per_unit=1.0, total_value=2.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='s',
+            imported_at='2026-01-01T00:00:00', record_hash='sl2', swap_group_id='self-1')
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        assert swap_dependency_order(conn, ['AAA']) == ['AAA']
+    finally:
+        conn.close()
+
+
+def test_a_swap_leg_outside_the_requested_cryptos_is_ignored(db_path):
+    """Ordering a subset must not fail over an asset it was not asked about.
+
+    The caller decides which cryptocurrencies to order — the driver passes all
+    of them, a shell call can pass one. A swap whose other leg is not in the
+    list has nothing to say about the order of the list.
+    """
+    _seed_swap(db_path)                                   # ETH → USDT
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        assert swap_dependency_order(conn, ['ETH']) == ['ETH']
+    finally:
+        conn.close()
+
+
+def _read_driver():
+    with open(os.path.join(PROJECT_ROOT, 'calculators', 'calculate_fifo.py'),
+              encoding='utf-8') as f:
+        return f.read()
+
+
+def _seed_round_trip(db_path):
+    """AAA bought, swapped for BBB, and later swapped back into AAA.
+
+    Two swap groups in opposite directions: a dependency cycle for the
+    ordering, and four ordinary legs for the engine on the default path.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2023-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='AAA', amount=1.0, price_per_unit=100.0, total_value=100.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='rt1')
+        _tx(conn, transaction_date='2024-04-10T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='AAA', amount=1.0, price_per_unit=300.0, total_value=300.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='rt2', swap_group_id='rt-out')
+        _tx(conn, transaction_date='2024-04-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='BBB', amount=10.0, price_per_unit=30.0, total_value=300.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='rt3', swap_group_id='rt-out')
+        _tx(conn, transaction_date='2024-06-10T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='BBB', amount=10.0, price_per_unit=40.0, total_value=400.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='rt4', swap_group_id='rt-back')
+        _tx(conn, transaction_date='2024-06-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='AAA', amount=1.0, price_per_unit=400.0, total_value=400.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='rt5', swap_group_id='rt-back')
+    finally:
+        conn.close()
+
+
+def test_the_driver_still_computes_a_round_trip_on_the_default_path(db_path):
+    """The already-declared figures get no new way to fail.
+
+    A → B in April and B → A in June is a cycle for the dependency order, and
+    swap_dependency_order refuses a cycle rather than picking a side. Under
+    swap_realizes True nothing inherits, so there is no dependency to honour:
+    calling the ordering unconditionally would stop this whole run — every
+    cryptocurrency, not just these two — over a rule that is not in force.
+    Reproduced before the gate was added: the run died in main() before the
+    per-crypto loop, so its try/except per crypto never saw it, and nothing
+    was calculated at all.
+
+    Run as a subprocess, which is what the web app does too
+    (web/app.py:1297), because the gate is the driver's and the setting is
+    read at import time.
+    """
+    _seed_round_trip(db_path)
+
+    env = dict(os.environ, FIFO_DB=db_path)
+    r = subprocess.run([sys.executable, os.path.join(PROJECT_ROOT, 'calculators',
+                                                     'calculate_fifo.py')],
+                       capture_output=True, text=True, env=env)
+    out = r.stdout + r.stderr
+
+    assert 'cycle' not in out, f'the default path must not order by dependency:\n{out}'
+    assert 'Fatal error' not in out, out
+    assert 'Processing order (swap deferral)' not in out, \
+        'the deferral-only line must not be printed on the default path'
+
+    conn = sqlite3.connect(db_path)
+    try:
+        lots = conn.execute('SELECT cryptocurrency, COUNT(*) FROM fifo_lots '
+                            'GROUP BY cryptocurrency ORDER BY cryptocurrency').fetchall()
+        gain = conn.execute('SELECT ROUND(SUM(gain_loss),2) FROM sale_lot_matches').fetchone()[0]
+    finally:
+        conn.close()
+
+    assert lots == [('AAA', 2), ('BBB', 1)], \
+        f'both cryptocurrencies must still be calculated, got {lots}'
+    assert gain == 300.0, 'both disposals must still realize: 200 on AAA, 100 on BBB'
+
+
+def test_the_driver_orders_by_dependency_only_under_deferral():
+    """Pins the two lines in the driver that no in-process test can reach.
+
+    Driving main() with swap_realizes False is not available: the driver
+    imports the engine as a top-level module while the tests import
+    `calculators.crypto_fifo_tracker`, so the two hold separate SWAP_REALIZES
+    and monkeypatching one does not reach the other (doc/TODO.md records it,
+    from the task 9 review), and no country profile in config.py declares the
+    rule False. So the test above exercises the default path for real, in a
+    subprocess, and this one pins the half of the gate that only runs under
+    deferral.
+
+    The import spelling is pinned here too, and that is not cosmetic: this
+    file puts both the project root and calculators/ on sys.path (lines
+    11-12), so `from calculators.crypto_fifo_tracker import …` would load the
+    engine a second time, as a second module object with its own
+    SWAP_REALIZES.
+    """
+    source = _read_driver()
+
+    assert ('from crypto_fifo_tracker import CryptoFIFOTracker, swap_dependency_order'
+            in source), 'the driver must take the ordering from the engine it already imports'
+    assert 'from calculators.crypto_fifo_tracker import' not in source, \
+        'that spelling loads the engine a second time, with a second SWAP_REALIZES'
+
+    gated = """    if not SWAP_REALIZES:
+        cryptos = swap_dependency_order(tracker.conn, cryptos)"""
+    assert gated in source, (
+        'the ordering must be called, and only when swap_realizes is False: '
+        'under the declared rule a round trip in the data would stop the whole run'
+    )
+    assert source.index(gated) < source.index('for idx, crypto in enumerate(cryptos, 1)'), \
+        'the order must be decided before the per-crypto loop walks it'
+
+
+def _older_cheaper_purchase_of_the_give_side(db_path, crypto='ZZZ'):
+    """A purchase of the asset given up that arrives after the first run.
+
+    Older and cheaper than the one already on record, so the FIFO disposal now
+    consumes THIS lot: the date and cost that travel to the asset received
+    change from 2020 / EUR 1000 to 2019 / EUR 500. A forgotten export, or one
+    imported late, is the ordinary way this happens.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2019-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency=crypto, amount=1.0, price_per_unit=500.0, total_value=500.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='late-buy')
+    finally:
+        conn.close()
+
+
+def _lots(db_path, crypto):
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute("""SELECT purchase_date, ROUND(original_amount,8),
+                                      ROUND(cost_basis,2)
+                               FROM fifo_lots WHERE cryptocurrency = ?
+                               ORDER BY purchase_date, id""", (crypto,)).fetchall()
+    finally:
+        conn.close()
+
+
+def test_the_take_side_refuses_transfer_rows_left_by_an_earlier_run(db_path, monkeypatch):
+    """Ordering the full run is necessary and not sufficient.
+
+    `if not slices` refuses only while the swap has NO transfer row at all.
+    Once a previous run has written one, computing the asset received on its
+    own rebuilds its lots from that row and says nothing: measured here, the
+    inherited date stays 2020 and the cost EUR 1000 while the asset given up
+    now carries 2019 and EUR 500, so fifo_lots and swap_lot_transfers are left
+    contradicting each other — and on a disposal a year later that is the
+    difference between exempt and taxable.
+
+    swap_dependency_order fixes a full run; it cannot reach a single-crypto
+    call like this one, which is how a shell session or any per-crypto entry
+    point computes. So the inheritance requires the give side from THIS
+    invocation, tracked in the instance.
+    """
+    _seed_deferred_swap(db_path, 'ZZZ', 'swap-stale', take_asset='AAA', tag='st')
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ZZZ')
+        tracker.calculate_fifo_lots('AAA')
+    finally:
+        tracker.close()
+    assert _lots(db_path, 'AAA') == [('2020-01-10T10:00:00+00:00', 3000.0, 1000.0)], \
+        'the first run must inherit the only purchase then on record'
+
+    _older_cheaper_purchase_of_the_give_side(db_path)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='this run has not computed') as exc:
+            tracker.calculate_fifo_lots('AAA')      # only the take side
+    finally:
+        tracker.close()
+
+    assert 'ZZZ' in str(exc.value), 'the message must name the asset to compute first'
+    assert _lots(db_path, 'AAA') == [('2020-01-10T10:00:00+00:00', 3000.0, 1000.0)], \
+        'refusing must leave the previous figures where they were, not delete them'
+
+
+def test_a_full_run_in_dependency_order_inherits_the_recomputed_give_side(db_path, monkeypatch):
+    """The same database, computed the way the driver computes it: no refusal.
+
+    The guard must refuse staleness, not the normal path. Here the order comes
+    from swap_dependency_order, both sides are computed in one invocation, and
+    the asset received picks up the recomputed date and cost — 2019 and EUR
+    500, the lot the disposal actually consumed.
+    """
+    _seed_deferred_swap(db_path, 'ZZZ', 'swap-stale', take_asset='AAA', tag='st')
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ZZZ')
+        tracker.calculate_fifo_lots('AAA')
+    finally:
+        tracker.close()
+
+    _older_cheaper_purchase_of_the_give_side(db_path)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        order = swap_dependency_order(tracker.conn, ['AAA', 'ZZZ'])
+        assert order == ['ZZZ', 'AAA'], 'the asset given up must come first'
+        for crypto in order:
+            tracker.calculate_fifo_lots(crypto)
+    finally:
+        tracker.close()
+
+    assert _lots(db_path, 'AAA') == [('2019-01-10T10:00:00+00:00', 3000.0, 500.0)], \
+        'the asset received must inherit the lot the disposal consumed in this run'

@@ -11,8 +11,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from crypto_fifo_tracker import CryptoFIFOTracker
-from config import DATABASE_PATH, tax_rule_banner
+from crypto_fifo_tracker import CryptoFIFOTracker, swap_dependency_order
+from config import DATABASE_PATH, SWAP_REALIZES, tax_rule_banner
 DB_PATH = DATABASE_PATH
 
 
@@ -54,6 +54,17 @@ def main():
     cryptos = [row[0] for row in tracker.cursor.fetchall()]
     
     print(f"✓ Found {len(cryptos)} cryptocurrency(ies): {', '.join(cryptos)}")
+
+    # Only under deferral, where the asset received inherits the lots of the
+    # asset given up and therefore has to be computed after it. With
+    # swap_realizes True no cryptocurrency depends on another, so the ordering
+    # buys nothing — and it would hand the already-declared figures a new way
+    # to fail: swapping A for B and later B for A is a cycle, which
+    # swap_dependency_order refuses, so one round trip in the data would stop
+    # a whole run over a rule that is not in force.
+    if not SWAP_REALIZES:
+        cryptos = swap_dependency_order(tracker.conn, cryptos)
+        print(f"✓ Processing order (swap deferral): {', '.join(cryptos)}")
     
     # Get transaction counts
     print(f"\nTransaction counts by cryptocurrency:")
