@@ -2074,6 +2074,13 @@ confirms it, and every report that depends on it prints it.
 
 - [ ] **Step 2: Demote the rule in both guides**
 
+Before writing, run `grep -rn 'doc/compliance.md' config.py` and fix the three
+comment references if this file ended up with a different name: they are the
+only pointers to it from code, nothing resolves them at runtime, so they fail
+silently rather than loudly. Task 7 left a one-sentence pointer near the top of
+each guide; this step is the full rewrite that replaces the "settled law"
+framing.
+
 `doc/en/crypto_to_crypto_guide.md`, replace line 9:
 
 ```markdown
