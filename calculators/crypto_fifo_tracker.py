@@ -22,6 +22,9 @@ def swap_dependency_order(conn, cryptos):
     Only matters under deferral, where the asset received inherits the lots of
     the asset given up. Alphabetical within each layer, so the order is stable
     between runs. Raises ValueError on a cycle instead of choosing a side.
+
+    Works on any sqlite3 connection: the rows are unpacked positionally, so
+    nothing here depends on the caller having set row_factory.
     """
     # `swap_group_id <> ''` for the same reason the swap_takes query in
     # calculate_fifo_lots has it, and the per-transaction branches test
@@ -39,8 +42,13 @@ def swap_dependency_order(conn, cryptos):
     """)
     edges = {c: set() for c in cryptos}          # give → takes that depend on it
     indegree = {c: 0 for c in cryptos}
-    for row in cur.fetchall():
-        give, take = row['give_crypto'], row['take_crypto']
+    # Unpacked positionally rather than read by name: a name would require the
+    # caller to have set row_factory = sqlite3.Row, and this is a module-level
+    # function that takes whatever connection it is handed — CryptoFIFOTracker
+    # sets that factory, a script opening its own connection does not, and the
+    # failure would be a bare TypeError from this loop. Measured: unpacking
+    # reads the same two columns under both factories.
+    for give, take in cur.fetchall():
         if give in edges and take in indegree and take not in edges[give] and give != take:
             edges[give].add(take)
             indegree[take] += 1

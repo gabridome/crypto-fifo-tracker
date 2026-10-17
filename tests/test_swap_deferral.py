@@ -2302,3 +2302,24 @@ def test_a_full_run_in_dependency_order_inherits_the_recomputed_give_side(db_pat
 
     assert _lots(db_path, 'AAA') == [('2019-01-10T10:00:00+00:00', 3000.0, 500.0)], \
         'the asset received must inherit the lot the disposal consumed in this run'
+
+
+def test_the_order_does_not_depend_on_the_callers_row_factory(db_path):
+    """A plain sqlite3 connection must work: this is a module-level function.
+
+    Reading the rows by name (`row['give_crypto']`) requires the CALLER to
+    have set `row_factory = sqlite3.Row`. CryptoFIFOTracker sets it, so the
+    driver is fine, and the dependency is written down nowhere: a script or a
+    later caller that opens its own connection gets `TypeError: tuple indices
+    must be integers or slices, not str` with nothing to explain it. Measured:
+    positional unpacking reads the same two columns under both factories, so
+    the function has no business caring which one is set.
+    """
+    _seed_swap(db_path)
+
+    conn = sqlite3.connect(db_path)          # no row_factory
+    try:
+        assert conn.row_factory is None, 'the point of this test is the default factory'
+        assert swap_dependency_order(conn, ['USDT', 'ETH']) == ['ETH', 'USDT']
+    finally:
+        conn.close()
