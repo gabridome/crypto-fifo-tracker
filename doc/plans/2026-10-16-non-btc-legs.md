@@ -1453,8 +1453,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DATABASE_PATH
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS swap_lot_transfers (
+# One statement per element, executed inside the explicit transaction.
+# NOT executescript(): it commits whatever transaction is open before it runs,
+# so a BEGIN around it is theatre and the rollback below would save nothing.
+STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS swap_lot_transfers (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     swap_group_id        TEXT NOT NULL,
     from_cryptocurrency  TEXT NOT NULL,
@@ -1464,19 +1467,20 @@ CREATE TABLE IF NOT EXISTS swap_lot_transfers (
     amount_from          REAL NOT NULL,
     cost_basis           REAL NOT NULL,
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_group
-    ON swap_lot_transfers(swap_group_id);
-CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_to
-    ON swap_lot_transfers(to_cryptocurrency);
-"""
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_group
+    ON swap_lot_transfers(swap_group_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_to
+    ON swap_lot_transfers(to_cryptocurrency)""",
+)
 
 
 def migrate(db_path):
     conn = sqlite3.connect(db_path)
     try:
         conn.execute('BEGIN')
-        conn.executescript(SCHEMA)
+        for statement in STATEMENTS:
+            conn.execute(statement)
         conn.commit()
         print('✓ swap_lot_transfers present')
     except Exception:
@@ -1495,7 +1499,7 @@ if __name__ == '__main__':
 Run: `venv/bin/pytest tests/test_swap_deferral.py -v`
 Expected: 1 passed.
 
-- [ ] **Step 5: Add the same DDL to `doc/schema.sql`** (verbatim from `SCHEMA` above), so test fixtures and a fresh install carry it.
+- [ ] **Step 5: Add the same DDL to `doc/schema.sql`** (the three statements from `STATEMENTS` above, each terminated with `;`), so test fixtures and a fresh install carry it. The test's strip pattern matches on `swap_lot_transfers`, so keep the table and index names on the same statement as the keyword.
 
 - [ ] **Step 6: Run the suite and commit**
 
