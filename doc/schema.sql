@@ -64,16 +64,26 @@ CREATE TABLE IF NOT EXISTS sale_lot_matches (
 -- Swap lot transfers table: lot inheritance across a deferred crypto-to-crypto
 -- swap. The acquisition date and cost of the asset given up travel to the
 -- asset received; the gain does not. One row per lot slice moved.
+-- CHECKs on the TEXT columns: NOT NULL alone lets the empty string through,
+-- and task 9's own fallback (swap_takes.get(group, '')) can produce exactly
+-- that for to_cryptocurrency when a swap's BUY leg never imported — a row
+-- that inserts silently, consumes a lot, and realizes no gain for it.
 CREATE TABLE IF NOT EXISTS swap_lot_transfers (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    swap_group_id        TEXT NOT NULL,
-    from_cryptocurrency  TEXT NOT NULL,
-    to_cryptocurrency    TEXT NOT NULL,
+    swap_group_id        TEXT NOT NULL CHECK (swap_group_id <> ''),
+    source_fifo_lot_id   INTEGER NOT NULL,
+    from_cryptocurrency  TEXT NOT NULL CHECK (from_cryptocurrency <> ''),
+    to_cryptocurrency    TEXT NOT NULL CHECK (to_cryptocurrency <> ''),
     swap_date            TEXT NOT NULL,
     source_purchase_date TEXT NOT NULL,
-    amount_from          REAL NOT NULL,
-    cost_basis           REAL NOT NULL,
-    created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+    amount_from          REAL NOT NULL CHECK (amount_from > 0),
+    cost_basis           REAL NOT NULL CHECK (cost_basis >= 0),
+    -- TEXT + explicit default, not TIMESTAMP DEFAULT CURRENT_TIMESTAMP like
+    -- the rest of this file: TIMESTAMP has NUMERIC affinity in SQLite, so a
+    -- stored ISO datetime string would be subject to silent coercion. TEXT
+    -- says what it actually is. Deliberate — do not "uniform" it back.
+    created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (source_fifo_lot_id) REFERENCES fifo_lots(id)
 );
 
 -- Indexes for performance
@@ -92,8 +102,18 @@ CREATE INDEX IF NOT EXISTS idx_sale_matches_crypto ON sale_lot_matches(cryptocur
 CREATE INDEX IF NOT EXISTS idx_sale_matches_sale_date ON sale_lot_matches(sale_date);
 CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_group
     ON swap_lot_transfers(swap_group_id);
-CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_to
-    ON swap_lot_transfers(to_cryptocurrency);
+-- Targets swap_lot_transfers.from_cryptocurrency, not to_cryptocurrency:
+-- the DELETE in task 9 filters on the give side and runs on every engine
+-- pass for every crypto; the take side is already covered by the group index.
+CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_from
+    ON swap_lot_transfers(from_cryptocurrency);
+-- The only idempotency invariant expressible here: one lot moves into one
+-- swap group's inheritance at most once. A swap group is exactly one SELL
+-- (see importers/non_btc_valuation.py:_swap_id), and FIFO consumption for
+-- one SELL visits each lot once, so this cannot be violated by a correct
+-- run — only by a bug re-running consumption for the same group.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_swap_lot_transfers_unique_group_lot
+    ON swap_lot_transfers(swap_group_id, source_fifo_lot_id);
 
 -- View: Transaction summary by exchange
 CREATE VIEW IF NOT EXISTS v_exchange_summary AS

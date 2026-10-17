@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from importers.import_non_btc_legs import SOURCE_SUFFIX, import_non_btc_legs  # noqa: E402
+from conftest import _columns, _index_columns, _index_names  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
 SCHEMA_FILE = os.path.join(PROJECT_ROOT, 'doc', 'schema.sql')
@@ -64,32 +65,6 @@ def _pre_migration_schema():
     )
 
     return schema
-
-
-def _columns(db_path, table):
-    conn = sqlite3.connect(db_path)
-    try:
-        return [r[1] for r in conn.execute(f'PRAGMA table_info({table})')]
-    finally:
-        conn.close()
-
-
-def _index_names(db_path, table):
-    conn = sqlite3.connect(db_path)
-    try:
-        return [r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?", (table,))]
-    finally:
-        conn.close()
-
-
-def _index_columns(db_path, index_name):
-    """Column names covered by an index, via PRAGMA index_info — not just its name."""
-    conn = sqlite3.connect(db_path)
-    try:
-        return [r[2] for r in conn.execute(f'PRAGMA index_info({index_name})')]
-    finally:
-        conn.close()
 
 
 @pytest.fixture
