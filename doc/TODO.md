@@ -123,6 +123,41 @@
 
 ## Operativo / Infrastruttura
 
+- [ ] **Un BUY senza prezzo unitario perde il costo di base nel match** —
+  preesistente, non introdotto dal branch non-BTC. Il lotto prende
+  `cost_basis` da `total_value` ma lascia `purchase_price_per_unit = 0`; il
+  match però ricalcola il costo **dal prezzo unitario**, non da `cost_basis`,
+  quindi del costo resta solo la commissione e la plusvalenza risulta
+  sovrastimata. **Latente, non vivo**: sul database di produzione, interrogato
+  in sola lettura il 2026-10-17, i lotti con prezzo unitario assente e costo
+  presente sono **zero**. Le vie per arrivarci sono `import_standard_csv.py` e
+  il form `/manual` quando il prezzo manca. Il ramo che eredita del task 10
+  evita la trappola mettendo `purchase_price_per_unit = cost / qty`: la
+  trappola è stata vista ma non chiusa dove già mordeva.
+  (Dal code review del task 10, 2026-10-17.)
+- [ ] **Tre convenzioni diverse sulla stessa data** — `ORDER BY
+  transaction_date` ordina le stringhe, `_acquisition_key` confronta istanti
+  assoluti, `holding_period_days` confronta la data di calendario **come
+  scritta**. Con le sole forme che gli importer dedicati producono ('+00:00' e
+  naive) le tre concordano; con un offset diverso da UTC divergono, e FIFO
+  consumerebbe un lotto che la convenzione del periodo di detenzione considera
+  più recente. **Latente, non vivo**: zero date con offset diverso da UTC sul
+  database di produzione (sola lettura, 2026-10-17). La via è
+  `import_standard_csv.py`, che usa `pd.to_datetime` e conserva l'offset,
+  mentre `/exchange-docs` documenta il campo come `+00:00`. Chiusura naturale:
+  normalizzare a UTC all'importazione, così le convenzioni concordano per
+  costruzione. (Dal code review del task 10, 2026-10-17.)
+- [ ] **La pista di audit di un lotto ereditato si ferma alla permuta** — il
+  drill-down di `/audit` unisce `fifo_lots.purchase_transaction_id` a
+  `transactions` e mostra commissione, sorgente e `record_hash` di quella
+  riga. Per un lotto ereditato quella riga è la gamba BUY della permuta: la
+  sua commissione non è nel costo del lotto e il suo `amount` non è la
+  quantità del lotto. Il collegamento all'acquisto da cui il costo viene
+  davvero esiste — `swap_lot_transfers.source_fifo_lot_id` — ma nessuna query
+  del progetto legge quella tabella. Da chiudere col task 12, che deve anche
+  correggere `doc/TODO.md` dove la tracciabilità è dichiarata completa.
+  (Dal code review del task 10, 2026-10-17.)
+
 - [ ] **Dichiarare esplicitamente la modalità di transazione di `sqlite3`** —
   oggi ciò che rende efficace il `rollback()` di `calculate_fifo_lots` non è
   codice nostro: è il controllo di transazione legacy del modulo `sqlite3`, che
