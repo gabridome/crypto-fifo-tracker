@@ -1335,9 +1335,14 @@ config import.
 that goes into the real filing — carries no trace of the rule either, and will
 not until the rule actually changes. Today's value is the one already filed, so
 nothing on paper is wrong; the risk is that two reports generated under
-opposite rules would be indistinguishable as files. When the jurisdiction
-answer arrives, the assumption goes into a header row or a separate
-"assumptions" sheet, outside the area that mimics the official form.
+opposite rules would be indistinguishable as files.
+
+When the jurisdiction answer arrives, the place is already identified:
+`write_summary()`'s metadata cell `A2` on the "Resumo" sheet, which today reads
+`Generato: … | Metodo FIFO | EUR` and takes `| swap_realizes=…` as one more
+segment. That sheet is generated reporting. `write_quadro7` and
+`write_quadro94a` mirror Anexo G1 Quadro 7 and Anexo J Quadro 9.4A cell for
+cell and must stay untouched, or they stop matching the official layout.
 
 - [ ] **Step 7: Run the suite and commit**
 
