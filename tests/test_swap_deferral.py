@@ -554,12 +554,14 @@ def test_engine_on_a_database_without_the_swap_group_column_stops_and_names_the_
 def test_a_second_deferral_pass_replaces_the_transfers_instead_of_doubling_them(db_path, monkeypatch):
     """The DELETE at the top is what makes a re-run idempotent per crypto.
 
-    Without it the UNIQUE (swap_group_id, source_fifo_lot_id) index turns the
-    second pass into an IntegrityError; with a DELETE that missed rows it
-    would instead double the inherited cost basis. The JOIN also pins the
-    subtler half: the lots are deleted and re-inserted on every pass, so the
-    pointer must be the id of the lot the second pass created, not the stale
-    id from the first.
+    Measured by removing the DELETE: the second pass does NOT raise
+    IntegrityError. The lots are deleted and re-inserted on every pass, so the
+    re-created lot has a new id and the UNIQUE (swap_group_id,
+    source_fifo_lot_id) index sees ('swap-1', 2) as a different row from
+    ('swap-1', 1) — two rows, inherited cost basis silently doubled, no error.
+    The DELETE is the only thing that prevents it. The JOIN pins the other
+    half: the pointer must be the id of the lot the second pass created, not
+    the stale id from the first.
     """
     _seed_swap(db_path)
     monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
@@ -583,3 +585,411 @@ def test_a_second_deferral_pass_replaces_the_transfers_instead_of_doubling_them(
     assert total == 1, 'the second pass must replace the transfer, not add one'
     assert rows == [('swap-1', 1000.0, 'ETH', '2020-01-10T10:00:00+00:00')], \
         'the pointer must resolve to the lot the second pass created'
+
+
+def _driver_loop(db_path, cryptos):
+    """One tracker, several cryptos, an exception caught per crypto, loop carried on.
+
+    This is the shape of the real driver, calculators/calculate_fifo.py:87-119:
+    it calls calculate_fifo_lots() inside a per-crypto try/except Exception on
+    one shared connection and keeps going. The engine's transactional
+    behaviour is what is under test here, not the driver's three lines of
+    reporting — but the sequence matters, because it is the next crypto's
+    commit() that decides the fate of a failed crypto's uncommitted DELETEs.
+    Returns the list of (crypto, exception) that failed.
+    """
+    failed = []
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        for crypto in cryptos:
+            try:
+                tracker.calculate_fifo_lots(crypto)
+            except Exception as e:  # the driver prints the traceback and continues
+                failed.append((crypto, e))
+    finally:
+        tracker.close()
+    return failed
+
+
+def _fifo_state(db_path, crypto):
+    conn = sqlite3.connect(db_path)
+    try:
+        lots = conn.execute('SELECT COUNT(*) FROM fifo_lots WHERE cryptocurrency = ?',
+                            (crypto,)).fetchone()[0]
+        matches = conn.execute('SELECT COUNT(*) FROM sale_lot_matches WHERE cryptocurrency = ?',
+                               (crypto,)).fetchone()[0]
+        gain = conn.execute('SELECT ROUND(SUM(gain_loss),2) FROM sale_lot_matches '
+                            'WHERE cryptocurrency = ?', (crypto,)).fetchone()[0]
+    finally:
+        conn.close()
+    return {'lots': lots, 'matches': matches, 'gain': gain}
+
+
+def _seed_two_cryptos_one_orphan_swap(db_path):
+    """ETH with a deferred swap whose BUY leg is missing, plus an unrelated crypto."""
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='o1')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='o2',
+            swap_group_id='swap-orphan')  # no BUY leg anywhere for this group
+        _tx(conn, transaction_date='2021-03-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='XYZ', amount=2.0, price_per_unit=50.0, total_value=100.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='o3')
+        _tx(conn, transaction_date='2023-07-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='XYZ', amount=1.0, price_per_unit=80.0, total_value=80.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='o4')
+    finally:
+        conn.close()
+
+
+def test_a_failing_crypto_keeps_the_fifo_data_it_had_instead_of_losing_it(db_path, monkeypatch):
+    """A raise inside calculate_fifo_lots must not destroy that crypto's data.
+
+    calculate_fifo_lots DELETEs a crypto's lots and matches before rewriting
+    them. The driver catches per crypto and keeps going on the same
+    connection, so without an explicit transaction and a rollback the NEXT
+    crypto's commit() makes the failed crypto's DELETEs permanent: ETH ends
+    up with zero lots and zero matches, committed, while the driver prints
+    that the calculation is complete and every later report simply omits ETH.
+    doc/code_guidelines.md §1.1 requires BEGIN + ROLLBACK for exactly this.
+    """
+    _seed_two_cryptos_one_orphan_swap(db_path)
+
+    assert _driver_loop(db_path, ['ETH', 'XYZ']) == [], 'the default run must not fail'
+    before = _fifo_state(db_path, 'ETH')
+    assert before == {'lots': 1, 'matches': 1, 'gain': 2000.0}, 'seeding failed'
+
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+    failed = _driver_loop(db_path, ['ETH', 'XYZ'])
+
+    assert [crypto for crypto, _ in failed] == ['ETH'], 'ETH should raise, XYZ should not'
+    assert _fifo_state(db_path, 'ETH') == before, \
+        'the failed crypto lost committed FIFO data — the DELETEs were not rolled back'
+    assert _fifo_state(db_path, 'XYZ')['matches'] == 1, 'the healthy crypto must still compute'
+
+
+def _seed_deferred_swap(db_path, crypto, group, take_asset='USDT', tag='s',
+                        amount=1.0, price=1000.0, sale_price=3000.0):
+    """BUY <amount> <crypto> in 2020, swapped in 2024 for <take_asset>, both legs tagged."""
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency=crypto, amount=amount, price_per_unit=price,
+            total_value=amount * price, fee_currency='EUR', currency='EUR',
+            exchange_name='Test', source='seed', imported_at='2026-01-01T00:00:00',
+            record_hash=f'{tag}-buy')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency=crypto, amount=amount, price_per_unit=sale_price,
+            total_value=amount * sale_price, fee_currency='EUR', currency='EUR',
+            exchange_name='Test', source='seed', imported_at='2026-01-01T00:00:00',
+            record_hash=f'{tag}-sell', swap_group_id=group)
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency=take_asset, amount=amount * sale_price, price_per_unit=1.0,
+            total_value=amount * sale_price, fee_currency='EUR', currency='EUR',
+            exchange_name='Test', source='seed', imported_at='2026-01-01T00:00:00',
+            record_hash=f'{tag}-take', swap_group_id=group)
+    finally:
+        conn.close()
+
+
+def test_a_plain_sale_still_realizes_while_a_swap_defers_in_the_same_crypto(db_path, monkeypatch):
+    """Deferral is for swaps, not for every sale: `and bool(swap_group_id)` matters.
+
+    Drop that half of the condition and under deferral EVERY sale stops
+    realizing — all capital gains vanish from the reports while the run looks
+    healthy. Same crypto, same lot, two sales: one plain, one swap.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=2.0, price_per_unit=1000.0, total_value=2000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='m1')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='m2')  # plain
+        _tx(conn, transaction_date='2024-04-23T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='m3',
+            swap_group_id='swap-mix')
+        _tx(conn, transaction_date='2024-04-23T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=3000.0, price_per_unit=1.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='m4',
+            swap_group_id='swap-mix')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        matches = conn.execute("""SELECT sale_date, amount_sold, gain_loss FROM sale_lot_matches
+                                  WHERE cryptocurrency='ETH'""").fetchall()
+        transfers = conn.execute("""SELECT swap_group_id, to_cryptocurrency, cost_basis
+                                    FROM swap_lot_transfers""").fetchall()
+    finally:
+        conn.close()
+
+    assert matches == [('2024-04-22T15:00:00+00:00', 1.0, 2000.0)], \
+        'the plain sale must still realize its gain under deferral'
+    assert transfers == [('swap-mix', 'USDT', 1000.0)], 'only the swap defers'
+
+
+def test_recalculating_one_crypto_leaves_another_cryptos_inheritance_alone(db_path, monkeypatch):
+    """The DELETE is per crypto, and the driver recalculates them one by one.
+
+    Drop the WHERE from_cryptocurrency and every other crypto's inheritance
+    disappears when the next crypto is recalculated on the same connection:
+    the last crypto processed is the only one left with a cost basis.
+    """
+    _seed_deferred_swap(db_path, 'ETH', 'swap-eth', tag='eth')
+    _seed_deferred_swap(db_path, 'SOL', 'swap-sol', tag='sol')
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('SOL')  # must not touch ETH's row
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("""SELECT from_cryptocurrency, swap_group_id FROM swap_lot_transfers
+                               ORDER BY from_cryptocurrency""").fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [('ETH', 'swap-eth'), ('SOL', 'swap-sol')], \
+        "recalculating SOL deleted ETH's inheritance"
+
+
+def test_the_inherited_cost_basis_is_rounded_to_cents(db_path, monkeypatch):
+    """The cost basis crosses into the DB as EUR, so it is quantized, not raw.
+
+    3 units at EUR 100.333333 cost EUR 300.999999 exactly; what must land in
+    swap_lot_transfers is EUR 301.00 (doc/project_guidelines.md: EUR values
+    quantize to 0.01 before every INSERT). A plain float() would store
+    300.999999 and carry the unrounded tail into whatever inherits it.
+    """
+    _seed_deferred_swap(db_path, 'ETH', 'swap-round', tag='r',
+                        amount=3.0, price=100.333333, sale_price=200.0)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        stored = conn.execute('SELECT cost_basis FROM swap_lot_transfers').fetchall()
+    finally:
+        conn.close()
+
+    assert stored == [(301.0,)], 'the inherited cost basis must be rounded to cents'
+
+
+def test_an_orphan_deferred_group_raises_even_when_no_lot_is_consumed(db_path, monkeypatch):
+    """Validation before the loop, not inside it.
+
+    A deferred SELL with no purchase on record consumes nothing, so a check
+    placed inside the consumption loop never runs — and the orphan group
+    passes unnoticed until its missing cost basis surfaces somewhere else.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='n1',
+            swap_group_id='swap-nolots')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='swap-nolots'):
+            tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+
+def _seed_swap_group_with_two_take_legs(db_path):
+    """One swap group whose BUY leg exists twice, in two different assets."""
+    _seed_deferred_swap(db_path, 'ETH', 'swap-two', tag='t')
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='SOL', amount=10.0, price_per_unit=300.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='t-take2',
+            swap_group_id='swap-two')
+    finally:
+        conn.close()
+
+
+def test_two_buy_legs_in_one_swap_group_refuse_to_pick_a_winner(db_path, monkeypatch):
+    """Which asset inherits must not be decided by row order.
+
+    A dict comprehension keyed on swap_group_id silently keeps the last row,
+    and the query has no ORDER BY, so the winner is not even stable between
+    runs. Under deferral that choice decides where a cost basis lands.
+    """
+    _seed_swap_group_with_two_take_legs(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='two different assets'):
+            tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+
+
+def test_two_buy_legs_in_one_swap_group_only_warn_on_the_default_path(db_path, capsys):
+    """The default path never reads swap_takes, so it must not be stopped by it.
+
+    These are the figures already declared: a broken import that cannot change
+    any of them is a warning, not an abort. Under deferral the same data
+    raises (test above).
+    """
+    _seed_swap_group_with_two_take_legs(db_path)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+    out = capsys.readouterr().out
+
+    assert 'two different assets' in out, 'the conflict must still be reported'
+    conn = sqlite3.connect(db_path)
+    try:
+        gain = conn.execute("SELECT ROUND(SUM(gain_loss),2) FROM sale_lot_matches "
+                            "WHERE cryptocurrency='ETH'").fetchone()[0]
+    finally:
+        conn.close()
+    assert gain == 2000.0, 'the default path must still realize the disposal'
+
+
+def test_deferral_warns_loudly_that_the_chain_is_incomplete_until_task_11(
+        db_path, monkeypatch, capsys):
+    """Between task 9 and task 11 the numbers are wrong in both directions.
+
+    The give side defers but the asset received does not inherit yet, so its
+    BUY leg opens an ordinary lot at market value with a fresh date: both the
+    exempt/taxable split and the cost of the asset received are wrong, and
+    nothing in the output would say so without this warning. The task number
+    is in the message on purpose — it says when the scaffolding comes out.
+    Asserted in both directions: absent on the default path, which has no
+    scaffolding to warn about.
+    """
+    _seed_swap(db_path)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+    default_out = capsys.readouterr().out
+    assert 'INCOMPLETE' not in default_out, 'the default path has no scaffolding to warn about'
+
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+    deferred_out = capsys.readouterr().out
+
+    assert 'INCOMPLETE' in deferred_out
+    assert 'Do NOT use these numbers for any tax return' in deferred_out
+    assert 'Task 11' in deferred_out, 'the warning must say what removes it'
+
+
+def _seed_two_sells_in_one_swap_group(db_path):
+    """ETH disposed of twice under one swap group, plus an unrelated crypto.
+
+    Two SELLs sharing a swap_group_id draw the same lot into the same group's
+    inheritance twice, which the UNIQUE (swap_group_id, source_fifo_lot_id)
+    index refuses — mid-write, after the DELETEs. The importer does not
+    produce this (one group is one normalized row), but a hand-edited or
+    double-imported row does, and it is the realistic way this engine raises
+    with its tables already emptied.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=2.0, price_per_unit=1000.0, total_value=2000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='d1')
+        for tag, date in (('d2', '2024-04-22T15:00:00+00:00'), ('d3', '2024-04-23T15:00:00+00:00')):
+            _tx(conn, transaction_date=date, transaction_type='SELL',
+                cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+                fee_currency='EUR', currency='EUR', exchange_name='Test',
+                source='seed', imported_at='2026-01-01T00:00:00', record_hash=tag,
+                swap_group_id='swap-dup')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=6000.0, price_per_unit=1.0, total_value=6000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='d4',
+            swap_group_id='swap-dup')
+        _tx(conn, transaction_date='2021-03-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='XYZ', amount=2.0, price_per_unit=50.0, total_value=100.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='d5')
+        _tx(conn, transaction_date='2023-07-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='XYZ', amount=1.0, price_per_unit=80.0, total_value=80.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test',
+            source='seed', imported_at='2026-01-01T00:00:00', record_hash='d6')
+    finally:
+        conn.close()
+
+
+def test_a_failure_after_the_deletes_is_rolled_back_not_left_for_the_next_commit(
+        db_path, monkeypatch):
+    """The transaction, not the validation: this one raises mid-write.
+
+    Validation before the first DELETE (the test above) cannot cover every
+    way the write phase can fail — here the UNIQUE index on
+    swap_lot_transfers rejects the second row, with ETH's lots and matches
+    already deleted inside the open transaction. Without BEGIN + ROLLBACK the
+    next crypto's commit() makes those DELETEs permanent and ETH is silently
+    reduced to zero lots, zero matches, while the driver reports success.
+    doc/code_guidelines.md §1.1.
+    """
+    _seed_two_sells_in_one_swap_group(db_path)
+
+    assert _driver_loop(db_path, ['ETH', 'XYZ']) == [], 'the default run must not fail'
+    before = _fifo_state(db_path, 'ETH')
+    assert before == {'lots': 1, 'matches': 2, 'gain': 4000.0}, 'seeding failed'
+
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+    failed = _driver_loop(db_path, ['ETH', 'XYZ'])
+
+    assert [crypto for crypto, _ in failed] == ['ETH'], \
+        'ETH must fail mid-write and XYZ must still be calculable on the same connection'
+    assert isinstance(failed[0][1], sqlite3.IntegrityError), \
+        f'expected the UNIQUE index to reject the second transfer, got {failed[0][1]!r}'
+    assert _fifo_state(db_path, 'ETH') == before, \
+        'the failed crypto lost committed FIFO data — the write was not rolled back'
+    assert _fifo_state(db_path, 'XYZ')['matches'] == 1, 'the healthy crypto must still compute'

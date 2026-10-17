@@ -109,6 +109,9 @@ class CryptoFIFOTracker:
 
         print(f"\nCalculating FIFO for {cryptocurrency}...")
 
+        # ---- prerequisites and validation: everything that can raise runs
+        # ---- here, before the first DELETE below.
+
         # transactions.swap_group_id is read by the query below in every mode,
         # so task 1's migration is a prerequisite of this engine, not an option.
         if 'swap_group_id' not in [r[1] for r in
@@ -137,9 +140,20 @@ class CryptoFIFOTracker:
                 'calculators/update_fifo_schema_swap_transfers.py <db>'
             )
 
-        # Clear existing FIFO data for this crypto (atomic with subsequent inserts)
-        self.cursor.execute('DELETE FROM sale_lot_matches WHERE cryptocurrency = ?', (cryptocurrency,))
-        self.cursor.execute('DELETE FROM fifo_lots WHERE cryptocurrency = ?', (cryptocurrency,))
+        if not SWAP_REALIZES:
+            # Scaffolding, to be removed by task 11 together with the state it
+            # warns about: the give side already defers (task 9) but the asset
+            # received does not inherit date and cost yet, so its BUY leg still
+            # opens an ordinary lot at market value with a fresh date.
+            bar = '!' * 70
+            print(f"  {bar}")
+            print('  WARNING: swap deferral is INCOMPLETE in this build.')
+            print('  The asset given up defers (task 9), the asset received does not')
+            print('  inherit its date and cost yet (tasks 10-11). Both the exempt/taxable')
+            print('  split and the cost basis of the asset received are WRONG right now.')
+            print('  Do NOT use these numbers for any tax return. Task 11 completes the')
+            print('  chain and removes this warning.')
+            print(f"  {bar}")
 
         # Get all transactions for this crypto, ordered by date
         query = '''
@@ -159,232 +173,285 @@ class CryptoFIFOTracker:
         # the other leg belongs to a different cryptocurrency.
         self.cursor.execute("""
             SELECT swap_group_id, cryptocurrency FROM transactions
-            WHERE swap_group_id IS NOT NULL AND transaction_type = 'BUY'
+            WHERE swap_group_id IS NOT NULL AND swap_group_id <> ''
+            AND transaction_type = 'BUY'
         """)
-        swap_takes = {row['swap_group_id']: row['cryptocurrency'] for row in self.cursor.fetchall()}
+        swap_takes = {}
+        conflicts = []
+        for row in self.cursor.fetchall():
+            group, asset = row['swap_group_id'], row['cryptocurrency']
+            if swap_takes.setdefault(group, asset) != asset:
+                conflicts.append(f'{group!r} delivers both {swap_takes[group]} and {asset}')
+        if conflicts:
+            # A dict comprehension would have picked a winner here in silence,
+            # and the query has no ORDER BY, so it would not even be a stable
+            # winner. One swap group is one normalized row
+            # (importers/non_btc_valuation.py:_swap_id), so this is an import
+            # defect. Fatal only under deferral, where the value decides which
+            # asset inherits a cost basis; on the default path nothing reads it
+            # and the already-declared figures must not be stopped by it.
+            detail = '; '.join(conflicts)
+            if not SWAP_REALIZES:
+                raise ValueError(
+                    f'Swap group(s) with BUY legs in two different assets: {detail}. '
+                    'Which asset inherits the cost basis is undefined, so the engine '
+                    'will not pick a side: fix the import.'
+                )
+            print(f"  ⚠️  Warning: swap group(s) with BUY legs in two different assets: "
+                  f"{detail}. Harmless while tax_rules.swap_realizes is True (nothing "
+                  f"reads them), fatal under deferral — fix the import.")
 
-        # Idempotent per crypto, like the DELETEs above. Reached only when the
-        # table is there: on the default path it may legitimately be missing.
-        if transfers_table_exists:
-            self.cursor.execute('DELETE FROM swap_lot_transfers WHERE from_cryptocurrency = ?',
-                                (cryptocurrency,))
-        transfers_batch = []
+        if not SWAP_REALIZES:
+            # Checked here, before any DELETE, for two reasons: a raise between
+            # the DELETEs and the commit would hand the next crypto's commit a
+            # half-emptied table (doc/code_guidelines.md §1.1), and a SELL whose
+            # lots cannot be consumed at all (no purchase on record) would never
+            # reach a check placed inside the consumption loop.
+            orphans = sorted({t['swap_group_id'] for t in transactions
+                              if t['transaction_type'] == 'SELL' and t['swap_group_id']
+                              and t['swap_group_id'] not in swap_takes})
+            if orphans:
+                raise ValueError(
+                    f'Swap group(s) {", ".join(repr(g) for g in orphans)} dispose of '
+                    f'{cryptocurrency} but their BUY leg was never imported. '
+                    'Under deferral the cost basis of the lots they consume would '
+                    'have nowhere to land: it would leave the chain silently, with '
+                    'no realized gain and no inherited lot. Import the other leg '
+                    'with importers/import_non_btc_legs.py, or set '
+                    'tax_rules.swap_realizes = True in config.py.'
+                )
 
-        print(f"  Processing {len(transactions):,} transactions...")
+        # ---- writes from here on: one transaction, explicit BEGIN, ROLLBACK on
+        # ---- the error path (doc/code_guidelines.md §1.1). The driver
+        # ---- (calculators/calculate_fifo.py:87-119) catches per crypto and
+        # ---- carries on with this same connection, so a DELETE left
+        # ---- uncommitted here would be made permanent by the next crypto's
+        # ---- commit — this crypto silently reduced to zero lots.
+        self.conn.execute('BEGIN')
+        try:
+            # Clear existing FIFO data for this crypto (atomic with the inserts below)
+            self.cursor.execute('DELETE FROM sale_lot_matches WHERE cryptocurrency = ?', (cryptocurrency,))
+            self.cursor.execute('DELETE FROM fifo_lots WHERE cryptocurrency = ?', (cryptocurrency,))
 
-        # In-memory FIFO lots: list of dicts, ordered by purchase_date
-        mem_lots = []
-        # Pointer to first lot with remaining > 0 (avoids re-scanning exhausted lots)
-        lot_ptr = 0
+            # Idempotent per crypto, like the DELETEs above. Reached only when the
+            # table is there: on the default path it may legitimately be missing.
+            if transfers_table_exists:
+                self.cursor.execute('DELETE FROM swap_lot_transfers WHERE from_cryptocurrency = ?',
+                                    (cryptocurrency,))
+            transfers_batch = []
 
-        buys = 0
-        sells = 0
-        matches_batch = []  # batch INSERT for sale_lot_matches
+            print(f"  Processing {len(transactions):,} transactions...")
 
-        for trans in transactions:
-            trans_type = trans['transaction_type']
+            # In-memory FIFO lots: list of dicts, ordered by purchase_date
+            mem_lots = []
+            # Pointer to first lot with remaining > 0 (avoids re-scanning exhausted lots)
+            lot_ptr = 0
 
-            if trans_type == 'BUY':
-                amount = float(trans['amount'])
-                price_per_unit = float(trans['price_per_unit']) if trans['price_per_unit'] else 0
+            buys = 0
+            sells = 0
+            matches_batch = []  # batch INSERT for sale_lot_matches
 
-                if price_per_unit > 0:
-                    base_cost = Decimal(str(amount)) * Decimal(str(price_per_unit))
-                else:
-                    base_cost = Decimal(str(trans['total_value'] or 0))
+            for trans in transactions:
+                trans_type = trans['transaction_type']
 
-                try:
-                    fee_amount = Decimal(str(trans['fee_amount'])) if trans['fee_amount'] else Decimal('0')
-                except (KeyError, TypeError):
-                    fee_amount = Decimal('0')
-                cost_basis = base_cost + fee_amount
+                if trans_type == 'BUY':
+                    amount = float(trans['amount'])
+                    price_per_unit = float(trans['price_per_unit']) if trans['price_per_unit'] else 0
 
-                mem_lots.append({
-                    'db_id': None,  # assigned after INSERT
-                    'purchase_transaction_id': trans['id'],
-                    'cryptocurrency': cryptocurrency,
-                    'purchase_date': trans['transaction_date'],
-                    'original_amount': Decimal(str(amount)),
-                    'remaining_amount': Decimal(str(amount)),
-                    'purchase_price_per_unit': Decimal(str(price_per_unit)),
-                    'cost_basis': cost_basis,
-                    'purchase_fee_total': fee_amount,
-                    'exchange_name': trans['exchange_name'],
-                })
-                buys += 1
-
-            elif trans_type == 'SELL':
-                amount_to_sell = Decimal(str(trans['amount']))
-                sale_date = trans['transaction_date']
-                sale_price = Decimal(str(trans['price_per_unit'])) if trans['price_per_unit'] else Decimal('0')
-
-                if sale_price == 0 and trans['total_value']:
-                    sale_price = Decimal(str(trans['total_value'])) / amount_to_sell
-
-                try:
-                    sale_fee_total = Decimal(str(trans['fee_amount'])) if trans['fee_amount'] else Decimal('0')
-                except (KeyError, TypeError):
-                    sale_fee_total = Decimal('0')
-                sale_amount_total = Decimal(str(trans['amount']))
-
-                sale_date_dt = datetime.fromisoformat(sale_date)
-
-                i = lot_ptr
-                while i < len(mem_lots) and amount_to_sell > DUST_THRESHOLD:
-                    lot = mem_lots[i]
-                    if lot['remaining_amount'] <= Decimal('0'):
-                        i += 1
-                        continue
-
-                    amount_from_lot = min(amount_to_sell, lot['remaining_amount'])
-
-                    # Cost basis with proportional purchase fee
-                    purchase_price = lot['purchase_price_per_unit']
-                    cost_basis_base = amount_from_lot * purchase_price
-                    purchase_fee_total = lot['purchase_fee_total']
-                    purchase_amount_total = lot['original_amount']
-                    purchase_fee_prop = (purchase_fee_total / purchase_amount_total * amount_from_lot
-                                        if purchase_amount_total > 0 else 0)
-                    cost_basis = cost_basis_base + purchase_fee_prop
-
-                    # Proceeds with proportional sale fee
-                    proceeds_base = amount_from_lot * sale_price
-                    sale_fee_prop = (sale_fee_total / sale_amount_total * amount_from_lot
-                                    if sale_amount_total > 0 else 0)
-                    proceeds = proceeds_base - sale_fee_prop
-
-                    gain_loss = proceeds - cost_basis
-
-                    # Holding period: counted on calendar dates only (no TZ).
-                    # `(sale_dt - purchase_dt).days` floors the timedelta and a purchase
-                    # late in the day vs a sale early in the day exactly one calendar year
-                    # later would return 364 instead of 365 (taxable instead of exempt).
-                    # Calendar-date diff is timezone-independent and matches AT practice.
-                    purchase_date_dt = datetime.fromisoformat(lot['purchase_date'])
-                    holding_days = (sale_date_dt.date() - purchase_date_dt.date()).days
-
-                    deferred = bool(trans['swap_group_id']) and not SWAP_REALIZES
-                    if deferred:
-                        # No realization: the acquisition date and cost travel to
-                        # the asset received (spec §7, deferral regime).
-                        take_asset = swap_takes.get(trans['swap_group_id'])
-                        if not take_asset:
-                            raise ValueError(
-                                f"Swap group {trans['swap_group_id']!r} disposes of "
-                                f'{cryptocurrency} but its BUY leg was never imported. '
-                                'Under deferral the cost basis of the lots consumed here '
-                                'would have nowhere to land: it would leave the chain '
-                                'silently, with no realized gain and no inherited lot. '
-                                'Import the other leg with importers/import_non_btc_legs.py, '
-                                'or set tax_rules.swap_realizes = True in config.py.'
-                            )
-                        transfers_batch.append((
-                            trans['swap_group_id'],
-                            i,                 # lot index (replaced with db_id later)
-                            cryptocurrency,
-                            take_asset,
-                            sale_date,
-                            lot['purchase_date'],
-                            float(amount_from_lot),
-                            _to_eur(cost_basis),
-                        ))
+                    if price_per_unit > 0:
+                        base_cost = Decimal(str(amount)) * Decimal(str(price_per_unit))
                     else:
-                        matches_batch.append((
-                            trans['id'],       # sale_transaction_id
-                            i,                 # lot index (replaced with db_id later)
-                            sale_date,
-                            lot['purchase_date'],
-                            cryptocurrency,
-                            float(amount_from_lot),
-                            _to_price(purchase_price),
-                            _to_price(sale_price),
-                            _to_eur(cost_basis),
-                            _to_eur(proceeds),
-                            _to_eur(gain_loss),
-                            holding_days,
-                        ))
+                        base_cost = Decimal(str(trans['total_value'] or 0))
 
-                    # Update in-memory lot
-                    lot['remaining_amount'] -= amount_from_lot
-                    amount_to_sell -= amount_from_lot
+                    try:
+                        fee_amount = Decimal(str(trans['fee_amount'])) if trans['fee_amount'] else Decimal('0')
+                    except (KeyError, TypeError):
+                        fee_amount = Decimal('0')
+                    cost_basis = base_cost + fee_amount
 
-                    # Advance pointer past exhausted lots
-                    if lot['remaining_amount'] <= Decimal('0') and i == lot_ptr:
-                        lot_ptr = i + 1
+                    mem_lots.append({
+                        'db_id': None,  # assigned after INSERT
+                        'purchase_transaction_id': trans['id'],
+                        'cryptocurrency': cryptocurrency,
+                        'purchase_date': trans['transaction_date'],
+                        'original_amount': Decimal(str(amount)),
+                        'remaining_amount': Decimal(str(amount)),
+                        'purchase_price_per_unit': Decimal(str(price_per_unit)),
+                        'cost_basis': cost_basis,
+                        'purchase_fee_total': fee_amount,
+                        'exchange_name': trans['exchange_name'],
+                    })
+                    buys += 1
 
-                    i += 1
+                elif trans_type == 'SELL':
+                    amount_to_sell = Decimal(str(trans['amount']))
+                    sale_date = trans['transaction_date']
+                    sale_price = Decimal(str(trans['price_per_unit'])) if trans['price_per_unit'] else Decimal('0')
 
-                if amount_to_sell > DUST_THRESHOLD:
-                    print(f"  ⚠️  Warning: Sale on {sale_date} has {amount_to_sell:.8f} "
-                          f"{cryptocurrency} unmatched (no purchase found)")
-                sells += 1
+                    if sale_price == 0 and trans['total_value']:
+                        sale_price = Decimal(str(trans['total_value'])) / amount_to_sell
 
-        # Bulk write to DB
-        print(f"  Writing {len(mem_lots):,} lots and {len(matches_batch):,} matches to DB...")
+                    try:
+                        sale_fee_total = Decimal(str(trans['fee_amount'])) if trans['fee_amount'] else Decimal('0')
+                    except (KeyError, TypeError):
+                        sale_fee_total = Decimal('0')
+                    sale_amount_total = Decimal(str(trans['amount']))
 
-        # INSERT all lots
-        lot_db_ids = []
-        for lot in mem_lots:
-            self.cursor.execute('''
-                INSERT INTO fifo_lots
-                (purchase_transaction_id, cryptocurrency, purchase_date,
-                 original_amount, remaining_amount, purchase_price_per_unit,
-                 cost_basis, purchase_fee_total, exchange_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                lot['purchase_transaction_id'], lot['cryptocurrency'],
-                lot['purchase_date'], float(lot['original_amount']),
-                float(lot['remaining_amount']), _to_price(lot['purchase_price_per_unit']),
-                _to_eur(lot['cost_basis']), _to_eur(lot['purchase_fee_total']),
-                lot['exchange_name'],
-            ))
-            lot_db_ids.append(self.cursor.lastrowid)
+                    sale_date_dt = datetime.fromisoformat(sale_date)
 
-        if transfers_batch:
-            print(f"  Writing {len(transfers_batch):,} swap lot transfers (deferral)...")
-            # Replace the lot index with the real DB id, exactly as the matches
-            # below do: the pointer is what makes the inheritance auditable back
-            # to the lot it consumed, and a date alone does not identify a lot.
-            for transfer in transfers_batch:
+                    i = lot_ptr
+                    while i < len(mem_lots) and amount_to_sell > DUST_THRESHOLD:
+                        lot = mem_lots[i]
+                        if lot['remaining_amount'] <= Decimal('0'):
+                            i += 1
+                            continue
+
+                        amount_from_lot = min(amount_to_sell, lot['remaining_amount'])
+
+                        # Cost basis with proportional purchase fee
+                        purchase_price = lot['purchase_price_per_unit']
+                        cost_basis_base = amount_from_lot * purchase_price
+                        purchase_fee_total = lot['purchase_fee_total']
+                        purchase_amount_total = lot['original_amount']
+                        purchase_fee_prop = (purchase_fee_total / purchase_amount_total * amount_from_lot
+                                            if purchase_amount_total > 0 else 0)
+                        cost_basis = cost_basis_base + purchase_fee_prop
+
+                        # Proceeds with proportional sale fee
+                        proceeds_base = amount_from_lot * sale_price
+                        sale_fee_prop = (sale_fee_total / sale_amount_total * amount_from_lot
+                                        if sale_amount_total > 0 else 0)
+                        proceeds = proceeds_base - sale_fee_prop
+
+                        gain_loss = proceeds - cost_basis
+
+                        # Holding period: counted on calendar dates only (no TZ).
+                        # `(sale_dt - purchase_dt).days` floors the timedelta and a purchase
+                        # late in the day vs a sale early in the day exactly one calendar year
+                        # later would return 364 instead of 365 (taxable instead of exempt).
+                        # Calendar-date diff is timezone-independent and matches AT practice.
+                        purchase_date_dt = datetime.fromisoformat(lot['purchase_date'])
+                        holding_days = (sale_date_dt.date() - purchase_date_dt.date()).days
+
+                        deferred = bool(trans['swap_group_id']) and not SWAP_REALIZES
+                        if deferred:
+                            # No realization: the acquisition date and cost travel to
+                            # the asset received (spec §7, deferral regime).
+                            # Indexed, not .get(): every deferred group was checked
+                            # against swap_takes before the first DELETE, so a miss
+                            # here is a broken invariant and must be loud, not a row
+                            # with an empty to_cryptocurrency.
+                            take_asset = swap_takes[trans['swap_group_id']]
+                            transfers_batch.append((
+                                trans['swap_group_id'],
+                                i,                 # lot index (replaced with db_id later)
+                                cryptocurrency,
+                                take_asset,
+                                sale_date,
+                                lot['purchase_date'],
+                                float(amount_from_lot),
+                                _to_eur(cost_basis),
+                            ))
+                        else:
+                            matches_batch.append((
+                                trans['id'],       # sale_transaction_id
+                                i,                 # lot index (replaced with db_id later)
+                                sale_date,
+                                lot['purchase_date'],
+                                cryptocurrency,
+                                float(amount_from_lot),
+                                _to_price(purchase_price),
+                                _to_price(sale_price),
+                                _to_eur(cost_basis),
+                                _to_eur(proceeds),
+                                _to_eur(gain_loss),
+                                holding_days,
+                            ))
+
+                        # Update in-memory lot
+                        lot['remaining_amount'] -= amount_from_lot
+                        amount_to_sell -= amount_from_lot
+
+                        # Advance pointer past exhausted lots
+                        if lot['remaining_amount'] <= Decimal('0') and i == lot_ptr:
+                            lot_ptr = i + 1
+
+                        i += 1
+
+                    if amount_to_sell > DUST_THRESHOLD:
+                        print(f"  ⚠️  Warning: Sale on {sale_date} has {amount_to_sell:.8f} "
+                              f"{cryptocurrency} unmatched (no purchase found)")
+                    sells += 1
+
+            # Bulk write to DB
+            print(f"  Writing {len(mem_lots):,} lots and {len(matches_batch):,} matches to DB...")
+
+            # INSERT all lots
+            lot_db_ids = []
+            for lot in mem_lots:
                 self.cursor.execute('''
-                    INSERT INTO swap_lot_transfers
-                    (swap_group_id, source_fifo_lot_id, from_cryptocurrency,
-                     to_cryptocurrency, swap_date, source_purchase_date,
-                     amount_from, cost_basis)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO fifo_lots
+                    (purchase_transaction_id, cryptocurrency, purchase_date,
+                     original_amount, remaining_amount, purchase_price_per_unit,
+                     cost_basis, purchase_fee_total, exchange_name)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    transfer[0], lot_db_ids[transfer[1]],
-                    transfer[2], transfer[3], transfer[4], transfer[5],
-                    transfer[6], transfer[7],
+                    lot['purchase_transaction_id'], lot['cryptocurrency'],
+                    lot['purchase_date'], float(lot['original_amount']),
+                    float(lot['remaining_amount']), _to_price(lot['purchase_price_per_unit']),
+                    _to_eur(lot['cost_basis']), _to_eur(lot['purchase_fee_total']),
+                    lot['exchange_name'],
+                ))
+                lot_db_ids.append(self.cursor.lastrowid)
+
+            if transfers_batch:
+                print(f"  Writing {len(transfers_batch):,} swap lot transfers (deferral)...")
+                # Replace the lot index with the real DB id, exactly as the matches
+                # below do: the pointer is what makes the inheritance auditable back
+                # to the lot it consumed, and a date alone does not identify a lot.
+                for transfer in transfers_batch:
+                    self.cursor.execute('''
+                        INSERT INTO swap_lot_transfers
+                        (swap_group_id, source_fifo_lot_id, from_cryptocurrency,
+                         to_cryptocurrency, swap_date, source_purchase_date,
+                         amount_from, cost_basis)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        transfer[0], lot_db_ids[transfer[1]],
+                        transfer[2], transfer[3], transfer[4], transfer[5],
+                        transfer[6], transfer[7],
+                    ))
+
+            # INSERT all matches (replace lot index with real DB id)
+            for match in matches_batch:
+                lot_idx = match[1]
+                self.cursor.execute('''
+                    INSERT INTO sale_lot_matches
+                    (sale_transaction_id, fifo_lot_id, sale_date, purchase_date,
+                     cryptocurrency, amount_sold, purchase_price_per_unit,
+                     sale_price_per_unit, cost_basis, proceeds, gain_loss,
+                     holding_period_days)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    match[0], lot_db_ids[lot_idx],
+                    match[2], match[3], match[4], match[5],
+                    match[6], match[7], match[8], match[9],
+                    match[10], match[11],
                 ))
 
-        # INSERT all matches (replace lot index with real DB id)
-        for match in matches_batch:
-            lot_idx = match[1]
-            self.cursor.execute('''
-                INSERT INTO sale_lot_matches
-                (sale_transaction_id, fifo_lot_id, sale_date, purchase_date,
-                 cryptocurrency, amount_sold, purchase_price_per_unit,
-                 sale_price_per_unit, cost_basis, proceeds, gain_loss,
-                 holding_period_days)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                match[0], lot_db_ids[lot_idx],
-                match[2], match[3], match[4], match[5],
-                match[6], match[7], match[8], match[9],
-                match[10], match[11],
-            ))
+            self.conn.commit()
 
-        self.conn.commit()
+            print(f"  ✓ Processed {buys:,} purchases, {sells:,} sales")
 
-        print(f"  ✓ Processed {buys:,} purchases, {sells:,} sales")
+            # Show summary
+            remaining_lots = [l for l in mem_lots if l['remaining_amount'] > Decimal('0')]
+            remaining_total = sum(l['remaining_amount'] for l in remaining_lots)
+            if remaining_lots:
+                print(f"  Remaining: {remaining_total:.8f} {cryptocurrency} in {len(remaining_lots)} lots")
+        except Exception:
+            self.conn.rollback()
+            raise
 
-        # Show summary
-        remaining_lots = [l for l in mem_lots if l['remaining_amount'] > Decimal('0')]
-        remaining_total = sum(l['remaining_amount'] for l in remaining_lots)
-        if remaining_lots:
-            print(f"  Remaining: {remaining_total:.8f} {cryptocurrency} in {len(remaining_lots)} lots")
-    
     def generate_holding_report(self, year: int, cryptocurrency: str = 'BTC',
                                min_holding_days: int = 0) -> pd.DataFrame:
         """Generate comprehensive holding period report"""
