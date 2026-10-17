@@ -80,6 +80,16 @@ SELECT COUNT(*) FROM transactions WHERE transaction_date IS NULL OR transaction_
 -- Expected result: 0
 ```
 
+> **With `tax_rules.swap_realizes = False`, the first query above is not
+> expected to return 0.** `sale_lot_matches` is the register of *realized
+> gains*, not of disposals: a deferred swap consumes lots and writes no row
+> there, so every swap disposal is reported as an "unmatched sale" by that
+> query. To exclude them, add
+> `AND (t.swap_group_id IS NULL OR t.swap_group_id = '')` — an unmatched sale
+> that carries no `swap_group_id` is the real defect this check looks for.
+> This whole page covers the **realized** trail only; see `doc/compliance.md`
+> §2 for what it does not cover.
+
 ### Reproducibility verification
 
 FIFO calculation is deterministic: with the same data in `transactions`, `calculate_fifo.py` always produces the same results in `sale_lot_matches`. To verify:
@@ -102,6 +112,14 @@ sqlite3 crypto_fifo.db "SELECT SUM(gain_loss), COUNT(*) FROM sale_lot_matches" >
 diff checksum_a.txt checksum_b.txt
 # Expected result: no difference
 ```
+
+> **The checksum compares two runs under the same tax rule.** It is
+> deterministic for a given value of `tax_rules.swap_realizes`, not across a
+> change of it: switching the rule to `False` moves the swap disposals out of
+> `sale_lot_matches`, so both `SUM(gain_loss)` and `COUNT(*)` drop — a real
+> difference with a known cause, not a reproducibility failure. Run
+> `calculators/calculate_fifo.py` and read the `Tax rule in force:` line it
+> prints before concluding anything from a diff.
 
 ---
 

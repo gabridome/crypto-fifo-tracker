@@ -69,9 +69,16 @@ Exchange CSV files (data/)
     │           - delete_by_source()    — surgical DELETE by CSV filename
     │           - import_and_verify()   — atomic delete+insert+verify (BEGIN/COMMIT)
     │
+    ├── importers/import_non_btc_legs.py  (non-BTC + stablecoin legs, additive)
+    │       │   writes under `<file>#non-btc`, so the BTC ledger is untouched
+    │       ├── importers/non_btc_readers.py    — the 3 export shapes → rows;
+    │       │                                     an unknown shape raises
+    │       └── importers/non_btc_valuation.py  — rows → transaction dicts;
+    │                                             fiat actually paid, swap_group_id
     ▼
 SQLite DB (data/crypto_fifo.db)
-  transactions ── (BUY) ──> fifo_lots ──> sale_lot_matches (one per consumed lot)
+  transactions ── (BUY) ──> fifo_lots ──> sale_lot_matches (realized gains)
+                                     └──> swap_lot_transfers (deferred swaps)
                                               │
     ▲                                         ▼
     │                              calculators/crypto_fifo_tracker.py
@@ -79,6 +86,10 @@ SQLite DB (data/crypto_fifo.db)
     │                              - Decimal arithmetic, _to_eur() / _to_price()
     │                              - DUST_THRESHOLD = Decimal('1e-8')
     │                              - holding period on calendar dates
+    │
+    │                              calculators/swap_reporting.py
+    │                              deferred_disposals() — the one definition of
+    │                              what a reader of sale_lot_matches cannot see
     │
     ▼
 calculators/generate_irs_report.py
@@ -101,22 +112,36 @@ calculators/generate_irs_report.py
   read from here; never duplicate the schema in code)
 - **`doc/known_import_issues.md`** — catalog of per-exchange parsing gotchas
   (encoding, currency suffixes, multi-line trades, etc.)
+- **`doc/compliance.md`** — the evidence method, public and third-party
+  readable: what makes an import traceable, the naming convention, the local
+  (gitignored) evidence register, and the fact that `tax_rules.swap_realizes`
+  is a declared assumption. **No data** — no amounts, no account identifiers,
+  no row counts, no names. `config.py` points at it from three comments.
 - **`doc/en/`** + **`doc/pt/`** — end-user documentation in English/Portuguese
 
 ## Database schema (summary; full DDL in `doc/schema.sql`)
 
-Three tables, all values in EUR:
+Four tables, all values in EUR:
 
 - **`transactions`** — BUY/SELL/DEPOSIT/WITHDRAWAL from every source.
   Key invariants: `total_value` is gross (BEFORE fees); `fee_amount` is
   separate (never subtracted). Each row has `source` (CSV filename),
   `imported_at` (ISO), `record_hash` (SHA256 over normalised fields) for
-  audit trail and rollback.
+  audit trail and rollback. `swap_group_id` links the two legs of one swap.
 - **`fifo_lots`** — one row per BUY. Tracks `remaining_amount` and
   `purchase_fee_total`. Cost basis = total_value + fee.
-- **`sale_lot_matches`** — one row per (SELL × consumed lot). Carries
+- **`sale_lot_matches`** — the register of **realized gains**, not of
+  disposals: one row per (*realizing* SELL × consumed lot), carrying
   `holding_period_days` (calendar-day diff, not timedelta) and proportional
-  cost basis / proceeds / gain_loss.
+  cost basis / proceeds / gain_loss. Under `tax_rules.swap_realizes = False` a
+  swap's SELL leg consumes lots and writes **no row here** — so any query that
+  reads this table as "the disposals" is incomplete by exactly those rows,
+  while a query over `transactions` includes them at full value. The one
+  definition of that difference is `calculators/swap_reporting.py`; the open
+  readers still affected are listed in `doc/TODO.md`.
+- **`swap_lot_transfers`** — one row per lot slice moved across a deferred
+  swap: the acquisition date and cost travel to the asset received, the gain
+  does not. Written only on the deferral path.
 
 `record_hash` formula: `SHA256("{source}|{date}|{type}|{exchange}|{crypto}|{amount:.8f}|{value:.2f}|{fee:.2f}")`.
 

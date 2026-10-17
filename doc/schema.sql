@@ -1,6 +1,6 @@
 -- Crypto FIFO Tracker Database Schema
 -- SQLite3
--- Last updated: 2026-03-03
+-- Last updated: 2026-10-17
 
 -- Main transactions table
 CREATE TABLE IF NOT EXISTS transactions (
@@ -119,7 +119,13 @@ CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_from
 CREATE UNIQUE INDEX IF NOT EXISTS idx_swap_lot_transfers_unique_group_lot
     ON swap_lot_transfers(swap_group_id, source_fifo_lot_id);
 
--- View: Transaction summary by exchange
+-- View: Transaction summary by exchange.
+-- Reads `transactions`, so it INCLUDES the disposal leg of a deferred swap at
+-- its full value — the opposite of v_annual_gains below. Reading the two side
+-- by side under `tax_rules.swap_realizes = False` gives two different answers
+-- to "how much was disposed of", both correct for what they measure. Neither
+-- view is referenced from Python or from a template (checked 2026-10-17); they
+-- exist for hand-written queries, which is where the contradiction lands.
 CREATE VIEW IF NOT EXISTS v_exchange_summary AS
 SELECT 
     exchange_name,
@@ -143,7 +149,12 @@ FROM fifo_lots
 WHERE remaining_amount > 0
 GROUP BY cryptocurrency;
 
--- View: Annual gains summary
+-- View: Annual gains summary.
+-- Reads `sale_lot_matches`, the register of REALIZED gains: under
+-- `tax_rules.swap_realizes = False` `sale_count`, `total_sold` and
+-- `total_proceeds` silently mean "excluding deferred swaps". The gain columns
+-- are right either way; the count and the quantities are not the disposals.
+-- See doc/compliance.md and calculators/swap_reporting.py.
 CREATE VIEW IF NOT EXISTS v_annual_gains AS
 SELECT 
     strftime('%Y', sale_date) as year,

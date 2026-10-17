@@ -80,6 +80,16 @@ SELECT COUNT(*) FROM transactions WHERE transaction_date IS NULL OR transaction_
 -- Resultado esperado: 0
 ```
 
+> **Com `tax_rules.swap_realizes = False`, não se espera que a primeira query
+> acima devolva 0.** `sale_lot_matches` é o registo das mais-valias
+> *realizadas*, não das alienações: uma permuta diferida consome lotes e não
+> escreve lá nenhuma linha, pelo que cada alienação em permuta aparece como
+> "venda não associada" nessa query. Para as excluir, acrescentar
+> `AND (t.swap_group_id IS NULL OR t.swap_group_id = '')` — uma venda não
+> associada **sem** `swap_group_id` é o defeito real que esta verificação
+> procura. Esta página cobre apenas a pista das alienações **realizadas**; ver
+> `doc/compliance.md` §2 para o que não cobre.
+
 ### Verificação de reprodutibilidade
 
 O cálculo FIFO é determinístico: com os mesmos dados em `transactions`, o `calculate_fifo.py` produz sempre os mesmos resultados em `sale_lot_matches`. Para verificar:
@@ -102,6 +112,14 @@ sqlite3 data/crypto_fifo.db "SELECT SUM(gain_loss), COUNT(*) FROM sale_lot_match
 diff checksum_a.txt checksum_b.txt
 # Resultado esperado: sem diferenças
 ```
+
+> **O checksum compara duas execuções sob a mesma regra fiscal.** É
+> determinístico para um dado valor de `tax_rules.swap_realizes`, não através
+> de uma alteração dele: mudar a regra para `False` retira as alienações em
+> permuta de `sale_lot_matches`, pelo que tanto `SUM(gain_loss)` como
+> `COUNT(*)` descem — uma diferença real com causa conhecida, não uma falha de
+> reprodutibilidade. Executar `calculators/calculate_fifo.py` e ler a linha
+> `Tax rule in force:` que imprime antes de concluir algo de um diff.
 
 ---
 

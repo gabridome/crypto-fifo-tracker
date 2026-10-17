@@ -6,7 +6,19 @@ How to handle BTC→ETH swaps, stablecoin conversions, and trades between differ
 
 ## Fundamental tax rule
 
-**Every crypto-to-crypto swap is a taxable event** in most jurisdictions, including Portugal. The Portugal claim is a declared, flagged ASSUMPTION — not verified law — recorded as `tax_rules.swap_realizes` in `config.py` and printed on every report. The FIFO engine does not branch on this value yet (tasks 9-11 of the non-BTC-legs plan): changing it today changes no figures. See `doc/TODO.md`.
+**Whether a crypto-to-crypto swap is a taxable event depends on your
+jurisdiction**, and this tool does not decide for you: the answer is the setting
+`tax_rules.swap_realizes` in `config.py` (see `doc/compliance.md`). The default,
+`True`, treats every swap as a disposal of the asset given up — the common
+treatment, and the one the rest of this guide describes. **Ask a local tax
+professional before relying on it.**
+
+The engine honours both values. With `False` a swap realizes nothing: the lots
+of the asset given up are consumed and their acquisition date and cost travel
+to the asset received, so the gain surfaces on a later disposal, with the
+original purchase date. Switching the setting is a recalculation, not a
+re-import — and it does not change the total over the whole history, it changes
+the **dates**, which is what decides the holding-period exemption of each year.
 
 When you trade BTC for ETH:
 1. You are **selling** BTC at its EUR market value at that moment
@@ -113,7 +125,11 @@ These must be broken down into SELL + BUY as described above.
 
 ### Stablecoin conversion (BTC→USDT, ETH→USDC)
 
-Same logic: converting to a stablecoin is a sale of the original crypto. The USDT/USDC received has cost basis = EUR value at the time of conversion.
+Same logic, under the same setting: with `swap_realizes = True` converting to a
+stablecoin is a disposal of the original crypto, and the stablecoin received has
+cost basis = its EUR value at the time of conversion. Buying a stablecoin **with
+fiat** is not a swap at all: it is an acquisition, and selling it back is a
+disposal whose result is the exchange-rate drift.
 
 ### Dust conversion (small balances → BNB)
 
@@ -121,7 +137,7 @@ Binance allows converting small residual balances to BNB. Technically taxable, b
 
 ### Wrapped tokens (ETH→WETH)
 
-ETH→WETH may not be a taxable event (same underlying asset). Check with your tax advisor and document the decision.
+ETH→WETH may not be a taxable event (same underlying asset). Ask a local tax professional and document the decision.
 
 ---
 
@@ -134,7 +150,14 @@ After importing crypto-to-crypto transactions, FIFO processes them automatically
 3. The gain/loss on the SELL is calculated normally
 4. The holding period is that of the consumed BTC lot, not the duration of the swap
 
-If the BTC sold in the swap came from a purchase more than 365 days earlier, the gain is **exempt** in Portugal — even if immediately converted to ETH.
+The four steps above describe `swap_realizes = True`. With `False`, steps 1 and
+2 still happen — lots are consumed and a lot is created — but step 3 does not:
+nothing is realized, and the new lot carries the **consumed lot's** purchase
+date and cost instead of the swap's.
+
+Under `True`, BTC sold in a swap more than 365 days after its purchase produces
+a gain that Portugal exempts — even if immediately converted to ETH — subject to
+the assumption named at the top of this guide.
 
 ---
 
@@ -191,7 +214,9 @@ GROUP BY slm.cryptocurrency;
 
 ## Portuguese tax specifics
 
-- **Every crypto-to-crypto swap is taxable** — not just conversion to EUR
+- **Every crypto-to-crypto swap is recorded**, both legs, whichever interpretation
+  is adopted — whether it is *taxable* is the assumption named at the top of this
+  guide and declared in `tax_rules.swap_realizes`, not a settled rule this tool asserts
 - **Holding period is calculated on the asset sold** — not the one received
 - **The ≥365 day exemption applies** even if proceeds go to another crypto
 - **FIFO is mandatory** — the oldest lot is consumed first

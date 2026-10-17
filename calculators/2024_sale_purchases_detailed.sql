@@ -1,3 +1,10 @@
+-- NOTA: questa query legge `sale_lot_matches`, che è il registro delle
+-- plusvalenze REALIZZATE, non delle cessioni. Con `tax_rules.swap_realizes =
+-- False` una permuta cripto-cripto non realizza e non scrive nessuna riga lì:
+-- i conteggi e le quantità qui sotto escludono quelle cessioni, mentre una
+-- query su `transactions` le includerebbe al valore pieno. Vedi
+-- doc/compliance.md e `calculators/swap_reporting.py`.
+--
 SELECT 
     slm.sale_date,
     slm.purchase_date,

@@ -8,6 +8,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import DATABASE_PATH, tax_rule_banner
+from calculators.swap_reporting import deferred_disposals
 
 def main():
     year = int(sys.argv[1]) if len(sys.argv) > 1 else 2025
@@ -24,6 +25,15 @@ def main():
     print(f"  ANNUAL SUMMARY REPORT — {year}")
     print(f"  Database: {db_path}")
     print("=" * 80)
+
+    # The two sections below do not measure the same thing when a disposal has
+    # deferred: §2 VENDITE reads `transactions` and counts the swap's SELL at
+    # its full value, §3 RISULTATO FIFO and §4 per-exchange read
+    # `sale_lot_matches`, where a deferred disposal has no row at all. Both
+    # numbers are right for what they measure; printed side by side with no
+    # note they say the FIFO lost a sale. Read once, printed in three places —
+    # nothing below changes a figure.
+    deferred = deferred_disposals(conn, year=year)
 
     # ── 1. Purchases in the year ──
     buy_rows = conn.execute("""
@@ -91,6 +101,15 @@ def main():
     else:
         print(f"\n  Nessuna vendita nel {year}")
 
+    if deferred['count']:
+        print(f"\n  ⚠️  Permute differite comprese in questa sezione: {deferred['count']:,} "
+              f"({deferred['amount']:.8f} unità, €{deferred['total_value']:,.2f})")
+        print("      Questa sezione legge `transactions`, quindi le conta. RISULTATO FIFO")
+        print("      e DETTAGLIO PER EXCHANGE leggono `sale_lot_matches`, dove una permuta")
+        print("      differita non ha nessuna riga: non realizza, quindi non c'è nulla da")
+        print("      registrare. Le due sezioni non quadrano per costruzione — non è una")
+        print("      vendita persa dal FIFO. Vedi doc/compliance.md.")
+
     # ── 3. FIFO Gains/Losses ──
     fifo_rows = conn.execute("""
         SELECT
@@ -155,6 +174,15 @@ def main():
             grand_total_gain += r['total_gain_loss'] or 0
     else:
         print(f"\n  Nessuna vendita FIFO nel {year}")
+
+    if deferred['count']:
+        print(f"\n  ⚠️  Permute differite NON comprese in questa sezione: {deferred['count']:,} "
+              f"({deferred['amount']:.8f} unità, €{deferred['total_value']:,.2f} di controvalore)")
+        print("      Contate invece in VENDITE qui sopra. Una permuta differita non è un")
+        print("      evento tassabile: la data e il costo d'acquisto dei lotti consumati")
+        print("      passano all'asset ricevuto (`swap_lot_transfers`), e la plusvalenza")
+        print("      resta da realizzare sulla cessione successiva, con la data d'acquisto")
+        print("      originale — che è ciò che decide i 365 giorni. Vedi doc/compliance.md.")
 
     # ── 4. Per-exchange breakdown ──
     exchange_rows = conn.execute("""
@@ -221,6 +249,10 @@ def main():
     print(f"  Plus-valenza totale:    €{grand_total_gain:>14,.2f}")
     tax = max(0, grand_taxable_gain * 0.28)
     print(f"  Imposta stimata (28%):  €{tax:>14,.2f}")
+    if deferred['count']:
+        # For the reader who scrolls to the totals and stops there.
+        print(f"  Permute differite escluse dal risultato FIFO: {deferred['count']:,} "
+              f"(€{deferred['total_value']:,.2f} di controvalore, nessun realizzo)")
     print(tax_rule_banner())
     print(f"{'═'*80}\n")
 

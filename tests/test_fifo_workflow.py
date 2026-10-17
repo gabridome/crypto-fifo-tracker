@@ -681,3 +681,27 @@ class TestFileExistence:
     def test_code_guidelines_exists(self):
         path = os.path.join(os.path.dirname(__file__), '..', 'doc', 'code_guidelines.md')
         assert os.path.exists(path)
+
+    def test_compliance_md_exists(self):
+        path = os.path.join(os.path.dirname(__file__), '..', 'doc', 'compliance.md')
+        assert os.path.exists(path), (
+            'config.py points three comments at doc/compliance.md for the '
+            'swap_realizes assumption; nothing resolves that pointer at runtime, '
+            'so only a test can notice it going stale'
+        )
+
+    def test_the_root_schema_sql_is_not_a_second_copy_of_the_ddl(self):
+        """doc/schema.sql is the single source (code_guidelines.md §4.3).
+
+        The root file held a copy until 2026-10-17 and it had drifted: no
+        swap_group_id, no swap_lot_transfers, so a database built from it was
+        refused by the engine. It is now a pointer. A CREATE TABLE reappearing
+        here means a third copy came back.
+        """
+        path = os.path.join(os.path.dirname(__file__), '..', 'schema.sql')
+        with open(path) as f:
+            body = '\n'.join(ln for ln in f if not ln.lstrip().startswith('--'))
+        assert 'CREATE' not in body.upper(), \
+            'the root schema.sql must stay a pointer to doc/schema.sql, not a copy'
+        assert 'doc/schema.sql' in open(path).read(), \
+            'and it must say where the real schema is'

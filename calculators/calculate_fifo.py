@@ -13,6 +13,7 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from crypto_fifo_tracker import CryptoFIFOTracker, swap_dependency_order
+from calculators.swap_reporting import deferred_disposals
 from config import DATABASE_PATH, SWAP_REALIZES, tax_rule_banner
 DB_PATH = DATABASE_PATH
 
@@ -127,7 +128,24 @@ def main():
                 if stats['long_term_matches'] > 0:
                     pct = (stats['long_term_matches'] / stats['total_matches']) * 100
                     print(f"  Long-term percentage: {pct:.1f}%")
-            
+
+            # Outside the block above on purpose. "Sales matched" counts rows in
+            # sale_lot_matches, the sell count printed earlier counts rows in
+            # transactions, and a deferred disposal is in the second and not the
+            # first — a gap with no stated reason. When EVERY disposal of a
+            # cryptocurrency deferred, sales_matched is 0 and the block above
+            # prints nothing at all, which is precisely the case that needs
+            # explaining; nesting this there would hide it.
+            deferred = deferred_disposals(tracker.conn, cryptocurrency=crypto)
+            if deferred['count']:
+                print(f"\n  Deferred swap disposals: {deferred['count']:,} "
+                      f"({deferred['amount']:.8f} {crypto}, €{deferred['total_value']:,.2f})")
+                print("    Counted in the sell total above (which reads transactions) and NOT")
+                print("    in 'Sales matched' (which reads sale_lot_matches). Not a gap: a")
+                print("    deferred swap realizes nothing, so it writes no match row. The")
+                print("    purchase date and cost of the lots it consumed moved to the asset")
+                print("    received, in swap_lot_transfers. See doc/compliance.md.")
+
         except Exception as e:
             failures.append(crypto)
             print(f"✗ Error calculating FIFO for {crypto}: {e}")

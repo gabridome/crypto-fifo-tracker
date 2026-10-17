@@ -15,6 +15,7 @@
 | Solo pair BTCEUR importati | L'importer filtra per BTCEUR/BTCUSDT/BTCBUSD. ETH e altri pair ignorati silenziosamente. | By design | Se l'utente ha tradato ETH su Binance, quei trade non entrano nel FIFO. |
 | 74 fee USDT non convertite EUR nel parser | Il CSV parser della status page non converte le fee in USDT. Il DB è corretto (l'importer converte). | Display-only bug | Differenza: +€19.57 nella status page |
 | Suffissi valuta nei campi | "0.02776BTC", "1731.99EUR" — l'importer li strippa con regex | Risolto | Pattern: `re.sub(r'[A-Z]+$', '', val)` |
+| Gambe non-BTC dei trade non importate | L'importer dei trade tiene solo il lato BTC dei pair (filtro BTCEUR/BTCUSDT/BTCBUSD) | Risolto 2026-10-16 | `import_non_btc_legs.py` con shape `trade_history` scrive l'altra gamba, collegata alla prima da `swap_group_id` |
 
 ### Binance Card (`import_binance_card.py`)
 
@@ -41,7 +42,7 @@
 | Problema | Causa | Stato | Note |
 |----------|-------|-------|------|
 | CSV mancante | Il file CSV di Bybit è sparito dalla cartella `data/`. C'è 1 BUY nel DB. | APERTO | Il file esisteva. Va ritrovato o l'export va rifatto dal portale Bybit. |
-| Header UID nel CSV | La prima riga del CSV Bybit è "UID: 176178208,..." — non è un header standard | Risolto | L'importer skippa la prima riga se inizia con "UID" |
+| Header UID nel CSV | La prima riga del CSV Bybit è `UID: <uid del conto>,...` — non è un header standard | Risolto | L'importer tiene la prima riga solo se è l'header (comincia con `Uid,`), altrimenti la salta. Il controllo è sul prefisso letterale, non sul numero: l'uid reale è un dato di conto e questo repo è pubblico, quindi qui e nel commento dell'importer sta un segnaposto |
 
 ### Coinbase (`import_coinbase_standalone.py`)
 
@@ -102,6 +103,19 @@
 | USD salvati come EUR | Quando ECB non disponibile, i valori USD venivano salvati come EUR | Risolto (2026-03-30) | Ora l'import abortisce con `ValueError` |
 | Crypto-to-crypto side mancante | Solo un lato del trade veniva registrato | Risolto | Ora crea sideA + sideB con EUR da CryptoPrices |
 | Coinpal USD→EUR | Coinpal opera in USD ma il CSV non lo segnala | Risolto | Parser aggiornato per riconoscere Coinpal come USD |
+
+### Gambe non-BTC (`import_non_btc_legs.py`)
+
+Non è un exchange: è l'importer additivo delle cripto diverse da BTC e delle
+stablecoin, con tre shape di export (`trade_history`, `account_history`,
+`deposit_withdrawal`). Scrive sotto un `source` con suffisso `#non-btc`, così il
+registro BTC resta intatto.
+
+| Problema | Causa | Stato | Note |
+|----------|-------|-------|------|
+| Lotti stablecoin a parità 1,00 verso EUR | Lotto inserito a mano senza il tasso del giorno | Risolto 2026-10-16 | La valorizzazione usa il fiat **effettivamente pagato** sulla sede d'acquisto (`non_btc_valuation.value_row`), non il controvalore all'arrivo su un'altra sede: quello è una coincidenza del cambio di quel giorno, non un prezzo |
+| Permuta differita in andata e ritorno fra due asset | Il motore calcola una cripto per volta, quindi non sa esprimere A→B in aprile e B→A in giugno | Limite noto, non raggiungibile oggi | `swap_dependency_order` rifiuta il ciclo invece di scegliere un lato. Vedi `doc/TODO.md` per cosa servirebbe a risolverlo |
+| Lotti orfani (`fifo_lots.purchase_transaction_id` senza riga in `transactions`) | Una transazione cancellata dopo il calcolo FIFO, o un restore parziale | APERTO | Nessun passo del progetto li rileva: la `FOREIGN KEY` è dichiarata in `doc/schema.sql` ma SQLite non la applica senza `PRAGMA foreign_keys = ON`, che nessun file imposta. Registrato in `doc/TODO.md` |
 
 ---
 
