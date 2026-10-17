@@ -894,13 +894,16 @@ def test_two_buy_legs_in_one_swap_group_only_warn_on_the_default_path(db_path, c
 
 def test_deferral_warns_loudly_that_the_chain_is_incomplete_until_task_11(
         db_path, monkeypatch, capsys):
-    """Between task 9 and task 11 the numbers are wrong in both directions.
+    """Until task 11 the chain can be left half-stale without saying so.
 
-    The give side defers but the asset received does not inherit yet, so its
-    BUY leg opens an ordinary lot at market value with a fresh date: both the
-    exempt/taxable split and the cost of the asset received are wrong, and
-    nothing in the output would say so without this warning. The task number
-    is in the message on purpose — it says when the scaffolding comes out.
+    Both sides of a deferred swap work now (tasks 9 and 10), so the reason has
+    changed and the warning had to change with it: what is still missing is an
+    order. A full run takes the cryptocurrencies alphabetically, and
+    recalculating the asset given up on its own rewrites its transfers while
+    the inherited lots of the asset received keep the old numbers — the one
+    failure mode here that produces no error at all, which is why the warning
+    has to name it. The task number is in the message on purpose: it says when
+    the scaffolding comes out, and where to find this test.
     Asserted in both directions: absent on the default path, which has no
     scaffolding to warn about.
     """
@@ -925,6 +928,15 @@ def test_deferral_warns_loudly_that_the_chain_is_incomplete_until_task_11(
     assert 'INCOMPLETE' in deferred_out
     assert 'Do NOT use these numbers for any tax return' in deferred_out
     assert 'Task 11' in deferred_out, 'the warning must say what removes it'
+    assert 'stale' in deferred_out, (
+        'the warning must name the silent failure: recalculating one side alone '
+        'leaves the inherited lots of the other behind'
+    )
+    assert 'inherit its date and cost yet' not in deferred_out, (
+        'that line claimed the received asset does not inherit yet — task 10 made '
+        'it inherit, and a false line here is read by someone deciding whether to '
+        'trust the figures'
+    )
 
 
 def _seed_two_sells_in_one_swap_group(db_path):
@@ -1179,11 +1191,13 @@ def test_an_inherited_lot_older_than_an_existing_lot_is_consumed_first(db_path, 
 def test_inherited_lot_ordering_survives_both_date_formats(db_path, monkeypatch):
     """The production database stores both forms, so the key must cope.
 
-    Measured read-only on data/crypto_fifo.db (2026-10-17): most rows end in
-    '+00:00' and a minority have no offset at all. datetime.fromisoformat on the two
-    gives an aware and a naive datetime, and comparing them raises TypeError.
-    The existing holding-period code sidesteps it by comparing .date(); the
-    ordering added by this task must not reintroduce it.
+    Verified read-only on the production database (2026-10-17): most rows end
+    in '+00:00', a minority carry no offset at all, and some of the first kind
+    also carry microseconds. datetime.fromisoformat parses all three, but it
+    gives an aware datetime for an offset and a naive one without, and
+    comparing those two raises TypeError. The existing holding-period code
+    sidesteps it by comparing .date(); the ordering added by this task must not
+    reintroduce it.
     """
     conn = sqlite3.connect(db_path)
     try:
@@ -1584,3 +1598,182 @@ def test_an_asset_that_inherits_and_is_then_swapped_on_passes_the_original_date(
     assert usdt == [('2019-05-05T10:00:00+00:00', 3000.0, 1000.0),
                     ('2021-07-07T10:00:00+00:00', 2000.0, 100.0)], \
         'the BTC acquisition date of 2019 must survive both swaps'
+
+
+def _seed_swap_group_with_a_duplicated_take_leg(db_path):
+    """One swap group whose BUY leg was imported twice, in the SAME asset.
+
+    1 ETH worth EUR 1000 swapped for 3000 USDT, but the take leg landed as
+    two rows of 1500 instead of one of 3000.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2020-01-10T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='w1')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='w2', swap_group_id='swap-dupbuy')
+        for tag in ('w3', 'w4'):
+            _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+                cryptocurrency='USDT', amount=1500.0, price_per_unit=2.0, total_value=3000.0,
+                fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+                imported_at='2026-01-01T00:00:00', record_hash=tag,
+                swap_group_id='swap-dupbuy')
+    finally:
+        conn.close()
+
+
+def _keep_one_take_leg(db_path):
+    """Fix the import: one BUY leg, for the whole 3000 USDT that arrived."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM transactions WHERE record_hash='w4'")
+        conn.execute("""UPDATE transactions SET amount=3000.0, price_per_unit=1.0
+                        WHERE record_hash='w3'""")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_duplicated_take_leg_refuses_to_inherit_the_same_cost_twice(db_path, monkeypatch):
+    """Two BUY legs in ONE asset: each would inherit the whole cost basis.
+
+    The take side reads the transfers of its swap group once per BUY leg, so a
+    group whose BUY leg was imported twice inherits the cost basis twice: here
+    EUR 2000 against EUR 1000 of ETH actually given up, in two plausible-looking
+    lots, with no error. A cost basis too high is a gain too low, which is tax
+    declared short — the quietest way this engine can get a return wrong.
+
+    The check on legs in two *different* assets (test above) does not see this
+    one: the asset is the same, so there is no winner to pick. Both are the
+    same import defect, one swap delivers one asset once, and both are caught
+    by counting the legs.
+    """
+    _seed_swap_group_with_a_duplicated_take_leg(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='swap-dupbuy') as exc:
+            tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
+    assert '2 BUY legs' in str(exc.value), (
+        'the message must say how many legs were found, so the import can be fixed'
+    )
+
+    # ... and with the import fixed the cost basis is inherited once, not twice
+    _keep_one_take_leg(db_path)
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        lots = conn.execute("""SELECT purchase_date, ROUND(original_amount,8),
+                                      ROUND(cost_basis,2)
+                               FROM fifo_lots WHERE cryptocurrency='USDT'""").fetchall()
+    finally:
+        conn.close()
+
+    assert lots == [('2020-01-10T10:00:00+00:00', 3000.0, 1000.0)], \
+        'one lot, the 3000 USDT that arrived, and the EUR 1000 of ETH given up — once'
+
+
+def test_a_duplicated_take_leg_only_warns_on_the_default_path(db_path, capsys):
+    """Same import defect, default path: a warning, never a new way to stop.
+
+    With swap_realizes True nothing reads swap_takes and no cost basis is
+    inherited, so this broken import cannot change a single already-declared
+    figure. Raising here would stop a tax history over a defect that does not
+    affect it — the same reason the two-different-assets check only warns on
+    this path.
+    """
+    _seed_swap_group_with_a_duplicated_take_leg(db_path)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+    out = capsys.readouterr().out
+
+    assert 'swap-dupbuy' in out and '2 BUY legs' in out, \
+        'the defect must still be reported on the default path'
+    conn = sqlite3.connect(db_path)
+    try:
+        gain = conn.execute("SELECT ROUND(SUM(gain_loss),2) FROM sale_lot_matches "
+                            "WHERE cryptocurrency='ETH'").fetchone()[0]
+    finally:
+        conn.close()
+    assert gain == 2000.0, 'the default path must still realize the disposal'
+
+
+def _db_with_unchecked_transfers_table(db_path):
+    """A database whose swap_lot_transfers was built without its CHECK constraints.
+
+    Not hypothetical: a CHECK cannot be added by a later ALTER TABLE — the
+    reason the engine requires this table instead of self-creating it — so an
+    installation that once created it without them keeps it that way. The DDL
+    here is derived from the real one in sqlite_master with the CHECK clauses
+    removed, not copied, so this fixture cannot drift from the table the
+    engine actually writes to.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)
+        ).fetchone()[0]
+        unchecked = re.sub(r'\s*CHECK\s*\([^()]*\)', '', re.sub(r'--[^\n]*', '', sql))
+        assert 'CHECK' in sql and 'CHECK' not in unchecked, 'the strip did not strip'
+        conn.execute(f'DROP TABLE {TABLE}')
+        conn.executescript(unchecked)
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+def test_lot_transfers_summing_to_zero_units_stop_instead_of_allocating_nothing(
+        db_path, monkeypatch):
+    """An impossible path must be loud, not plausible.
+
+    CHECK (amount_from > 0) makes transfers summing to zero units unreachable
+    today, so the division by the total is safe. If the constraint is ever
+    absent, allocating a share of zero is the worst possible answer: every
+    slice but the last gets no units, the last one takes everything the swap
+    delivered, and it keeps one slice cost basis out of several — a lot that
+    looks ordinary and carries the wrong cost. The engine says the invariant is
+    broken instead.
+    """
+    _seed_swap(db_path)
+    _db_with_unchecked_transfers_table(db_path)
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')   # writes the transfer normally
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:  # only possible because the CHECK is gone
+        conn.execute('UPDATE swap_lot_transfers SET amount_from = 0')
+        conn.commit()
+    finally:
+        conn.close()
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='amount_from') as exc:
+            tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+    assert 'swap-1' in str(exc.value), 'the message must name the group to go and look at'

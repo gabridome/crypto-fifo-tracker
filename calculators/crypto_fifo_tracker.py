@@ -32,12 +32,13 @@ def _to_price(value):
 def _acquisition_key(iso_date):
     """Comparable key for a purchase date, whatever form it is stored in.
 
-    The production database holds both forms: most rows ending in '+00:00'
-    and a minority with no offset (counted read-only on data/crypto_fifo.db,
-    2026-10-17). fromisoformat gives an aware datetime for the first and a
-    naive one for the second, and comparing the two raises TypeError. A naive
-    timestamp is read as UTC, the same assumption the holding-period code
-    already makes when it compares .date().
+    Both forms are present in the production database — the great majority
+    with a '+00:00' offset, a minority with no offset at all, and some of the
+    first kind carrying microseconds as well; all of them parse with
+    fromisoformat (verified read-only, 2026-10-17). fromisoformat gives an
+    aware datetime for an offset and a naive one without, and comparing the two
+    raises TypeError. A naive timestamp is read as UTC, the same assumption the
+    holding-period code already makes when it compares .date().
     """
     dt = datetime.fromisoformat(iso_date)
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -180,17 +181,24 @@ class CryptoFIFOTracker:
 
         if not SWAP_REALIZES:
             # Scaffolding, to be removed by task 11 together with the state it
-            # warns about: the give side already defers (task 9) but the asset
-            # received does not inherit date and cost yet, so its BUY leg still
-            # opens an ordinary lot at market value with a fresh date.
+            # warns about: both sides of a deferred swap are implemented (tasks
+            # 9 and 10), but nothing orders the cryptocurrencies so that the
+            # asset given up is always computed before the asset that inherits
+            # from it. calculators/calculate_fifo.py:48-52 processes them
+            # alphabetically (SELECT DISTINCT cryptocurrency ORDER BY
+            # cryptocurrency), and its per-crypto except at :118-121 turns the
+            # engine's refusal into a printed line and carries on.
             bar = '!' * 70
             print(f"  {bar}")
             print('  WARNING: swap deferral is INCOMPLETE in this build.')
-            print('  The asset given up defers (task 9), the asset received does not')
-            print('  inherit its date and cost yet (tasks 10-11). Both the exempt/taxable')
-            print('  split and the cost basis of the asset received are WRONG right now.')
-            print('  Do NOT use these numbers for any tax return. Task 11 completes the')
-            print('  chain and removes this warning.')
+            print('  Both sides of a deferred swap work (tasks 9 and 10), but nothing')
+            print('  computes the asset given up before the asset that inherits from it:')
+            print('  a full run goes in alphabetical order. The wrong order is loud — the')
+            print('  engine refuses — but recalculating the asset given up ON ITS OWN is')
+            print('  not: it rewrites the transfers and leaves the inherited lots of the')
+            print('  asset received behind, stale, and nothing recomputes them.')
+            print('  Do NOT use these numbers for any tax return. Task 11 orders the')
+            print('  cryptocurrencies by dependency and removes this warning.')
             print(f"  {bar}")
 
         # Get all transactions for this crypto, ordered by date
@@ -215,27 +223,51 @@ class CryptoFIFOTracker:
             AND transaction_type = 'BUY'
         """)
         swap_takes = {}
-        conflicts = []
+        take_legs = {}
         for row in self.cursor.fetchall():
             group, asset = row['swap_group_id'], row['cryptocurrency']
-            if swap_takes.setdefault(group, asset) != asset:
-                conflicts.append(f'{group!r} delivers both {swap_takes[group]} and {asset}')
+            swap_takes.setdefault(group, asset)
+            take_legs.setdefault(group, []).append(asset)
+
+        # One swap group is one normalized row
+        # (importers/non_btc_valuation.py:_swap_id), so a group with more than
+        # one BUY leg is an import defect either way. Counting the legs is one
+        # condition covering both shapes, with a message for each: two
+        # overlapping conditions would leave it unclear which one fired.
+        #   - legs in different assets: which asset inherits the cost basis is
+        #     undefined. A dict comprehension would have picked a winner here
+        #     in silence, and the query has no ORDER BY, so not even a stable
+        #     one. (Which is also why the message is sorted below rather than
+        #     left in row order: it is read by a human who then has to go and
+        #     find those legs in an import.)
+        #   - legs in the same asset: the take side reads this group's
+        #     transfers once per leg, so the cost basis is inherited once per
+        #     leg — two legs, twice the cost basis, in two plausible lots. A
+        #     cost basis too high is a gain too low, i.e. tax declared short.
+        # Fatal only under deferral, where those lots are built; on the default
+        # path nothing reads either value and the already-declared figures must
+        # not be stopped by a defect that cannot reach them.
+        conflicts = []
+        for group, assets in take_legs.items():
+            if len(assets) < 2:
+                continue
+            distinct = sorted(set(assets))
+            if len(distinct) > 1:
+                conflicts.append(f'{group!r} has BUY legs in two different assets: '
+                                 f'{", ".join(distinct)}')
+            else:
+                conflicts.append(f'{group!r} has {len(assets)} BUY legs, '
+                                 f'all in {distinct[0]}')
         if conflicts:
-            # A dict comprehension would have picked a winner here in silence,
-            # and the query has no ORDER BY, so it would not even be a stable
-            # winner. One swap group is one normalized row
-            # (importers/non_btc_valuation.py:_swap_id), so this is an import
-            # defect. Fatal only under deferral, where the value decides which
-            # asset inherits a cost basis; on the default path nothing reads it
-            # and the already-declared figures must not be stopped by it.
-            detail = '; '.join(conflicts)
+            detail = '; '.join(sorted(conflicts))
             if not SWAP_REALIZES:
                 raise ValueError(
-                    f'Swap group(s) with BUY legs in two different assets: {detail}. '
-                    'Which asset inherits the cost basis is undefined, so the engine '
-                    'will not pick a side: fix the import.'
+                    f'Swap group(s) with more than one BUY leg: {detail}. '
+                    'A swap delivers one asset once: the engine will neither pick '
+                    'which asset inherits the cost basis nor hand it out twice. '
+                    'Fix the import.'
                 )
-            print(f"  ⚠️  Warning: swap group(s) with BUY legs in two different assets: "
+            print(f"  ⚠️  Warning: swap group(s) with more than one BUY leg: "
                   f"{detail}. Harmless while tax_rules.swap_realizes is True (nothing "
                   f"reads them), fatal under deferral — fix the import.")
 
@@ -320,10 +352,26 @@ class CryptoFIFOTracker:
                         )
                     received = Decimal(str(trans['amount']))
                     total_from = sum(Decimal(str(s['amount_from'])) for s in slices)
+                    if total_from <= 0:
+                        # Unreachable while the table carries its constraints:
+                        # doc/schema.sql declares CHECK (amount_from > 0) on
+                        # every row, and a CHECK cannot be added by a later
+                        # ALTER TABLE, so an installation missing it stays
+                        # missing it. Loud rather than plausible: allocating a
+                        # share of zero would give the whole amount received to
+                        # the last slice, carrying one slice cost basis out of
+                        # several on a lot that looks ordinary.
+                        raise ValueError(
+                            f"swap {trans['swap_group_id']}: the lot transfers into "
+                            f'{cryptocurrency} sum to {total_from} units. '
+                            'CHECK (amount_from > 0) in doc/schema.sql makes that '
+                            'impossible, so this is a violated schema invariant, not '
+                            'an allocation to work around: check that '
+                            'swap_lot_transfers was created with its constraints.'
+                        )
                     allocated = Decimal('0')
                     for n, sl in enumerate(slices, 1):
-                        share = (Decimal(str(sl['amount_from'])) / total_from
-                                 if total_from > 0 else Decimal('0'))
+                        share = Decimal(str(sl['amount_from'])) / total_from
                         # Last slice takes the remainder: the sum must equal what arrived.
                         qty = (received - allocated) if n == len(slices) else (received * share)
                         allocated += qty
