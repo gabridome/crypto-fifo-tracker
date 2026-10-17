@@ -87,11 +87,15 @@ decide which gains clear a holding-period exemption. So a change of this
 setting is a change to the figures of individual years, which is a question for
 the tax professional before any amended return.
 
-Caveat, open: the banner reports the value `config.py` carries **when the report
-is printed**, not necessarily the one that was in force when the engine last
-ran. A report read next to figures calculated earlier can therefore name the
-wrong rule. Recorded in `doc/TODO.md`; until it is closed, the honest check is
-to recalculate before reporting.
+The banner names the setting **configured when the report is printed** — which
+is not necessarily the rule that produced the figures on record. It therefore
+checks: handed the report's database connection, it compares the setting against
+positive evidence in the data (a deferred swap disposal can only come from a
+`False` run, a realized one only from a `True` run) and, where the two
+contradict each other, says so in a block that cannot be skimmed past, names how
+much of the data is affected, and gives the two ways out — recalculate, or read
+the figures under the rule they were born under. A report that prints that block
+is not fit to file from.
 
 ### What `sale_lot_matches` is, and is not
 

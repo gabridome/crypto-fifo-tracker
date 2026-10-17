@@ -1,5 +1,6 @@
 """The crypto-to-crypto rule is a setting, not prose in a guide."""
 import os
+import re
 import sys
 
 import pytest
@@ -85,6 +86,28 @@ def test_summaries_still_print_the_banner(rel_path):
     console print is the only channel that reaches a user today — losing
     it in one place (tax_rule_banner was deduplicated into one function)
     would silence all three reports at once."""
-    assert 'print(tax_rule_banner())' in _read(rel_path), (
+    assert re.search(r'print\(tax_rule_banner\([\w.]*\)\)', _read(rel_path)), (
         f'{rel_path} no longer prints the tax rule banner'
+    )
+
+
+@pytest.mark.parametrize('rel_path,conn_expr', [
+    ('calculators/calculate_fifo.py', 'tracker.conn'),
+    ('calculators/generate_annual_summary.py', 'conn'),
+    ('calculators/generate_irs_report.py', 'banner_conn'),
+])
+def test_every_generator_hands_the_banner_a_connection(rel_path, conn_expr):
+    """Called bare, the banner can only name the setting `config.py` carries
+    now — which for the two reports that read figures out of the database is
+    not necessarily the rule that produced them. Only the connection lets it
+    check, and a caller that quietly drops it would put `swap_realizes=True`
+    on top of figures calculated under deferral, on a tax return.
+
+    Pinned per file rather than as one pattern: the expression differs, and a
+    loose pattern would let a caller pass something that is not a connection
+    to this database.
+    """
+    assert f'print(tax_rule_banner({conn_expr}))' in _read(rel_path), (
+        f'{rel_path} must hand the banner {conn_expr} so it can check the data '
+        f'against the setting'
     )

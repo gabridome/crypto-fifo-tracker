@@ -167,7 +167,13 @@ def main():
     print(f"\n[4/4] Summary")
     print("="*70)
     print("✗ FIFO CALCULATION INCOMPLETE" if failures else "✓ FIFO CALCULATION COMPLETE!")
-    print(tax_rule_banner())
+    # Handed the connection even though this caller is the one where the
+    # setting and the data agree by construction — it prints right after
+    # calculating. They stop agreeing when the run was partial: a
+    # cryptocurrency the loop above failed on keeps the previous run's rows,
+    # which may have come from the other rule. tracker.close() is below, so
+    # the connection is still open here.
+    print(tax_rule_banner(tracker.conn))
     print(f"\nTotal time: {total_elapsed:.1f} seconds ({total_elapsed/60:.1f} minutes)")
     
     # Database size after FIFO

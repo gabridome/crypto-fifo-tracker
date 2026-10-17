@@ -111,7 +111,9 @@
   successo (il caso comune) l'output non arriva mai all'utente della web UI —
   quindi nemmeno il banner `Tax rule in force: swap_realizes=...` stampato da
   `calculate_fifo.py`/`generate_irs_report.py`/`generate_annual_summary.py` lo
-  raggiunge. Importa **adesso**, non "prima che": dopo i task 9-11
+  raggiunge — **compreso il blocco di avviso** che quel banner stampa quando
+  l'impostazione e i dati non concordano, che è la cosa che meno di tutte può
+  restare su un canale che la web UI butta. Importa **adesso**, non "prima che": dopo i task 9-11
   `swap_realizes=False` cambia le date, e un utente della web UI non ha modo di
   scoprire sotto quale regola sono state calcolate le cifre che legge.
 - [x] ~~**`calculators/crypto_fifo_tracker.py`: import `SWAP_REALIZES` non letto**~~
@@ -218,7 +220,10 @@ queste voci la usi, invece di riscrivere la query.
   contro la stessa logica di `web/app.py:1419-1431`) — **non un filtro**: un filtro cambierebbe le cifre. Resta
   aperto: nessuno di questi file stampa la regola in forza, quindi l'output
   non dice sotto quale `swap_realizes` sono state calcolate le righe che
-  legge. Si chiude con la voce su `tax_rule_banner()` qui sopra.
+  legge — e, a differenza dei tre report, non ha un banner che lo verifichi
+  contro il database. La via naturale: farli girare dal runner di `/reports`
+  con il banner in testa all'output, oppure accettare che chi li lancia a mano
+  legga prima un report.
 - [ ] **`doc/en/audit_trail_guide.md:95-101` e il gemello portoghese: il
   checksum di determinismo.** `SELECT SUM(gain_loss), COUNT(*) FROM
   sale_lot_matches` resta deterministico a parità di regola, ma confrontato
@@ -228,13 +233,23 @@ queste voci la usi, invece di riscrivere la query.
   differimento **non** restituisce 0. Resta aperto il resto: la pagina continua
   a descrivere la pista di audit come completa, e la query di `/audit` non legge
   `swap_lot_transfers` — vedi la voce su `/api/audit` qui sopra.
-- [ ] **`config.tax_rule_banner()` dichiara il valore di `config.py` al momento
-  della stampa, non quello in forza al calcolo.** Un report letto accanto a
-  cifre calcolate prima di un cambio di regola nomina la regola sbagliata: si
-  vede subito nel riepilogo annuale, dove la nota sulle permute differite (che
-  viene dal database) può stare accanto a un banner `swap_realizes=True`. Due
-  vie: registrare la regola nel database al calcolo, o derivare il banner dallo
-  stato del database come fa `calculators/swap_reporting.py`.
+- [x] ~~**`config.tax_rule_banner()` dichiarava il valore di `config.py` al
+  momento della stampa come se fosse la regola che ha prodotto le cifre**~~ —
+  il docstring diceva «the tax rule that produced the figures just printed»:
+  vero per `calculate_fifo.py`, che stampa subito dopo aver calcolato, **falso**
+  per `generate_annual_summary.py` e `generate_irs_report.py`, che leggono dal
+  database cifre scritte da un'altra esecuzione sotto un'altra impostazione.
+  Non teorico: è esattamente il passo 7 del task 13 (girare sotto
+  `swap_realizes = False` per misurare l'altra regola, poi tornare a `True`).
+  Chiuso 2026-10-17: il docstring dice il vero, la funzione prende una
+  connessione opzionale e, quando ce l'ha, confronta l'impostazione con la
+  **prova positiva** nel database (`deferred_disposals` e
+  `realized_swap_disposals` in `calculators/swap_reporting.py`). In disaccordo
+  stampa un blocco che non si scorre via, dice quanta parte dei dati è
+  coinvolta e le due vie d'uscita (ricalcolare, o leggere le cifre sotto la
+  regola con cui sono nate). Tutti e tre i chiamanti passano la connessione.
+  **Nessuna cifra si muove e il percorso di default pulito stampa la riga di
+  prima**, verificato eseguendo i tre report, non dedotto.
 
 ## Limiti noti — non difetti aperti
 

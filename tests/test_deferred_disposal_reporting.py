@@ -22,7 +22,7 @@ PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
 sys.path.insert(0, PROJECT_ROOT)
 
 from calculators.crypto_fifo_tracker import CryptoFIFOTracker  # noqa: E402
-from calculators.swap_reporting import deferred_disposals  # noqa: E402
+from calculators.swap_reporting import deferred_disposals, realized_swap_disposals  # noqa: E402
 
 DRIVER = os.path.join(PROJECT_ROOT, 'calculators', 'calculate_fifo.py')
 CLAUDE_MD = os.path.join(PROJECT_ROOT, 'CLAUDE.md')
@@ -437,3 +437,212 @@ def test_claude_md_does_not_state_the_invariant_deferral_breaks():
         'the architecture diagram states the same invariant and must be qualified too'
     assert 'swap_lot_transfers' in text, \
         'the table a deferred disposal writes instead must be named where the schema is described'
+
+
+# ---- report 3: the banner that heads all three reports ----
+#
+# config.tax_rule_banner() named "the tax rule that produced the figures just
+# printed". True for calculate_fifo.py, which prints it right after
+# calculating; false for the two reports that read figures out of the
+# database, where the rows were written by whatever run last touched them
+# under whatever setting was in force then. The figures it heads go on a tax
+# return, so the banner has to be able to tell the two apart.
+
+import config  # noqa: E402
+
+TODAYS_LINE = 'Tax rule in force: swap_realizes=True (config.py, profile PT)'
+
+
+def test_the_banner_no_longer_claims_to_name_the_rule_that_produced_the_figures():
+    """The defect was the docstring, and only a reader can be misled by it.
+
+    Nothing executes a docstring, so nothing else can notice it going back to
+    a claim the function cannot keep.
+    """
+    doc = config.tax_rule_banner.__doc__
+    assert 'produced the figures just printed' not in doc, \
+        'the function cannot know what produced figures it did not calculate'
+    assert 'configured' in doc, \
+        'it must say what it does name: the setting configured right now'
+
+
+def test_the_banner_without_a_connection_is_unchanged(db_path):
+    """No connection, no claim about data: exactly the line it has always been."""
+    assert config.tax_rule_banner() == TODAYS_LINE
+
+
+def test_the_banner_on_a_clean_default_database_is_the_line_it_was(db_path):
+    """The line that heads every report Gabriele reads. No transfers in the
+    table means nothing to add — and this is checked, not assumed."""
+    _realizing_db(db_path)
+
+    conn = _connect(db_path)
+    try:
+        assert conn.execute('SELECT COUNT(*) FROM swap_lot_transfers').fetchone()[0] == 0
+        assert config.tax_rule_banner(conn) == TODAYS_LINE
+    finally:
+        conn.close()
+
+
+def test_the_banner_on_an_uncalculated_database_is_the_line_it_was(db_path):
+    """No evidence either way is not a disagreement."""
+    _seed_one_plain_and_one_swap_sale(db_path)
+
+    conn = _connect(db_path)
+    try:
+        assert config.tax_rule_banner(conn) == TODAYS_LINE
+    finally:
+        conn.close()
+
+
+def test_the_banner_on_a_database_without_the_swap_tables_is_the_line_it_was(db_path):
+    """Reports run on databases older than the migrations."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute('DROP TABLE swap_lot_transfers')
+        conn.commit()
+        assert config.tax_rule_banner(conn) == TODAYS_LINE
+    finally:
+        conn.close()
+
+
+def test_the_banner_names_the_disagreement_when_the_data_was_born_under_deferral(db_path, monkeypatch):
+    """The test that matters, and the scenario task 13 step 7 walks into.
+
+    Run under swap_realizes = False to price the other rule, then put the
+    setting back to True. The next report reads figures calculated under
+    deferral and, before this, headed them with `swap_realizes=True` on a line
+    that claimed to name the rule that produced them.
+    """
+    _deferred_db(db_path, monkeypatch)  # patches the ENGINE's flag, not config's
+    assert config.SWAP_REALIZES is True, 'config must still carry the default here'
+
+    conn = _connect(db_path)
+    try:
+        banner = config.tax_rule_banner(conn)
+    finally:
+        conn.close()
+
+    assert banner.startswith(TODAYS_LINE), \
+        'the setting is still named first, and named correctly'
+    assert 'THE SETTING AND THE DATA DISAGREE' in banner, \
+        'the reader must not be able to skim past this'
+    assert '1 deferred swap disposal' in banner, \
+        'it must say how much of the data is affected'
+    assert 'swap_realizes=False' in banner, \
+        'and which rule actually produced it'
+    assert 'calculators/calculate_fifo.py' in banner, \
+        'first thing to do: recalculate under the setting now in force'
+    assert 'the rule they were born under' in banner, \
+        'second thing to do: read them under the rule that produced them'
+    assert 'tax return' in banner, 'and why it matters'
+
+
+def test_the_banner_names_the_disagreement_in_the_other_direction_too(db_path, monkeypatch):
+    """Setting flipped to False, figures still the ones a True run realized.
+
+    The same defect arriving from the other side, and the one you hit the
+    moment you flip the setting and read a report before recalculating. Left
+    out, it would be a guard that covers one direction of a symmetric problem.
+    """
+    _realizing_db(db_path)  # swap disposals that realized, written under True
+    monkeypatch.setattr(config, 'SWAP_REALIZES', False)
+
+    conn = _connect(db_path)
+    try:
+        banner = config.tax_rule_banner(conn)
+    finally:
+        conn.close()
+
+    assert 'swap_realizes=False (config.py, profile PT)' in banner, \
+        'the setting is named as configured'
+    assert 'THE SETTING AND THE DATA DISAGREE' in banner
+    assert 'realized a gain' in banner, 'it must say what the evidence is'
+    assert 'swap_realizes=True' in banner, 'and which rule produced it'
+
+
+def test_the_banner_confirms_the_data_when_the_setting_agrees_with_it(db_path, monkeypatch):
+    """Setting False and the transfers to match: no warning, but say so.
+
+    Under the non-default rule a reader has a right to see that the deferral
+    actually reached the data, rather than infer it from a setting.
+    """
+    _deferred_db(db_path, monkeypatch)
+    monkeypatch.setattr(config, 'SWAP_REALIZES', False)
+
+    conn = _connect(db_path)
+    try:
+        banner = config.tax_rule_banner(conn)
+    finally:
+        conn.close()
+
+    assert 'DISAGREE' not in banner, 'the setting and the data agree here'
+    assert '1 deferred swap disposal' in banner
+    assert 'consistent with this setting' in banner
+
+
+# ---- the evidence of the other direction: realized_swap_disposals ----
+
+def test_realized_swap_disposals_counts_only_swap_legs_that_produced_a_match(db_path):
+    _realizing_db(db_path)
+
+    conn = _connect(db_path)
+    try:
+        result = realized_swap_disposals(conn)
+        all_matches = conn.execute('SELECT COUNT(*) FROM sale_lot_matches').fetchone()[0]
+    finally:
+        conn.close()
+
+    assert all_matches == 2, 'the plain SELL and the swap SELL both realized'
+    assert result['count'] == 1, 'only the one carrying a swap_group_id is swap evidence'
+    assert result['total_value'] == 3200.0
+
+
+def test_realized_swap_disposals_is_zero_when_the_swap_deferred(db_path, monkeypatch):
+    _deferred_db(db_path, monkeypatch)
+
+    conn = _connect(db_path)
+    try:
+        assert realized_swap_disposals(conn)['count'] == 0
+    finally:
+        conn.close()
+
+
+def test_realized_swap_disposals_is_zero_before_the_fifo_runs(db_path):
+    _seed_one_plain_and_one_swap_sale(db_path)
+
+    conn = _connect(db_path)
+    try:
+        assert realized_swap_disposals(conn)['count'] == 0
+    finally:
+        conn.close()
+
+
+def test_the_banner_still_warns_on_a_database_that_predates_the_transfers_table(db_path, monkeypatch):
+    """Separates the two prerequisite guards, which overlap everywhere else.
+
+    `swap_lot_transfers` is a prerequisite of the *deferred* evidence only.
+    Checking it in the shared body instead would answer zero for the realized
+    evidence too, and a pre-migration database is exactly where that matters:
+    the setting can be flipped to `False` in `config.py` while the engine
+    refuses to recalculate without the table, so the figures on record are
+    whatever a `True` run left — and the report still prints them.
+
+    Every other test has the table, so none of them can tell the two guards
+    apart.
+    """
+    _realizing_db(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute('DROP TABLE swap_lot_transfers')
+        conn.commit()
+        monkeypatch.setattr(config, 'SWAP_REALIZES', False)
+        banner = config.tax_rule_banner(conn)
+    finally:
+        conn.close()
+
+    assert 'THE SETTING AND THE DATA DISAGREE' in banner, (
+        'the setting says deferral, the data was realized under the other rule, '
+        'and the missing table is no reason to stay silent about it'
+    )
+    assert 'realized a gain' in banner

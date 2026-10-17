@@ -88,8 +88,12 @@ SQLite DB (data/crypto_fifo.db)
     │                              - holding period on calendar dates
     │
     │                              calculators/swap_reporting.py
-    │                              deferred_disposals() — the one definition of
-    │                              what a reader of sale_lot_matches cannot see
+    │                              deferred_disposals() / realized_swap_disposals()
+    │                              - the one definition of what a reader of
+    │                                sale_lot_matches cannot see
+    │                              - evidence of the rule that wrote the data,
+    │                                which config.tax_rule_banner(conn) checks
+    │                                the configured setting against
     │
     ▼
 calculators/generate_irs_report.py

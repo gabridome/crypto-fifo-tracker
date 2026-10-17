@@ -25,11 +25,21 @@ exclude deferred disposals — a false explanation of why they are missing. A
 disposal that actually deferred has rows in `swap_lot_transfers` for its swap
 group; the engine refuses a deferred disposal it cannot cover with lots, so
 there is no completed deferral without them.
+
+**Both directions.** `deferred_disposals` and `realized_swap_disposals` are a
+pair, and each is evidence of the rule that wrote it: only a
+`swap_realizes = False` run defers a swap disposal, only a `True` run realizes
+one. `config.tax_rule_banner()` compares the configured setting against both,
+because the dangerous state is symmetric — figures from a `False` run under a
+setting now `True`, and figures from a `True` run under a setting now `False`.
+The engine's DELETE is per cryptocurrency, so a database recalculated for only
+some assets after a change of the setting holds both at once.
 """
 
 ZERO = {'count': 0, 'amount': 0.0, 'total_value': 0.0}
 
-_SQL = """
+# Every swap disposal, before either kind of evidence narrows it down.
+_SWAP_DISPOSALS = """
     SELECT COUNT(*),
            COALESCE(SUM(t.amount), 0),
            COALESCE(SUM(t.total_value), 0)
@@ -37,10 +47,21 @@ _SQL = """
     WHERE t.transaction_type = 'SELL'
       AND t.swap_group_id IS NOT NULL
       AND t.swap_group_id <> ''
-      AND NOT EXISTS (SELECT 1 FROM sale_lot_matches m
+"""
+
+# It deferred: no row in the register of realized gains, and transfers on
+# record for its group — which only a swap_realizes = False run writes.
+_DEFERRED = """      AND NOT EXISTS (SELECT 1 FROM sale_lot_matches m
                       WHERE m.sale_transaction_id = t.id)
       AND EXISTS (SELECT 1 FROM swap_lot_transfers s
                   WHERE s.swap_group_id = t.swap_group_id)
+"""
+
+# It realized: a row in that register — which only a swap_realizes = True run
+# writes for a swap leg. The mirror image, and the evidence that figures in
+# the database came from the declared rule.
+_REALIZED = """      AND EXISTS (SELECT 1 FROM sale_lot_matches m
+                  WHERE m.sale_transaction_id = t.id)
 """
 
 
@@ -69,16 +90,47 @@ def deferred_disposals(conn, cryptocurrency=None, year=None):
     migrations answers zero rather than raising: it cannot hold a deferred
     disposal, so zero is the true answer and not a swallowed error. Reports run
     on old databases and must still print.
-
-    Rows are read positionally, so nothing here depends on the caller having
-    set `row_factory` (same reason as `swap_dependency_order`).
     """
+    # Only this half needs the table: the query joins it for its evidence, and
+    # without it no run under deferral was ever possible — the engine refuses
+    # that combination before it writes anything.
     if not _has_table(conn, 'swap_lot_transfers'):
         return dict(ZERO)
+    return _count(conn, _DEFERRED, cryptocurrency, year)
+
+
+def realized_swap_disposals(conn, cryptocurrency=None, year=None):
+    """The same question from the other side: swap disposals that realized.
+
+    Evidence that figures in the database came from a `swap_realizes = True`
+    run, in the same shape as `deferred_disposals`. The two are the pair
+    `config.tax_rule_banner()` compares the configured setting against: either
+    one, found where the setting says it should not be, means the figures were
+    produced under the other rule and the setting changed afterwards.
+
+    Not symmetric by accident — the engine's DELETE is per cryptocurrency, so a
+    database recalculated for only some assets after a change of the setting
+    carries both kinds at once, and a guard covering one direction would pass
+    it in silence.
+    """
+    return _count(conn, _REALIZED, cryptocurrency, year)
+
+
+def _count(conn, evidence, cryptocurrency=None, year=None):
+    """Shared body. Rows are read positionally, so nothing here depends on the
+    caller having set `row_factory` (same reason as `swap_dependency_order`).
+
+    The `swap_group_id` column is the one prerequisite both halves share:
+    without it a row cannot be identified as a swap leg at all, so zero is the
+    true answer. The `swap_lot_transfers` table is a prerequisite of the
+    deferred half only, and is checked there — checking it here would answer
+    zero for the realized half on a database that predates the migration,
+    hiding the very disagreement the banner exists to name.
+    """
     if not _has_column(conn, 'transactions', 'swap_group_id'):
         return dict(ZERO)
 
-    sql = _SQL
+    sql = _SWAP_DISPOSALS + evidence
     params = []
     if cryptocurrency is not None:
         sql += '      AND t.cryptocurrency = ?\n'

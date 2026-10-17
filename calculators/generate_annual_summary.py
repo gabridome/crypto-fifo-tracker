@@ -253,7 +253,11 @@ def main():
         # For the reader who scrolls to the totals and stops there.
         print(f"  Permute differite escluse dal risultato FIFO: {deferred['count']:,} "
               f"(€{deferred['total_value']:,.2f} di controvalore, nessun realizzo)")
-    print(tax_rule_banner())
+    # The connection, not nothing: these figures came out of the database and
+    # may have been calculated under a different setting than the one config.py
+    # carries now. Handed over, the banner says so instead of asserting a rule
+    # it cannot know (config.tax_rule_banner).
+    print(tax_rule_banner(conn))
     print(f"{'═'*80}\n")
 
     conn.close()
