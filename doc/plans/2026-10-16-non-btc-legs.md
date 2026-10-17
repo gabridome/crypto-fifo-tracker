@@ -2078,12 +2078,28 @@ confirms it, and every report that depends on it prints it.
 
 - [ ] **Step 2: Demote the rule in both guides**
 
-Before writing, run `grep -rn 'doc/compliance.md' config.py` and fix the three
-comment references if this file ended up with a different name: they are the
-only pointers to it from code, nothing resolves them at runtime, so they fail
-silently rather than loudly. Task 7 left a one-sentence pointer near the top of
-each guide; this step is the full rewrite that replaces the "settled law"
-framing.
+Before writing, run `grep -rn 'doc/compliance.md\|doc/TODO.md' config.py doc/`
+and reconcile **two** divergences, both left behind by task 7:
+
+1. the three comments in `config.py` point at `doc/compliance.md`, which did not
+   exist until this task — nothing resolves them at runtime, so they failed
+   silently rather than loudly. Fix them if this file ended up with a different
+   name;
+2. the one-sentence pointers task 7 added near the top of each guide point at
+   `doc/TODO.md`, because `doc/compliance.md` did not exist yet. They now point
+   here. Code and guides must not point at two different files for the same
+   assumption.
+
+**And remove a caveat that this task makes false.** Task 7's pointers say the
+flag is declared and printed but that *the engine does not branch on it yet
+(tasks 9-11), so changing it does not change any figure*. That was true when it
+was written and is the opposite of true once tasks 9-11 have landed. Check it
+against the code before rewriting: `grep -rn 'SWAP_REALIZES' calculators/` must
+show the engine actually branching, not just the `# noqa: F401` re-export. A
+stale caveat telling a reader the setting is inert is worse than the claim it
+replaced, because it invites them to leave a legal assumption unexamined.
+
+This step is the full rewrite that replaces the "settled law" framing.
 
 `doc/en/crypto_to_crypto_guide.md`, replace line 9:
 
