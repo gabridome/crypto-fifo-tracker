@@ -61,6 +61,21 @@ CREATE TABLE IF NOT EXISTS sale_lot_matches (
     FOREIGN KEY (fifo_lot_id) REFERENCES fifo_lots(id)
 );
 
+-- Swap lot transfers table: lot inheritance across a deferred crypto-to-crypto
+-- swap. The acquisition date and cost of the asset given up travel to the
+-- asset received; the gain does not. One row per lot slice moved.
+CREATE TABLE IF NOT EXISTS swap_lot_transfers (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    swap_group_id        TEXT NOT NULL,
+    from_cryptocurrency  TEXT NOT NULL,
+    to_cryptocurrency    TEXT NOT NULL,
+    swap_date            TEXT NOT NULL,
+    source_purchase_date TEXT NOT NULL,
+    amount_from          REAL NOT NULL,
+    cost_basis           REAL NOT NULL,
+    created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(transaction_date);
 CREATE INDEX IF NOT EXISTS idx_transactions_crypto ON transactions(cryptocurrency);
@@ -75,6 +90,10 @@ CREATE INDEX IF NOT EXISTS idx_fifo_lots_crypto ON fifo_lots(cryptocurrency);
 CREATE INDEX IF NOT EXISTS idx_fifo_lots_remaining ON fifo_lots(remaining_amount);
 CREATE INDEX IF NOT EXISTS idx_sale_matches_crypto ON sale_lot_matches(cryptocurrency);
 CREATE INDEX IF NOT EXISTS idx_sale_matches_sale_date ON sale_lot_matches(sale_date);
+CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_group
+    ON swap_lot_transfers(swap_group_id);
+CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_to
+    ON swap_lot_transfers(to_cryptocurrency);
 
 -- View: Transaction summary by exchange
 CREATE VIEW IF NOT EXISTS v_exchange_summary AS
