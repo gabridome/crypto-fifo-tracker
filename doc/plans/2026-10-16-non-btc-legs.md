@@ -1914,6 +1914,114 @@ def test_two_source_lots_become_two_inherited_lots(db_path, monkeypatch):
                     ('2021-01-01T10:00:00+00:00', 500.0, 300.0)]
 
 
+def test_an_inherited_lot_older_than_an_existing_lot_is_consumed_first(db_path, monkeypatch):
+    """FIFO follows the acquisition date, including an inherited one.
+
+    The received asset already had a lot of its own, bought later than the lot
+    the swap hands it. Appending the inherited lot would put the newer lot
+    first in mem_lots and the consumption loop walks that list in order, so a
+    later sale would match the wrong lot — wrong cost basis, wrong holding
+    period, wrong exempt/taxable split.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2019-01-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='o1')
+        # USDT bought on its own, LATER than the ETH the swap will hand over
+        _tx(conn, transaction_date='2022-06-01T10:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=500.0, price_per_unit=0.9, total_value=450.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='o2')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='o3', swap_group_id='swap-3')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='o4', swap_group_id='swap-3')
+        # Sell 600 USDT: FIFO must take the 1000 inherited (2019) before the 500 own (2022)
+        _tx(conn, transaction_date='2024-09-01T10:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='USDT', amount=600.0, price_per_unit=1.0, total_value=600.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='o5')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        matched = conn.execute("""SELECT purchase_date, ROUND(amount_sold,8)
+                                  FROM sale_lot_matches WHERE cryptocurrency='USDT'
+                                  ORDER BY purchase_date""").fetchall()
+    finally:
+        conn.close()
+
+    assert matched == [('2019-01-01T10:00:00+00:00', 600.0)], (
+        'the sale must consume the inherited lot first: it was acquired in 2019, '
+        'the asset own lot only in 2022'
+    )
+
+
+def test_inherited_lot_ordering_survives_both_date_formats(db_path, monkeypatch):
+    """The production database stores both forms, so the key must cope.
+
+    Measured read-only on data/crypto_fifo.db (2026-10-17): most rows end in
+    '+00:00' and a minority have no offset at all. datetime.fromisoformat on the two
+    gives an aware and a naive datetime, and comparing them raises TypeError.
+    The existing holding-period code sidesteps it by comparing .date(); the
+    ordering added by this task must not reintroduce it.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        _tx(conn, transaction_date='2019-01-01T10:00:00', transaction_type='BUY',   # naive
+            cryptocurrency='ETH', amount=1.0, price_per_unit=1000.0, total_value=1000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='m1')
+        _tx(conn, transaction_date='2022-06-01T10:00:00+00:00', transaction_type='BUY',  # aware
+            cryptocurrency='USDT', amount=500.0, price_per_unit=0.9, total_value=450.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='m2')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='SELL',
+            cryptocurrency='ETH', amount=1.0, price_per_unit=3000.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='m3', swap_group_id='swap-4')
+        _tx(conn, transaction_date='2024-04-22T15:00:00+00:00', transaction_type='BUY',
+            cryptocurrency='USDT', amount=1000.0, price_per_unit=3.0, total_value=3000.0,
+            fee_currency='EUR', currency='EUR', exchange_name='Test', source='seed',
+            imported_at='2026-01-01T00:00:00', record_hash='m4', swap_group_id='swap-4')
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        tracker.calculate_fifo_lots('ETH')
+        tracker.calculate_fifo_lots('USDT')     # must not raise TypeError
+    finally:
+        tracker.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        dates = [r[0] for r in conn.execute(
+            "SELECT purchase_date FROM fifo_lots WHERE cryptocurrency='USDT' ORDER BY id")]
+    finally:
+        conn.close()
+
+    assert dates == ['2019-01-01T10:00:00', '2022-06-01T10:00:00+00:00'], (
+        'the inherited naive-dated lot belongs before the aware-dated own lot'
+    )
+
+
 def test_take_side_without_its_give_side_fails_loudly(db_path, monkeypatch):
     """Processing the received asset before the one given up is an ordering bug."""
     _seed_swap(db_path)
@@ -1933,7 +2041,54 @@ Run: `venv/bin/pytest tests/test_swap_deferral.py -k inherit -v`
 Expected: FAIL — the USDT lot is still priced from its own `price_per_unit`
 (`2000.0, 3000.0, 1.5` instead of the inherited values).
 
-- [ ] **Step 3: Build inherited lots in the BUY branch**
+- [ ] **Step 3: Identify a lot by a key, not by its index in `mem_lots`**
+
+This is a prerequisite, not a cleanup, and it has to land before step 4.
+
+`matches_batch` and `transfers_batch` record the lot's **index** in `mem_lots`
+and resolve it after the inserts with `lot_db_ids[idx]`. That works only while
+lots are appended. Step 4 inserts inherited lots in acquisition-date order, and
+an insertion shifts every index already recorded — silently, into the wrong
+lot, which means the wrong cost basis and the wrong purchase date on a match.
+
+Give each lot a key when it is created and resolve by key. In the BUY branch,
+add to the lot dict:
+
+```python
+                        'key': len(mem_lots),   # stable identity; the index is not
+```
+
+Use `len(mem_lots)` **before** the append/insert, as a monotonic counter — not
+as a position. It never repeats within one crypto's pass, which is all the
+resolution needs.
+
+Then record the key instead of the index:
+
+```python
+                            lot['key'],        # resolved to the db id below
+```
+
+in both batches, and build the map by key:
+
+```python
+            lot_db_ids = {}
+            for lot in mem_lots:
+                self.cursor.execute(''' ... INSERT INTO fifo_lots ... ''', ( ... ))
+                lot_db_ids[lot['key']] = self.cursor.lastrowid
+```
+
+resolving with `lot_db_ids[match[1]]` and `lot_db_ids[transfer[1]]`.
+
+**This touches the default path, so it must be proved behaviour-identical, not
+argued.** Seed a database with the awkward cases — a fee, a partial lot
+consumption, a sale spanning two lots, a sale larger than the lots on record,
+sub-cent prices, DEPOSIT/WITHDRAWAL rows — run the engine before and after the
+change on the same data, and compare **every column** of `fifo_lots` and
+`sale_lot_matches`. Identical, or the change is wrong. The task 9 quality
+review built exactly this harness; rebuild it rather than trusting the suite,
+because the suite's fixtures are small and round.
+
+- [ ] **Step 4: Build inherited lots in the BUY branch**
 
 At the start of the `if trans_type == 'BUY':` branch, before `amount = …`:
 
@@ -1965,8 +2120,9 @@ At the start of the `if trans_type == 'BUY':` branch, before `amount = …`:
                     qty = (received - allocated) if n == len(slices) else (received * share)
                     allocated += qty
                     cost = Decimal(str(sl['cost_basis']))
-                    mem_lots.append({
+                    _insert_lot_by_acquisition_date(mem_lots, lot_ptr, {
                         'db_id': None,
+                        'key': len(mem_lots),
                         'purchase_transaction_id': trans['id'],
                         'cryptocurrency': cryptocurrency,
                         'purchase_date': sl['source_purchase_date'],   # inherited
@@ -1983,15 +2139,56 @@ At the start of the `if trans_type == 'BUY':` branch, before `amount = …`:
             if trans_type == 'BUY':
 ```
 
-The inherited lots are appended in `source_purchase_date` order, which keeps
-`mem_lots` sorted the way the FIFO pointer expects.
+And the helper, as a module-level function next to `_to_eur` / `_to_price`:
 
-- [ ] **Step 4: Run them and watch them pass**
+```python
+def _acquisition_key(iso_date):
+    """Comparable key for a purchase date, whatever form it is stored in.
+
+    The production database holds both forms: most rows ending in '+00:00'
+    and a minority with no offset (measured read-only, 2026-10-17). fromisoformat
+    gives an aware datetime for the first and a naive one for the second, and
+    comparing the two raises TypeError. A naive timestamp is read as UTC, the
+    same assumption the holding-period code already makes when it compares
+    .date().
+    """
+    dt = datetime.fromisoformat(iso_date)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _insert_lot_by_acquisition_date(mem_lots, lot_ptr, lot):
+    """Insert keeping mem_lots ordered by acquisition date from lot_ptr on.
+
+    Appending is right for a purchase, because purchases arrive in date order.
+    It is wrong for an inherited lot: that lot carries the *original*
+    acquisition date — older than lots already in the list — while it only
+    enters this asset's ledger at the swap. The consumption loop walks the list
+    in order, so appending would make a later sale match the newer lot first:
+    FIFO by availability instead of FIFO by acquisition date, with a different
+    cost basis and a different holding period, and therefore a different
+    exempt/taxable split.
+
+    Positions before lot_ptr are exhausted lots, so the insertion point is
+    never before it and the pointer stays valid. A lot already partially
+    consumed can end up after the inherited one, which is correct: the older
+    lot would have gone first had it been available.
+    """
+    key = _acquisition_key(lot['purchase_date'])
+    j = lot_ptr
+    while j < len(mem_lots) and _acquisition_key(mem_lots[j]['purchase_date']) <= key:
+        j += 1
+    mem_lots.insert(j, lot)
+
+
+# needs `from datetime import timezone` alongside the existing datetime import
+```
+
+- [ ] **Step 5: Run them and watch them pass**
 
 Run: `venv/bin/pytest tests/test_swap_deferral.py -v`
 Expected: all passed (6 tests in this module).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add calculators/crypto_fifo_tracker.py tests/test_swap_deferral.py
