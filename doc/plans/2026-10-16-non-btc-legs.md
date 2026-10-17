@@ -1519,6 +1519,11 @@ git commit -m "feat(schema): swap_lot_transfers, lot inheritance across a deferr
 
 - [ ] **Step 1: Write the failing test** (append)
 
+Task 8 removed `import pytest` from this file, because at that point nothing in
+it used pytest (`tmp_path` is injected by the runner, not imported). The tests
+below use `pytest.raises`, so add the import back at the top of the file before
+appending.
+
 ```python
 from calculators.crypto_fifo_tracker import CryptoFIFOTracker
 
@@ -1575,6 +1580,12 @@ def test_deferred_swap_realizes_nothing_and_records_the_transfer(db_path, monkey
         transfers = conn.execute("""SELECT swap_group_id, from_cryptocurrency, to_cryptocurrency,
                                            source_purchase_date, amount_from, cost_basis
                                     FROM swap_lot_transfers""").fetchall()
+        # The JOIN is the assertion: source_fifo_lot_id must resolve to the lot
+        # actually consumed. Two buys on the same day make two lots with the
+        # same purchase_date, so a date alone does not identify one.
+        inherited = conn.execute("""SELECT l.cryptocurrency, l.purchase_date
+                                   FROM swap_lot_transfers t
+                                   JOIN fifo_lots l ON l.id = t.source_fifo_lot_id""").fetchall()
         remaining = conn.execute("SELECT ROUND(SUM(remaining_amount),8) FROM fifo_lots "
                                  "WHERE cryptocurrency='ETH'").fetchone()[0]
     finally:
@@ -1582,7 +1593,34 @@ def test_deferred_swap_realizes_nothing_and_records_the_transfer(db_path, monkey
 
     assert matches == 0, 'a deferred swap must not produce a realized match'
     assert transfers == [('swap-1', 'ETH', 'USDT', '2020-01-10T10:00:00+00:00', 1.0, 1000.0)]
+    assert inherited == [('ETH', '2020-01-10T10:00:00+00:00')], \
+        'the transfer must point at the lot it consumed, not merely carry its date'
     assert remaining == 0.0, 'the lots of the asset given up are consumed'
+
+
+def test_deferred_swap_without_its_buy_leg_refuses_to_lose_the_cost_basis(db_path, monkeypatch):
+    """The one way this branch could destroy a number silently.
+
+    A SELL carrying a swap_group_id whose BUY leg was never imported: the lots
+    are consumed, and under deferral there is no realized match either. Before
+    this guard the row was written with an empty to_cryptocurrency, which the
+    take side never queries — cost basis out of the chain, no error, wrong tax.
+    """
+    _seed_swap(db_path)
+    conn = sqlite3.connect(db_path)
+    try:  # remove the BUY leg of the swap, keep the disposal
+        conn.execute("DELETE FROM transactions WHERE cryptocurrency='USDT'")
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', False)
+
+    tracker = CryptoFIFOTracker(db_path)
+    try:
+        with pytest.raises(ValueError, match='swap-1'):
+            tracker.calculate_fifo_lots('ETH')
+    finally:
+        tracker.close()
 
 
 def test_realizing_swap_still_produces_a_match(db_path):
@@ -1646,6 +1684,42 @@ group to the asset received, plus a clean slate for this crypto's transfers:
         transfers_batch = []
 ```
 
+- [ ] **Step 3b: Require the table instead of re-creating it**
+
+`_ensure_fifo_tables` (line ~48) creates `fifo_lots` and `sale_lot_matches` with
+`IF NOT EXISTS` on every instance: in this repo every table the engine writes is
+also self-healed by the engine. `swap_lot_transfers` deliberately breaks that
+pattern, and the reason is the defect the task 8 review found: two copies of the
+same DDL drift apart silently, and only one of them gets tested. A third copy
+inside the engine would be a third thing to drift — and this table carries
+`CHECK` constraints that SQLite cannot add after the fact, so a copy that loses
+one would produce a table that accepts exactly the rows the constraints exist to
+refuse.
+
+So the engine requires it rather than creating it, and only when deferral is
+actually in use — someone running with the default `swap_realizes = True` never
+touches this table and must not be stopped. At the top of `calculate_fifo_lots`,
+before the query:
+
+```python
+        if not SWAP_REALIZES:
+            exists = self.cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='swap_lot_transfers'"
+            ).fetchone()
+            if not exists:
+                raise ValueError(
+                    'tax_rules.swap_realizes is False, which needs the swap_lot_transfers '
+                    'table to carry lot inheritance across a deferred swap, and this '
+                    'database does not have it. Run: python3 '
+                    'calculators/update_fifo_schema_swap_transfers.py <db>'
+                )
+```
+
+A test for it: a database built without the table, `SWAP_REALIZES` patched to
+`False`, and `pytest.raises(ValueError, match='update_fifo_schema_swap_transfers')`.
+Build the fixture the way task 8 does — the whole schema, then `DROP TABLE
+swap_lot_transfers` — not by hand-writing a partial schema.
+
 - [ ] **Step 4: Defer instead of realizing, inside the SELL loop**
 
 In the SELL branch, replace the `matches_batch.append((...))` block with:
@@ -1655,10 +1729,22 @@ In the SELL branch, replace the `matches_batch.append((...))` block with:
                     if deferred:
                         # No realization: the acquisition date and cost travel to
                         # the asset received (spec §7, deferral regime).
+                        take_asset = swap_takes.get(trans['swap_group_id'])
+                        if not take_asset:
+                            raise ValueError(
+                                f"Swap group {trans['swap_group_id']!r} disposes of "
+                                f'{cryptocurrency} but its BUY leg was never imported. '
+                                'Under deferral the cost basis of the lots consumed here '
+                                'would have nowhere to land: it would leave the chain '
+                                'silently, with no realized gain and no inherited lot. '
+                                'Import the other leg with importers/import_non_btc_legs.py, '
+                                'or set tax_rules.swap_realizes = True in config.py.'
+                            )
                         transfers_batch.append((
                             trans['swap_group_id'],
+                            i,                 # lot index (replaced with db_id later)
                             cryptocurrency,
-                            swap_takes.get(trans['swap_group_id'], ''),
+                            take_asset,
                             sale_date,
                             lot['purchase_date'],
                             float(amount_from_lot),
@@ -1689,12 +1775,21 @@ In the bulk-write section, after the lots are inserted and before the matches
 ```python
         if transfers_batch:
             print(f"  Writing {len(transfers_batch):,} swap lot transfers (deferral)...")
-            self.cursor.executemany('''
-                INSERT INTO swap_lot_transfers
-                (swap_group_id, from_cryptocurrency, to_cryptocurrency, swap_date,
-                 source_purchase_date, amount_from, cost_basis)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', transfers_batch)
+            # Replace the lot index with the real DB id, exactly as the matches
+            # above do: the pointer is what makes the inheritance auditable back
+            # to the lot it consumed, and a date alone does not identify a lot.
+            for transfer in transfers_batch:
+                self.cursor.execute('''
+                    INSERT INTO swap_lot_transfers
+                    (swap_group_id, source_fifo_lot_id, from_cryptocurrency,
+                     to_cryptocurrency, swap_date, source_purchase_date,
+                     amount_from, cost_basis)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    transfer[0], lot_db_ids[transfer[1]],
+                    transfer[2], transfer[3], transfer[4], transfer[5],
+                    transfer[6], transfer[7],
+                ))
 ```
 
 - [ ] **Step 6: Run them and watch them pass**
