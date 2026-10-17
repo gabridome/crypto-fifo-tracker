@@ -1,4 +1,5 @@
 """Deferral path: a swap that does not realize, and the inheritance it creates."""
+import inspect
 import os
 import re
 import sqlite3
@@ -993,3 +994,45 @@ def test_a_failure_after_the_deletes_is_rolled_back_not_left_for_the_next_commit
     assert _fifo_state(db_path, 'ETH') == before, \
         'the failed crypto lost committed FIFO data — the write was not rolled back'
     assert _fifo_state(db_path, 'XYZ')['matches'] == 1, 'the healthy crypto must still compute'
+
+
+def test_the_write_phase_opens_an_explicit_transaction():
+    """Pins `self.conn.execute('BEGIN')` in calculate_fifo_lots, deliberately.
+
+    Three things, in order, because the third is the only one that matters:
+
+    1. Today this line is redundant. Measured on this interpreter: with the
+       sqlite3 module's legacy transaction control (the default,
+       isolation_level == ''), `conn.in_transaction` is already True after the
+       first DELETE with no explicit BEGIN, so the rollback() in the error
+       path would undo the deletes anyway.
+    2. So a reviewer can demonstrate the line does nothing and delete it. That
+       is the removal this test exists to stop, which is why it asserts the
+       source rather than a behaviour: there is no behaviour to assert while
+       the legacy default holds, and the two tests above
+       (…_keeps_the_fifo_data_it_had, …_rolled_back_not_left_for_the_next_commit)
+       stay green without it.
+    3. What makes rollback() effective is not our code, it is that module
+       default — and the sqlite3 module has an announced move towards
+       autocommit. Under autocommit a rollback() with no explicit BEGIN undoes
+       nothing, the DELETEs are already permanent, and the data loss this
+       branch just closed comes back silently on a tax-history database.
+
+    Remove it only together with an explicit declaration of the connection's
+    transaction mode in __init__ — not because it is redundant. Measured, so
+    that the choice is informed: `autocommit=False` is the declaration that
+    would survive the change, and it does not exist on the floor this project
+    declares (pyproject.toml target-version = py311; on 3.11.17 the kwarg
+    raises TypeError and Connection has no autocommit attribute), while
+    passing isolation_level='' only restates today's default and would be
+    ignored once autocommit is set.
+    """
+    source = inspect.getsource(CryptoFIFOTracker.calculate_fifo_lots)
+
+    assert "self.conn.execute('BEGIN')" in source, (
+        'the write phase of calculate_fifo_lots must open its transaction explicitly'
+    )
+    assert source.index("self.conn.execute('BEGIN')") < source.index('DELETE FROM'), (
+        'BEGIN must come before the first DELETE, or the deletes are not in the '
+        'transaction that the error path rolls back'
+    )
