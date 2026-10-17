@@ -1316,15 +1316,28 @@ with `monkeypatch.setattr('calculators.crypto_fifo_tracker.SWAP_REALIZES', …)`
 Run: `venv/bin/pytest tests/test_swap_realizes.py -v`
 Expected: 3 passed.
 
-- [ ] **Step 6: Print the rule wherever a realized figure is printed**
+- [ ] **Step 6: Print the rule wherever a realized figure reaches a human**
 
-In `calculators/calculate_fifo.py`, in the `[4/4] Summary` block, add:
+Three places, the same line in each, so they are greppable as one thing:
+`calculators/calculate_fifo.py`'s `[4/4] Summary`,
+`calculators/generate_annual_summary.py`'s final totals, and
+`calculators/generate_irs_report.py`'s console summary.
 
 ```python
     print(f"Tax rule in force: swap_realizes={SWAP_REALIZES} (config.py, profile {COUNTRY})")
 ```
 
-with `from config import COUNTRY, SWAP_REALIZES` at the top of the file.
+with `from config import COUNTRY, SWAP_REALIZES` added to each file's existing
+config import.
+
+**Deliberately not done, decided with the owner on 2026-10-16:** the
+`IRS_Crypto_FIFO_<year>.xlsx` that `generate_irs_report.py` writes — the file
+that goes into the real filing — carries no trace of the rule either, and will
+not until the rule actually changes. Today's value is the one already filed, so
+nothing on paper is wrong; the risk is that two reports generated under
+opposite rules would be indistinguishable as files. When the jurisdiction
+answer arrives, the assumption goes into a header row or a separate
+"assumptions" sheet, outside the area that mimics the official form.
 
 - [ ] **Step 7: Run the suite and commit**
 
