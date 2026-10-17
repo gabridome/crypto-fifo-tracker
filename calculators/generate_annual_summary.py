@@ -7,7 +7,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import DATABASE_PATH
+from config import COUNTRY, DATABASE_PATH, SWAP_REALIZES
 
 def main():
     year = int(sys.argv[1]) if len(sys.argv) > 1 else 2025
@@ -221,6 +221,7 @@ def main():
     print(f"  Plus-valenza totale:    €{grand_total_gain:>14,.2f}")
     tax = max(0, grand_taxable_gain * 0.28)
     print(f"  Imposta stimata (28%):  €{tax:>14,.2f}")
+    print(f"Tax rule in force: swap_realizes={SWAP_REALIZES} (config.py, profile {COUNTRY})")
     print(f"{'═'*80}\n")
 
     conn.close()
