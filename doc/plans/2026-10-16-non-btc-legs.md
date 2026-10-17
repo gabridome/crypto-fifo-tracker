@@ -1519,10 +1519,9 @@ git commit -m "feat(schema): swap_lot_transfers, lot inheritance across a deferr
 
 - [ ] **Step 1: Write the failing test** (append)
 
-Task 8 removed `import pytest` from this file, because at that point nothing in
-it used pytest (`tmp_path` is injected by the runner, not imported). The tests
-below use `pytest.raises`, so add the import back at the top of the file before
-appending.
+Task 8 removed `import pytest` from this file and then put it back, once its
+own later rounds added parametrized tests. Check before adding it: at the time
+of writing it is already there.
 
 ```python
 from calculators.crypto_fifo_tracker import CryptoFIFOTracker
@@ -1678,9 +1677,15 @@ group to the asset received, plus a clean slate for this crypto's transfers:
         """)
         swap_takes = {row['swap_group_id']: row['cryptocurrency'] for row in self.cursor.fetchall()}
 
-        # Idempotent per crypto, like the DELETEs above.
-        self.cursor.execute('DELETE FROM swap_lot_transfers WHERE from_cryptocurrency = ?',
-                            (cryptocurrency,))
+        # Idempotent per crypto, like the DELETEs above — but only where the
+        # table exists. Unconditionally, this DELETE kills the default path on a
+        # database that never got the migration: swap_realizes = True, which is
+        # the configuration of the figures already filed. Guarded on the table
+        # rather than on the setting, so that coming back from False to True
+        # still clears transfer rows that tasks 10-11 would otherwise read.
+        if transfers_table_exists:
+            self.cursor.execute('DELETE FROM swap_lot_transfers WHERE from_cryptocurrency = ?',
+                                (cryptocurrency,))
         transfers_batch = []
 ```
 
@@ -1702,18 +1707,34 @@ touches this table and must not be stopped. At the top of `calculate_fifo_lots`,
 before the query:
 
 ```python
-        if not SWAP_REALIZES:
-            exists = self.cursor.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='swap_lot_transfers'"
-            ).fetchone()
-            if not exists:
-                raise ValueError(
-                    'tax_rules.swap_realizes is False, which needs the swap_lot_transfers '
-                    'table to carry lot inheritance across a deferred swap, and this '
-                    'database does not have it. Run: python3 '
-                    'calculators/update_fifo_schema_swap_transfers.py <db>'
-                )
+        # transactions.swap_group_id is read by the query below in every mode,
+        # so task 1's migration is a prerequisite of this engine, not an option.
+        if 'swap_group_id' not in [r[1] for r in
+                                   self.cursor.execute('PRAGMA table_info(transactions)')]:
+            raise ValueError(
+                'This database has no transactions.swap_group_id column, which the '
+                'FIFO engine now reads to tell a swap apart from a plain disposal. '
+                'Run: python3 calculators/update_fifo_schema_swap_group.py <db>'
+            )
+
+        transfers_table_exists = self.cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='swap_lot_transfers'"
+        ).fetchone() is not None
+        if not SWAP_REALIZES and not transfers_table_exists:
+            raise ValueError(
+                'tax_rules.swap_realizes is False, which needs the swap_lot_transfers '
+                'table to carry lot inheritance across a deferred swap, and this '
+                'database does not have it. Run: python3 '
+                'calculators/update_fifo_schema_swap_transfers.py <db>'
+            )
 ```
+
+Both checks exist because the production database has **neither** the column nor
+the table: verified read-only on 2026-10-17, `data/crypto_fifo.db` carries only
+`transactions`, `fifo_lots`, `sale_lot_matches`. Task 13 step 3 runs both
+migrations before anything else, so the real run is covered — but until then,
+this branch cannot calculate against that database, and it must say so in one
+sentence instead of dying on a raw `no such column` halfway through a crypto.
 
 A test for it: a database built without the table, `SWAP_REALIZES` patched to
 `False`, and `pytest.raises(ValueError, match='update_fifo_schema_swap_transfers')`.
