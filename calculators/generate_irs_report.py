@@ -39,7 +39,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import DATABASE_PATH, get_exchange_at_country
+from config import DATABASE_PATH, get_exchange_at_country, tax_rule_banner
 DB_PATH = DATABASE_PATH
 
 DOMESTIC_EXCHANGES = set()  # Portuguese platforms with NIF
@@ -647,6 +647,16 @@ def main():
     print(f'\n  {"=" * 50}')
     print(f'  Plus-valenza totale:   EUR {sum(s["gain_loss"] for s in sales):>12,.2f}')
     print(f'  Imposta stimata:       EUR {tax:>12,.2f}')
+    # Its own short-lived connection, closed in finally
+    # (doc/code_guidelines.md §1.3): this main() reads through helpers that open
+    # and close their own, so there is none live here — and the banner must be
+    # able to say whether these figures were produced under the setting it
+    # names, which it can only learn from the database.
+    banner_conn = sqlite3.connect(db_path)
+    try:
+        print(tax_rule_banner(banner_conn))
+    finally:
+        banner_conn.close()
     print(f'  {"=" * 50}')
     if tax == 0:
         print(f'  Nessuna imposta. Dichiarare in Anexo G1 Quadro 07.')

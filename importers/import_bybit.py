@@ -45,7 +45,9 @@ def import_bybit(filepath, exchange_name='Bybit'):
     with open(filepath, 'r', encoding='utf-8-sig') as f:
         first_line = f.readline()
         if not first_line.startswith('Uid,'):
-            # First line is the "UID: 176178208,..." metadata — skip it
+            # First line is the "UID: <account uid>,..." metadata — skip it
+            # (placeholder: this repo is public. The check above tests the
+            # literal header prefix, so it never depended on the number.)
             pass
         else:
             # First line IS the header — seek back

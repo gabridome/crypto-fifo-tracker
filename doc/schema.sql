@@ -1,6 +1,6 @@
 -- Crypto FIFO Tracker Database Schema
 -- SQLite3
--- Last updated: 2026-03-03
+-- Last updated: 2026-10-17
 
 -- Main transactions table
 CREATE TABLE IF NOT EXISTS transactions (
@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     -- Source tracking (added March 2026)
     source TEXT,              -- CSV filename or 'web_manual_entry'
     imported_at TEXT,         -- ISO timestamp of import
-    record_hash TEXT          -- SHA256 for dedup and audit
+    record_hash TEXT,         -- SHA256 for dedup and audit
+    swap_group_id TEXT                             -- both legs of one swap share this
 );
 
 -- FIFO lots table
@@ -60,6 +61,31 @@ CREATE TABLE IF NOT EXISTS sale_lot_matches (
     FOREIGN KEY (fifo_lot_id) REFERENCES fifo_lots(id)
 );
 
+-- Swap lot transfers table: lot inheritance across a deferred crypto-to-crypto
+-- swap. The acquisition date and cost of the asset given up travel to the
+-- asset received; the gain does not. One row per lot slice moved.
+-- CHECKs on the TEXT columns: NOT NULL alone lets the empty string through,
+-- and task 9's own fallback (swap_takes.get(group, '')) can produce exactly
+-- that for to_cryptocurrency when a swap's BUY leg never imported — a row
+-- that inserts silently, consumes a lot, and realizes no gain for it.
+CREATE TABLE IF NOT EXISTS swap_lot_transfers (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    swap_group_id        TEXT NOT NULL CHECK (swap_group_id <> ''),
+    source_fifo_lot_id   INTEGER NOT NULL,
+    from_cryptocurrency  TEXT NOT NULL CHECK (from_cryptocurrency <> ''),
+    to_cryptocurrency    TEXT NOT NULL CHECK (to_cryptocurrency <> ''),
+    swap_date            TEXT NOT NULL,
+    source_purchase_date TEXT NOT NULL,
+    amount_from          REAL NOT NULL CHECK (amount_from > 0),
+    cost_basis           REAL NOT NULL CHECK (cost_basis >= 0),
+    -- TEXT + explicit default, not TIMESTAMP DEFAULT CURRENT_TIMESTAMP like
+    -- the rest of this file: TIMESTAMP has NUMERIC affinity in SQLite, so a
+    -- stored ISO datetime string would be subject to silent coercion. TEXT
+    -- says what it actually is. Deliberate — do not "uniform" it back.
+    created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (source_fifo_lot_id) REFERENCES fifo_lots(id)
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(transaction_date);
 CREATE INDEX IF NOT EXISTS idx_transactions_crypto ON transactions(cryptocurrency);
@@ -69,12 +95,37 @@ CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(transaction_typ
 CREATE INDEX IF NOT EXISTS idx_transactions_source ON transactions(source);
 CREATE INDEX IF NOT EXISTS idx_transactions_hash ON transactions(record_hash);
 CREATE INDEX IF NOT EXISTS idx_transactions_imported_at ON transactions(imported_at);
+CREATE INDEX IF NOT EXISTS idx_transactions_swap_group ON transactions(swap_group_id);
 CREATE INDEX IF NOT EXISTS idx_fifo_lots_crypto ON fifo_lots(cryptocurrency);
 CREATE INDEX IF NOT EXISTS idx_fifo_lots_remaining ON fifo_lots(remaining_amount);
 CREATE INDEX IF NOT EXISTS idx_sale_matches_crypto ON sale_lot_matches(cryptocurrency);
 CREATE INDEX IF NOT EXISTS idx_sale_matches_sale_date ON sale_lot_matches(sale_date);
+CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_group
+    ON swap_lot_transfers(swap_group_id);
+-- Targets swap_lot_transfers.from_cryptocurrency, not to_cryptocurrency:
+-- the DELETE in task 9 filters on the give side and runs on every engine
+-- pass for every crypto; the take side is already covered by the group index.
+CREATE INDEX IF NOT EXISTS idx_swap_lot_transfers_from
+    ON swap_lot_transfers(from_cryptocurrency);
+-- The only idempotency invariant expressible here: one lot moves into one
+-- swap group's inheritance at most once. A swap group is exactly one SELL
+-- (see importers/non_btc_valuation.py:_swap_id), and FIFO consumption for
+-- one SELL visits each lot once, so a correct run cannot violate it.
+-- It is NOT a guard against re-running the engine: the engine deletes and
+-- reinserts the lots on every pass, so the same lot comes back with a new
+-- id and the pair differs (measured: lot id 1 on the first pass, 2 on the
+-- second). The only thing that keeps a second pass from doubling the
+-- inherited cost basis is the DELETE in calculate_fifo_lots.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_swap_lot_transfers_unique_group_lot
+    ON swap_lot_transfers(swap_group_id, source_fifo_lot_id);
 
--- View: Transaction summary by exchange
+-- View: Transaction summary by exchange.
+-- Reads `transactions`, so it INCLUDES the disposal leg of a deferred swap at
+-- its full value — the opposite of v_annual_gains below. Reading the two side
+-- by side under `tax_rules.swap_realizes = False` gives two different answers
+-- to "how much was disposed of", both correct for what they measure. Neither
+-- view is referenced from Python or from a template (checked 2026-10-17); they
+-- exist for hand-written queries, which is where the contradiction lands.
 CREATE VIEW IF NOT EXISTS v_exchange_summary AS
 SELECT 
     exchange_name,
@@ -98,7 +149,12 @@ FROM fifo_lots
 WHERE remaining_amount > 0
 GROUP BY cryptocurrency;
 
--- View: Annual gains summary
+-- View: Annual gains summary.
+-- Reads `sale_lot_matches`, the register of REALIZED gains: under
+-- `tax_rules.swap_realizes = False` `sale_count`, `total_sold` and
+-- `total_proceeds` silently mean "excluding deferred swaps". The gain columns
+-- are right either way; the count and the quantities are not the disposals.
+-- See doc/compliance.md and calculators/swap_reporting.py.
 CREATE VIEW IF NOT EXISTS v_annual_gains AS
 SELECT 
     strftime('%Y', sale_date) as year,

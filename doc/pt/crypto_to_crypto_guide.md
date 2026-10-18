@@ -6,7 +6,19 @@ Como tratar swaps BTC→ETH, conversões de stablecoins e negociações entre di
 
 ## Regra fiscal fundamental
 
-**Cada swap cripto-para-cripto é um evento fiscal** na maioria das jurisdições.
+**Se uma permuta cripto-para-cripto é ou não um evento tributável depende da
+jurisdição**, e esta ferramenta não decide por você: a resposta é a configuração
+`tax_rules.swap_realizes` em `config.py` (ver `doc/compliance.md`). O valor por
+omissão, `True`, trata cada permuta como uma alienação do ativo cedido — o
+tratamento mais comum, e o que o resto deste guia descreve. **Consulte um
+profissional fiscal local antes de se basear nele.**
+
+O motor honra ambos os valores. Com `False` a permuta não realiza nada: os lotes
+do ativo cedido são consumidos e a sua data e custo de aquisição passam para o
+ativo recebido, pelo que a mais-valia só surge numa alienação posterior, com a
+data de compra original. Mudar a configuração é um **recálculo, não uma nova
+importação** — e não altera o total sobre todo o histórico, altera as **datas**,
+que são o que decide a isenção por período de detenção de cada ano.
 
 **Nota importante sobre Portugal**: existe divergência de interpretação. Algumas fontes (incluindo a Lei n.º 24-D/2022 e interpretações de fiscalistas) indicam que permutas entre criptoativos **não são tributáveis** no momento da operação — o novo ativo herda o valor de aquisição do anterior, e a tributação ocorre apenas na conversão para moeda fiduciária (fiat). Outras interpretações, mais conservadoras, consideram cada swap um evento tributável.
 
@@ -119,7 +131,11 @@ Estas devem ser decompostas em SELL + BUY conforme descrito acima.
 
 ### Conversão de stablecoins (BTC→USDT, ETH→USDC)
 
-Mesma lógica: converter para uma stablecoin é uma venda do criptoativo original. O USDT/USDC recebido tem custo de aquisição = valor EUR no momento da conversão.
+Mesma lógica, sob a mesma configuração: com `swap_realizes = True` converter para
+uma stablecoin é uma alienação do criptoativo original, e a stablecoin recebida
+tem custo de aquisição = o seu valor em EUR no momento da conversão. Comprar uma
+stablecoin **com moeda fiduciária** não é uma permuta: é uma aquisição, e
+vendê-la de volta é uma alienação cujo resultado é a variação da taxa de câmbio.
 
 ### Conversão de restos (pequenos saldos → BNB)
 
@@ -127,7 +143,7 @@ A Binance permite converter pequenos saldos residuais para BNB. Tecnicamente tri
 
 ### Tokens wrapped (ETH→WETH)
 
-ETH→WETH pode não ser um evento tributável (mesmo ativo subjacente). Consultar o seu consultor fiscal e documentar a decisão.
+ETH→WETH pode não ser um evento tributável (mesmo ativo subjacente). Consultar um profissional fiscal local e documentar a decisão.
 
 ---
 
@@ -140,7 +156,14 @@ Após importar transações cripto-para-cripto, o FIFO processa-as automaticamen
 3. A mais/menos-valia da VENDA é calculada normalmente
 4. O período de detenção é o do lote BTC consumido, não a duração do swap
 
-Se o BTC vendido no swap provém de uma compra com mais de 365 dias, a mais-valia é **isenta** em Portugal — mesmo que convertido imediatamente em ETH.
+Os quatro passos acima descrevem `swap_realizes = True`. Com `False`, os passos 1
+e 2 continuam a acontecer — lotes consumidos, lote criado — mas o passo 3 não:
+nada é realizado, e o novo lote leva a data e o custo de aquisição do **lote
+consumido** em vez dos da permuta.
+
+Com `True`, BTC vendido numa permuta mais de 365 dias após a sua compra produz
+uma mais-valia que Portugal isenta — mesmo que convertido imediatamente em ETH —
+sujeito à assunção indicada no início deste guia.
 
 ---
 
