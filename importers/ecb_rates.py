@@ -18,13 +18,26 @@ FETCH_START = '1999-01-04'  # EUR introduction
 
 
 class ECBRates:
-    def __init__(self, csv_path='data/eurusd.csv', auto_fetch=True):
+    def __init__(self, csv_path='data/eurusd.csv', auto_fetch=None):
         """Load ECB exchange rates, fetching from Frankfurter API if needed.
 
         Args:
             csv_path: Path to the CSV cache file.
-            auto_fetch: If True, fetch missing/stale rates from Frankfurter API.
+            auto_fetch: If True, fetch missing/stale rates from Frankfurter API
+                and REWRITE the cache file. Default: True, unless the
+                environment says otherwise with `ECB_AUTO_FETCH=0`.
+
+                That switch exists because fetching mutates an input. The
+                rebuild chain (`import_all_data.py`) reads `data/eurusd.csv` as
+                a **source file**, not as a cache it may refresh: a rebuild that
+                rewrote it would change one of the few files that cannot be
+                regenerated, and would make the result depend on the calendar
+                and on network reachability instead of on `data/` alone. So the
+                orchestrator sets `ECB_AUTO_FETCH=0` for every step. An
+                explicit argument still wins over the environment.
         """
+        if auto_fetch is None:
+            auto_fetch = os.environ.get('ECB_AUTO_FETCH', '1') != '0'
         self.csv_path = csv_path
         self._warn_count = 0
 
@@ -103,8 +116,16 @@ class ECBRates:
                     for row in reader:
                         existing[row['DATE']] = row[
                             'US dollar/Euro (EXR.D.USD.EUR.SP00.A)']
-            except Exception:
-                pass
+            except Exception as e:
+                # NON silenzioso: la riga dopo sovrascrive il file, quindi se la
+                # rilettura dei tassi esistenti fallisce si perde la storia e si
+                # tiene solo quello appena scaricato. Chi guarda deve saperlo.
+                print(f'  ⚠️  Could not read existing rates from '
+                      f'{self.csv_path} ({type(e).__name__}: {e}). The file is '
+                      'about to be rewritten with the freshly fetched rates '
+                      'ONLY — the previous history would be lost. Aborting the '
+                      'save instead.')
+                raise
 
         # Merge: new rates override existing
         for d, rate in rates_dict.items():

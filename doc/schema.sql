@@ -22,7 +22,14 @@ CREATE TABLE IF NOT EXISTS transactions (
     source TEXT,              -- CSV filename or 'web_manual_entry'
     imported_at TEXT,         -- ISO timestamp of import
     record_hash TEXT,         -- SHA256 for dedup and audit
-    swap_group_id TEXT                             -- both legs of one swap share this
+    swap_group_id TEXT,                            -- both legs of one swap share this
+    -- Vestigial, declared here because the live database has it on all rows
+    -- (constant 'CSV') and a rebuild that dropped it would lose a column that
+    -- is there. No code reads it: `source` carries the real provenance. Kept so
+    -- that `verify_rebuild.py` can prove rebuild ≡ live instead of waving a
+    -- populated column through; removal is a deliberate decision with a
+    -- migration, see doc/TODO.md.
+    import_source TEXT DEFAULT 'CSV'
 );
 
 -- FIFO lots table

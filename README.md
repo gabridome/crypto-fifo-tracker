@@ -59,6 +59,30 @@ python3 web/app.py
 # Open http://127.0.0.1:5002
 ```
 
+### Rebuild the database from the exports alone
+
+The database is not a precious artefact: it is derivable from the CSV exports in
+`data/`. Two commands, and the second one proves it:
+
+```bash
+# rebuild into a NEW database (26 steps: 22 exports, 3 non-BTC leg readers,
+# the swap link, then FIFO). --dry-run prints the plan without writing.
+python3 import_all_data.py --db /tmp/rebuilt.db
+
+# prove it says the same figures as the one you trust — annex included
+python3 verify_rebuild.py data/crypto_fifo.db /tmp/rebuilt.db --annex 2024
+```
+
+`verify_rebuild.py` exits 0 only when everything comparable matches: every
+transaction, every FIFO lot, every sale match, the tax aggregates of every year,
+and — with `--annex` — the IRS annex cell by cell. It accepts exactly two
+documented differences and refuses every other one.
+
+Measured on the real database (2026-10-19): the whole chain takes about ten
+seconds and reproduces every tax year to the cent. The proof, the two known
+differences and the one trap (exchange labels live inside the standard-shape
+CSVs) are in **[doc/rebuild.md](doc/rebuild.md)**.
+
 ### Enforcement layer (for contributors)
 
 After `git clone`, run `./scripts/setup-enforcement.sh` once. It installs:
@@ -191,6 +215,7 @@ See `CONTRIBUTING.md` for details on adding a new country or exchange.
 | [Complete guide](doc/en/crypto_fifo_guide.md) | Import, FIFO, reports, verification queries |
 | [Crypto-to-crypto](doc/en/crypto_to_crypto_guide.md) | Handling swaps (BTC→ETH, stablecoins) |
 | [Audit trail](doc/en/audit_trail_guide.md) | Compliance, backups, data retention |
+| [Rebuild from `data/`](doc/rebuild.md) | Rebuild the database from the exports and prove it matches (IT) |
 | [macOS setup](doc/en/macos_sqlite_setup_guide.md) | Setup from scratch on macOS |
 | [Exchange CSV downloads](doc/en/howto_obtain_logs.md) | How to download data from each exchange |
 | [Portuguese tax resources](doc/pt/recursos_fiscais.md) | Legislation, AT guides, deadlines |
