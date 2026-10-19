@@ -362,6 +362,50 @@ queste voci la usi, invece di riscrivere la query.
 
 ## Operativo / Infrastruttura
 
+- [ ] **`data/` non è versionata né replicata fuori dal Mac** — e dopo la prova
+  del 2026-10-19 è il punto debole principale della catena. La ricostruzione dal
+  solo `data/` ora è un comando (`import_all_data.py`) ed è **dimostrata**
+  identica al database vivo, allegato IRS compreso (`doc/rebuild.md`): la ricetta
+  è al sicuro nel repo. Gli **ingredienti** no — `.gitignore:6` esclude tutta
+  `data/`, quindi i 25 export e i due file di tassi esistono su questo Mac e in
+  `data/backups`, e in nessun altro posto. Il repo è pubblico, quindi non è lì
+  che vanno: serve un backup cifrato fuori dalla macchina. Finché manca, «posso
+  ricostruirlo» è vero solo se la cartella sopravvive.
+- [ ] **`--data-dir` di `import_all_data.py` non redirige le cache dei tassi** —
+  gli importer leggono `eurusd.csv` e `crypto_prices.csv` da `<repo>/data/` per
+  percorso fisso (`importers/import_standard_csv.py:57,68` e gli altri
+  importer USD), mentre `missing_inputs()` li cerca nella cartella passata.
+  Conseguenza: una ricostruzione «in una cartella isolata» usa comunque i tassi
+  del repo, e se `data/` non c'è più gli import USD muoiono a catena iniziata —
+  dopo che il preflight ha detto «tutti presenti». Dal 2026-10-19 lo script
+  **lo dichiara a schermo** quando `--data-dir` punta altrove, che è una toppa
+  onesta e non una chiusura. Chiusura vera: passare la cartella dati agli
+  importer come si fa già con `FIFO_DB` (una variabile d'ambiente, non un
+  argomento in più), oppure togliere `--data-dir` e dire che la ricostruzione
+  legge solo `data/`.
+- [ ] **Tre colonne vestigiali in `transactions`** — `order_id`, `trade_pair`,
+  `import_batch_id`: presenti nella tabella viva, **interamente NULL**
+  (verificato 2026-10-19), e nessuna riga di codice le legge. `doc/schema.sql`
+  non le dichiara, quindi un database ricostruito non le ha: `verify_rebuild.py`
+  lo riporta come differenza spiegata, e boccerebbe se una di loro contenesse
+  dati. Da chiudere con una decisione, non con la deriva: o si dichiarano nello
+  schema (come si è fatto per `import_source`, che è vestigiale ma popolata), o
+  si rimuovono dalla tabella viva con una migrazione idempotente e un backup.
+  Fino ad allora lo schema versionato e il database vivo restano diversi di tre
+  colonne, e chi legge lo schema non lo sa.
+- [ ] **Lo specchio di `/status` segnala un falso disallineamento su Binance** —
+  ✗ rosso permanente, e nessuna delle due cause è un difetto dei dati
+  (misurato 2026-10-19). Primo: `binance_trade_history_2024.csv` e
+  `binance_trade_history_all.csv` sono **lo stesso export** (stesse righe, solo
+  in ordine diverso — verificato riga per riga), quindi il lato CSV le somma
+  entrambe mentre il database ne tiene una copia: il delta è esattamente una
+  copia. Secondo: i BUY in più nel database sono le **gambe derivate** create
+  dalle fasi 2-3 della catena, che nell'export di Binance non esistono come riga
+  d'acquisto.
+  Lo specchio confronta un export con un database che ora contiene anche righe
+  derivate, e non lo sa. Chiusura naturale: escludere dal confronto le righe il
+  cui `source` porta il suffisso `#non-btc`, e dire nella pagina quando due file
+  della stessa fonte sono copie dello stesso export invece di sommarli.
 - [ ] **Niente rileva un lotto orfano** — un `fifo_lots.purchase_transaction_id`
   che non ha più una riga in `transactions`, per esempio dopo una transazione
   cancellata a calcolo già fatto o un restore parziale. La `FOREIGN KEY` è

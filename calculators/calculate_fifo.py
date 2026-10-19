@@ -85,8 +85,13 @@ def main():
     
     # Calculate FIFO for each
     print(f"\n[3/4] Calculating FIFO lots...")
-    print("⚠️  This may take 10-20 minutes for large datasets (70k+ transactions)")
-    print("☕ Grab a coffee and let it run...\n")
+    # Measured on the real database on 2026-10-19: the whole calculation, every
+    # cryptocurrency included, took **under a second**. The line that used to
+    # stand here promised "10-20 minutes for large datasets (70k+
+    # transactions)" and was wrong by three orders of magnitude — wrong enough
+    # to make a reader plan a rebuild as an afternoon's work instead of a
+    # command they can run while reading the output.
+    print("(usually under a second, whatever the size — measured 2026-10-19)\n")
     
     start_time = time.time()
     failures = []
